@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (c) 2026 OShell contributors
+
+import AppKit
+import OShellCore
+
+enum SessionFeatureTest {
+    static func run(_ controller: WorkspaceController) {
+        guard let path = ProcessInfo.processInfo.environment["OSHELL_SESSION_TEST_ROOT"] else { return }
+        let root = URL(fileURLWithPath: path)
+        do {
+            let data = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("fixture.json"))) as! [String: Any]
+            func port(_ name: String) -> Int { data[name] as! Int }
+            let password = data["password"] as! String, master = data["master"] as! String, proxyPassword = data["proxyPassword"] as! String
+            var profile = SessionProfile(name: "旧版 SSH · 隧道 · 代理测试", group: "测试/旧版服务器", host: "127.0.0.1", port: port("legacyPort"), username: data["user"] as! String)
+            profile.activeHostProbe = true // This fixture explicitly tests the optional legacy probe.
+            profile.legacySSH = true; profile.keepAlive.interval = 1; profile.keepAlive.idleEnabled = true; profile.keepAlive.idleInterval = 3; profile.keepAlive.idleText = "OSHELL_IDLE\\n"
+            profile.proxy.kind = .socks5; profile.proxy.host = "127.0.0.1"; profile.proxy.port = port("proxyPort"); profile.proxy.username = "proxy-user"
+            profile.encryptedPassword = try SessionCipher.encrypt(password, master: master, profile: profile, identity: SSHIdentity(host: profile.host, user: profile.username, port: profile.port))
+            let proxy = profile.proxy
+            profile.proxy.encryptedPassword = try SessionCipher.encrypt(proxyPassword, master: master, profile: proxy.credentialProfile, identity: SSHIdentity(host: proxy.host, user: proxy.username, port: proxy.port))
+            for (kind, field) in [(TunnelKind.local, "localPort"), (.remote, "remotePort"), (.dynamic, "dynamicPort")] {
+                var rule = TunnelRule(); rule.kind = kind; rule.listenPort = port(field); rule.destinationHost = "127.0.0.1"; rule.destinationPort = port("echoPort"); profile.tunnels.append(rule)
+            }
+            controller.configuration.profiles = [profile]; controller.configuration.directories = ["测试/空目录"]
+            try controller.store.save(controller.configuration)
+            try Data(contentsOf: root.appendingPathComponent("known_hosts")).write(to: controller.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"))
+            PasswordVault.shared.unlockForTesting(master)
+            // Control: secure defaults must not silently negotiate obsolete algorithms.
+            var control = profile; control.legacySSH = false; control.tunnels = []; control.proxy = ProxySettings(); control.encryptedPassword = nil
+            controller.open(control); let controlPane = controller.selectedTab!.activePane
+            controller.open(profile); let originalTab = controller.selectedTab!, pane = originalTab.activePane
+            try pane.startLogging(to: root.appendingPathComponent("session.log"))
+            let deadline = Date().addingTimeInterval(35)
+            var duplicated = false, results = [String: Bool]()
+            func finish() {
+                pane.stopLogging()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    let config = String(decoding: (try? Data(contentsOf: controller.store.url)) ?? Data(), as: UTF8.self)
+                    let log = String(decoding: (try? Data(contentsOf: root.appendingPathComponent("session.log"))) ?? Data(), as: UTF8.self)
+                    results["credentialsRemainEncrypted"] = ![password, proxyPassword, master].contains(where: { config.contains($0) || log.contains($0) })
+                    results["secureDefaultsRejectLegacy"] = controlPane.ended
+                    results["automaticHostname"] = pane.title == "centos6-fixture · 10.6.0.6"
+                    results["sessionReady"] = pane.sessionReady
+                    let report: [String: Any] = ["passed": results.values.allSatisfy { $0 }, "checks": results]
+                    try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: root.appendingPathComponent("client-result.json"))
+                    controller.shutdown(); PasswordVault.shared.lock(); NSApp.terminate(nil)
+                }
+            }
+            func check() {
+                let text = String(decoding: pane.terminal.getTerminal().getBufferAsData(), as: UTF8.self)
+                if text.contains("OSHELL_SESSION_READY") && !duplicated {
+                    duplicated = true
+                    // Reusing local listen ports in a duplicate is correctly rejected
+                    // by OpenSSH; use a session without forwards for the clone check.
+                    var cloneProfile = profile; cloneProfile.tunnels = []; cloneProfile.keepAlive.idleEnabled = false
+                    controller.open(cloneProfile); let source = controller.selectedTab!
+                    controller.duplicateTab(source)
+                    results["duplicateCreatesIndependentPTY"] = source.activePane.terminal.process.shellPid != controller.selectedTab!.activePane.terminal.process.shellPid && source.activePane.profile == controller.selectedTab!.activePane.profile
+                    try? Data("ready".utf8).write(to: root.appendingPathComponent("client-ready"))
+                }
+                let network = (try? JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("tunnel-result.json")))) as? [String: Bool]
+                let server = (try? JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("server-result.json")))) as? [String: Int]
+                if let network, text.contains("IDLE_RECEIVED"), (server?["aliveMessages"] ?? 0) > 0 {
+                    results.merge(network) { _, b in b }; results["idleStringAfterLogin"] = true; results["sshAliveReceived"] = true
+                    results["authenticatedProxy"] = (server?["proxyAuthentications"] ?? 0) >= 1
+                    finish()
+                } else if Date() > deadline || pane.ended { results["completedBeforeTimeout"] = false; finish() }
+                else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: check) }
+            }
+            check()
+        } catch { print(error); controller.shutdown(); NSApp.terminate(nil) }
+    }
+}

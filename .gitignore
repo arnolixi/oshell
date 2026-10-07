@@ -1,0 +1,56 @@
+work/
+dist/
+.build/
+.swiftpm/
+.DS_Store
+
+.release-private/
+validation/*
+!validation/.gitkeep
+PROJECT_STATE.md
+__pycache__/
+*.pyc
+VALIDATION.md
+
+# Workstation state and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+configuration.json
+local-credential-key.json
+known_hosts
+*.log
+*.dSYM/
+# Local design review output
+Assets/Brand/Preview.png
+Assets/Brand/Size-review.png
+Assets/Brand/Archive/
+Assets/Brand/Session-concepts/
+
+# Session exports and authentication material
+*.oshell.json
+*.env
+*.env.*
+!.env.example
+!*.env.example
+.ssh/
+.aws/
+.netrc
+.npmrc
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# Editor and assistant workstation state
+.codex/
+.agents/
+.idea/
+.vscode/
+xcuserdata/
+*.xcuserstate
+*.code-workspace

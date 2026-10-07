@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<title>OShell — O-shaped multi-session terminal, graphite and flame-orange</title>
+<defs>
+<linearGradient id="tile" x2=".3" y2="1"><stop stop-color="#343C47"/><stop offset="1" stop-color="#151B23"/></linearGradient>
+<linearGradient id="rim" x2=".3" y2="1"><stop stop-color="#FF9B56"/><stop offset="1" stop-color="#F14A3D"/></linearGradient>
+<linearGradient id="screen" x2="0" y2="1"><stop stop-color="#252D39"/><stop offset="1" stop-color="#101720"/></linearGradient>
+</defs>
+<rect x="104" y="104" width="816" height="816" rx="184" fill="url(#tile)"/>
+<rect x="296" y="186" width="530" height="548" rx="180" fill="#556171"/>
+<rect x="321" y="211" width="480" height="498" rx="155" fill="#242C36"/>
+<rect x="258" y="224" width="530" height="548" rx="180" fill="#8894A4"/>
+<rect x="283" y="249" width="480" height="498" rx="155" fill="#242C36"/>
+<rect x="212" y="242" width="560" height="588" rx="192" fill="url(#rim)"/>
+<rect x="273" y="303" width="438" height="466" rx="132" fill="url(#screen)"/>
+<rect x="335" y="334" width="112" height="13" rx="6.5" fill="#FF8550"/>
+<path d="M471.5 340.5h57 M559.5 340.5h57" stroke="#788492" stroke-opacity=".7" stroke-width="13" stroke-linecap="round"/>
+<path d="M352 436 L448 526 L352 616" stroke="#F7F8FA" stroke-width="48" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<path d="M514 615 H622" stroke="#FF8550" stroke-width="48" stroke-linecap="round"/>
+</svg>

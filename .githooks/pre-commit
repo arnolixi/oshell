@@ -1,0 +1,6 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (c) 2026 OShell contributors
+set -eu
+repo_root="$(git rev-parse --show-toplevel)"
+exec python3 "$repo_root/scripts/check-public-source.py" --index

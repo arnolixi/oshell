@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.png -text
+*.icns -text
+*.gz -text
+*.zip -text
+Vendor/Sparkle/** -text

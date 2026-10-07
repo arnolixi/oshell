@@ -1,0 +1,1171 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (c) 2026 OShell contributors
+
+import Foundation
+import OShellCore
+
+private var failures = [String]()
+private func XCTAssertTrue(_ value: @autoclosure () -> Bool, file: StaticString = #file, line: UInt = #line) {
+    if !value() { failures.append("\(file):\(line): expected true") }
+}
+private func XCTAssertEqual<T: Equatable>(_ first: @autoclosure () throws -> T, _ second: @autoclosure () throws -> T, file: StaticString = #file, line: UInt = #line) {
+    do { if try first() != second() { failures.append("\(file):\(line): values differ") } }
+    catch { failures.append("\(file):\(line): \(error)") }
+}
+private func XCTAssertNil<T>(_ value: T?, file: StaticString = #file, line: UInt = #line) {
+    if value != nil { failures.append("\(file):\(line): expected nil") }
+}
+private func XCTAssertThrowsError<T>(_ value: @autoclosure () throws -> T, file: StaticString = #file, line: UInt = #line) {
+    do { _ = try value(); failures.append("\(file):\(line): expected error") } catch {}
+}
+
+final class CoreTests {
+    func testUpdateSource() throws {
+        let source = try UpdateSource("https://github.com/example-org/OShell.git")
+        XCTAssertEqual(source.repository, "example-org/OShell")
+        XCTAssertEqual(source.feedURL(for: .arm64).absoluteString, "https://github.com/example-org/OShell/releases/latest/download/OShell-macOS13-arm64.xml")
+        XCTAssertEqual(UpdateFlavor.select(appleSilicon: true, majorOS: 13), .arm64)
+        XCTAssertEqual(UpdateFlavor.select(appleSilicon: true, majorOS: 12), .intel)
+        XCTAssertEqual(UpdateFlavor.select(appleSilicon: false, majorOS: 26), .intel)
+        for invalid in ["", "../repo", "owner/..", "owner/repo/releases", "https://github.com.evil.test/a/b", "http://github.com/a/b", "https://token@github.com/a/b", "https://github.com/a/b?token=secret", "a/b#c"] { XCTAssertThrowsError(try UpdateSource(invalid)) }
+        let url = URL(string: "https://github.com/example-org/OShell/releases/download/v0.2.42/OShell-0.2.42-macOS13-arm64-update.zip")!
+        XCTAssertTrue(source.acceptsArchive(url, flavor: .arm64))
+        XCTAssertTrue(source.acceptsArchive(URL(string: "https://github.com/EXAMPLE-ORG/oshell/releases/download/v1/OShell-1-macOS13-arm64-update.zip")!, flavor: .arm64))
+        XCTAssertTrue(!source.acceptsArchive(URL(string: "https://github.com/example-org/OShell/releases/download/../OShell-1-macOS13-arm64-update.zip")!, flavor: .arm64))
+        XCTAssertTrue(!source.acceptsArchive(url, flavor: .intel))
+        XCTAssertTrue(!source.acceptsArchive(URL(string: "https://github.com/another/repo/releases/download/v1/OShell-1-macOS13-arm64-update.zip")!, flavor: .arm64))
+        var prefs = Preferences(); prefs.updateRepository = source.repository; prefs.automaticUpdateChecks = true
+        let restored = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(prefs))
+        XCTAssertEqual(restored.updateRepository, source.repository); XCTAssertTrue(restored.automaticUpdateChecks)
+        let old = try JSONDecoder().decode(Preferences.self, from: Data("{}".utf8))
+        XCTAssertTrue(old.updateRepository.isEmpty && !old.automaticUpdateChecks)
+    }
+    func testMasterStartupProtection() throws {
+        let master = "startup-master-fixture", next = "changed-master-fixture"
+        let empty = Configuration(profiles: [])
+        XCTAssertTrue(!empty.hasMasterPassword)
+        let protected = try MasterPasswordProtection.enabling(empty, password: master, credentialKey: { _ in "unused" }).configuration
+        XCTAssertTrue(protected.hasMasterPassword)
+        try MasterPasswordProtection.verifyStartup(protected, password: master)
+        XCTAssertThrowsError(try MasterPasswordProtection.verifyStartup(protected, password: "wrong-password"))
+        let decoded = try JSONDecoder().decode(Configuration.self, from: JSONEncoder().encode(protected))
+        try MasterPasswordProtection.verifyStartup(decoded, password: master)
+        let rotated = try ConfigurationCredentials.rotate(decoded, oldMaster: master, newMaster: next)
+        try MasterPasswordProtection.verifyStartup(rotated.configuration, password: next)
+        XCTAssertThrowsError(try MasterPasswordProtection.verifyStartup(rotated.configuration, password: master))
+        var local = SessionProfile(name: "local", host: "192.0.2.9", username: "fixture")
+        let key = LocalCredentialKey(secret: Data(repeating: 7, count: 32).base64EncodedString())
+        var envelope = try SessionCipher.encrypt("fixture-credential", master: key.secret, profile: local, identity: SSHIdentity(host: local.host, user: local.username, port: local.port))
+        envelope.localKeyID = key.id; local.encryptedPassword = envelope
+        let migrated = try MasterPasswordProtection.enabling(Configuration(profiles: [local]), password: master, credentialKey: { _ in key.secret })
+        XCTAssertNil(migrated.configuration.profiles[0].encryptedPassword?.localKeyID)
+        XCTAssertEqual(try SessionCipher.decrypt(migrated.configuration.profiles[0].encryptedPassword!, master: master, profile: local), "fixture-credential")
+        XCTAssertEqual(migrated.replacements[envelope.ciphertext], migrated.configuration.profiles[0].encryptedPassword)
+        XCTAssertThrowsError(try MasterPasswordProtection.enabling(Configuration(profiles: [local]), password: master, credentialKey: { _ in "wrong-key" }))
+        var legacy = migrated.configuration; legacy.masterPasswordVerifier = nil
+        XCTAssertTrue(legacy.hasMasterPassword)
+        try MasterPasswordProtection.verifyStartup(legacy, password: master)
+        XCTAssertThrowsError(try MasterPasswordProtection.enabling(legacy, password: next, credentialKey: { _ in "unused" }))
+        let upgraded = try MasterPasswordProtection.enabling(legacy, password: master, credentialKey: { _ in "unused" }).configuration
+        XCTAssertTrue(upgraded.masterPasswordVerifier != nil)
+        XCTAssertEqual(upgraded.profiles, legacy.profiles)
+    }
+    func testLocalCredentialKeyStorage() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("oshell-local-key-test-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalCredentialStore(directory: root), key = try store.loadOrCreate()
+        XCTAssertEqual(Data(base64Encoded: key.secret)?.count, 32)
+        XCTAssertEqual(try LocalCredentialStore(directory: root).loadOrCreate(), key)
+        let original = try Data(contentsOf: store.url)
+        let attributes = try FileManager.default.attributesOfItem(atPath: store.url.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        var profile = SessionProfile(name: "本机保存", host: "192.0.2.1", username: "ops")
+        var envelope = try SessionCipher.encrypt("local-credential-test", master: key.secret, profile: profile, identity: SSHIdentity(host: profile.host, user: profile.username, port: profile.port))
+        envelope.localKeyID = key.id; profile.encryptedPassword = envelope
+        let encodedProfile = try JSONEncoder().encode(profile)
+        XCTAssertTrue(!String(decoding: encodedProfile, as: UTF8.self).contains("local-credential-test"))
+        XCTAssertThrowsError(try store.load(expectedID: UUID()))
+        _ = chmod(store.url.path, 0o644); XCTAssertThrowsError(try store.load()); _ = chmod(store.url.path, 0o600)
+        try FileManager.default.removeItem(at: store.url)
+        XCTAssertThrowsError(try store.keyForSaving(knownProfiles: [profile]))
+        XCTAssertTrue(!FileManager.default.fileExists(atPath: store.url.path))
+        try PrivateFile.write(Data("broken-key".utf8), to: store.url)
+        XCTAssertThrowsError(try store.loadOrCreate()); XCTAssertEqual(try Data(contentsOf: store.url), Data("broken-key".utf8))
+        try FileManager.default.removeItem(at: store.url)
+        let other = root.appendingPathComponent("other-key.json"); try PrivateFile.write(original, to: other)
+        try FileManager.default.createSymbolicLink(at: store.url, withDestinationURL: other)
+        XCTAssertThrowsError(try store.loadOrCreate()); XCTAssertEqual(try Data(contentsOf: other), original)
+        try FileManager.default.removeItem(at: store.url); _ = mkfifo(store.url.path, 0o600)
+        XCTAssertThrowsError(try store.load())
+    }
+    func testMixedLocalPasswordsAndArchives() throws {
+        let key = LocalCredentialKey(secret: Data(repeating: 17, count: 32).base64EncodedString())
+        let secondKey = LocalCredentialKey(secret: Data(repeating: 29, count: 32).base64EncodedString())
+        let master = "old-master-fixture", newMaster = "new-master-fixture"
+        func protected(_ profile: SessionProfile, _ secret: String, local: Bool) throws -> EncryptedPassword {
+            var result = try SessionCipher.encrypt(secret, master: local ? key.secret : master, profile: profile, identity: SSHIdentity(host: profile.host, user: profile.username, port: profile.port))
+            if local { result.localKeyID = key.id }; return result
+        }
+        var local = SessionProfile(name: "本机", host: "192.0.2.2", username: "ops")
+        local.encryptedPassword = try protected(local, "local-session", local: true)
+        local.proxy.kind = .socks5; local.proxy.host = "127.0.0.1"; local.proxy.username = "proxy"
+        local.proxy.encryptedPassword = try protected(local.proxy.credentialProfile, "local-proxy", local: true)
+        var legacy = SessionProfile(name: "主密码", host: "192.0.2.3", username: "ops")
+        legacy.encryptedPassword = try protected(legacy, "master-session", local: false)
+        let config = Configuration(profiles: [local, legacy])
+        XCTAssertEqual(ConfigurationCredentials.count(in: config), 1)
+        try ConfigurationCredentials.verify(config, master: master)
+        let rotated = try ConfigurationCredentials.rotate(config, oldMaster: master, newMaster: newMaster).configuration
+        XCTAssertEqual(rotated.profiles[0], local)
+        XCTAssertEqual(try SessionCipher.decrypt(rotated.profiles[1].encryptedPassword!, master: newMaster, profile: rotated.profiles[1]), "master-session")
+        let copy = try SessionDuplication.copy(local, among: config.profiles, credentialKey: { _ in key.secret })
+        XCTAssertEqual(copy.encryptedPassword?.localKeyID, key.id)
+        XCTAssertEqual(try SessionCipher.decrypt(copy.encryptedPassword!, master: key.secret, profile: copy), "local-session")
+        XCTAssertEqual(try SessionCipher.decrypt(copy.proxy.encryptedPassword!, master: key.secret, profile: copy.proxy.credentialProfile), "local-proxy")
+        let archive = SessionArchive(profiles: config.profiles, directories: [], includePasswords: true)
+        XCTAssertThrowsError(try archive.encoded())
+        let portable = try archive.protectedForExport(password: "export-only-fixture", credentialKey: { $0.encryptedPassword?.localKeyID == nil ? master : key.secret })
+        let encoded = try portable.encoded(), text = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(!text.contains("localKeyID") && !text.contains(key.secret) && !text.contains("local-session"))
+        let decoded = try SessionArchive.decode(encoded)
+        let imported = try decoded.merging(into: Configuration(profiles: [legacy]), includePasswords: true, sourceMaster: "export-only-fixture", destinationMaster: secondKey.secret, destinationLocalKeyID: secondKey.id)
+        XCTAssertEqual(imported.profiles[0], legacy); XCTAssertEqual(imported.profiles[1].encryptedPassword?.localKeyID, secondKey.id)
+        XCTAssertEqual(try SessionCipher.decrypt(imported.profiles[1].encryptedPassword!, master: secondKey.secret, profile: imported.profiles[1]), "local-session")
+        XCTAssertThrowsError(try decoded.merging(into: config, includePasswords: true, sourceMaster: "wrong-file-password", destinationMaster: secondKey.secret, destinationLocalKeyID: secondKey.id))
+        let stripped = SessionArchive(profiles: config.profiles, directories: [], includePasswords: false)
+        XCTAssertEqual(stripped.passwordCount, 0); _ = try stripped.encoded()
+    }
+    func testQuickSendScopePreference() throws {
+        for scope in QuickSendScope.allCases {
+            var prefs = Preferences(); prefs.quickSendScope = scope
+            let restored = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(prefs))
+            XCTAssertEqual(restored.quickSendScope, scope)
+        }
+        var data = try JSONSerialization.jsonObject(with: JSONEncoder().encode(Preferences())) as! [String: Any]
+        data.removeValue(forKey: "quickSendScope")
+        XCTAssertEqual(try JSONDecoder().decode(Preferences.self, from: JSONSerialization.data(withJSONObject: data)).quickSendScope, .current)
+        data["quickSendScope"] = 999
+        XCTAssertEqual(try JSONDecoder().decode(Preferences.self, from: JSONSerialization.data(withJSONObject: data)).quickSendScope, .current)
+    }
+    func testColorSchemesAndMigration() throws {
+        XCTAssertEqual(TerminalColorScheme.presets.count, 9)
+        XCTAssertEqual(Set(TerminalColorScheme.presets.map(\.id)).count, 9)
+        for scheme in TerminalColorScheme.presets { try scheme.validate(); XCTAssertTrue(scheme.foreground.lowercased() != scheme.background.lowercased()) }
+        var prefs = Preferences(); prefs.interfaceTheme = .dark; prefs.colorSchemeID = "solarized-light"
+        XCTAssertTrue(!prefs.darkTheme && !prefs.colorScheme.isDark)
+        var custom = prefs.colorScheme.editableCopy(); custom.name = "生产环境"; custom.background = "#102030"; prefs.customColorSchemes = [custom]; prefs.colorSchemeID = custom.id
+        let data = try JSONEncoder().encode(prefs), decoded = try JSONDecoder().decode(Preferences.self, from: data)
+        XCTAssertEqual(decoded.colorScheme, custom); XCTAssertEqual(decoded.interfaceTheme, .dark)
+        var old = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        for key in ["interfaceTheme", "colorSchemeID", "customColorSchemes"] { old.removeValue(forKey: key) }
+        old["darkTheme"] = false
+        let migrated = try JSONDecoder().decode(Preferences.self, from: JSONSerialization.data(withJSONObject: old))
+        XCTAssertEqual(migrated.colorSchemeID, "oshell-light"); XCTAssertEqual(migrated.interfaceTheme, .system)
+        var invalid = custom; invalid.ansi = ["#000000"]; XCTAssertThrowsError(try invalid.validate())
+        invalid = custom; invalid.background = "red"; XCTAssertThrowsError(try invalid.validate())
+        invalid = custom; invalid.name = "bad\nname"; XCTAssertThrowsError(try invalid.validate())
+        prefs.customColorSchemes += [custom, invalid, TerminalColorScheme.presets[0]]; prefs.clamp()
+        XCTAssertEqual(prefs.customColorSchemes.count, 1)
+        prefs.colorSchemeID = "unknown-id"; prefs.clamp(); XCTAssertEqual(prefs.colorSchemeID, "oshell-dark")
+    }
+    func testColorSchemeImport() throws {
+        let keys = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]
+        let xcs = "[测试配色]\r\nbackground=101820\r\ntext=e0e1e2\r\n" + keys.map { "\($0)=112233\r\n\($0)(bold)=aabbcc\r\n" }.joined() + "[Names]\r\ncount=1\r\nname0=测试配色\r\n"
+        for encoding in [String.Encoding.utf8, .utf16] {
+            let imported = try TerminalColorScheme.decodeImport(xcs.data(using: encoding)!)
+            XCTAssertEqual(imported.count, 1); XCTAssertEqual(imported[0].background, "#101820")
+            XCTAssertEqual(imported[0].ansi[1], "#112233"); XCTAssertEqual(imported[0].ansi[9], "#AABBCC")
+            XCTAssertTrue(imported[0].id.hasPrefix("custom-"))
+        }
+        let original = TerminalColorScheme.presets[2]
+        let imported = try TerminalColorScheme.decodeImport(JSONEncoder().encode(original))[0]
+        XCTAssertTrue(imported.id != original.id); XCTAssertEqual(imported.ansi, original.ansi)
+        XCTAssertThrowsError(try TerminalColorScheme.decodeImport(Data(repeating: 32, count: 65537)))
+        XCTAssertThrowsError(try TerminalColorScheme.decodeImport(Data("[bad]\nbackground=000000\ntext=ffffff".utf8)))
+        XCTAssertThrowsError(try TerminalColorScheme.decodeImport(Data("arbitrary invalid JSON".utf8)))
+    }
+    func testLiveIdleSettingsMerge() throws {
+        var startup = KeepAliveSettings(); startup.interval = 77; startup.maxMissed = 8; startup.tcp = false
+        var edited = KeepAliveSettings(); edited.enabled = false; edited.interval = 1; edited.tcp = true
+        edited.idleEnabled = true; edited.idleInterval = 2; edited.idleText = "echo alive\\r"
+        let merged = try startup.replacingIdle(with: edited)
+        XCTAssertTrue(merged.enabled && !merged.tcp); XCTAssertEqual(merged.interval, 77); XCTAssertEqual(merged.maxMissed, 8)
+        XCTAssertEqual(merged.idleInterval, 2); XCTAssertEqual(try merged.idleBytes(), Array("echo alive\r".utf8))
+        XCTAssertTrue(merged.idleEnabled && !startup.idleEnabled)
+        edited.idleInterval = 0; XCTAssertThrowsError(try startup.replacingIdle(with: edited))
+        edited.idleInterval = 1; edited.idleText = "\\q"; XCTAssertThrowsError(try startup.replacingIdle(with: edited))
+        edited.idleEnabled = false; let disabled = try startup.replacingIdle(with: edited); XCTAssertTrue(!disabled.idleEnabled)
+    }
+    func testShellIntegrationReport() throws {
+        func parse(_ value: String) -> RemoteHostIdentity? { RemoteHostIdentity.integrationReport(Array(value.utf8)[...]) }
+        XCTAssertEqual(parse("OShellHost=1;inner|10.2.3.4|")?.hostname, "inner")
+        XCTAssertEqual(parse("OShellHost=1;inner|2001:db8::1|")?.address, "2001:db8::1")
+        XCTAssertEqual(parse("OShellHost=1;inner||127.0.0.1 10.2.3.4/24")?.address, "10.2.3.4")
+        for invalid in ["inner|10.2.3.4|", "OShellHost=2;inner|10.2.3.4|", "OShellHost=1;bad host|10.2.3.4|", "OShellHost=1;inner|ip|extra|field", "OShellHost=1;" + String(repeating: "a", count: 5000)] { XCTAssertNil(parse(invalid)) }
+        var profile = SessionProfile(name: "集成", host: "192.0.2.1"); profile.activeHostProbe = true
+        let data = try JSONEncoder().encode(profile)
+        let decoded = try JSONDecoder().decode(SessionProfile.self, from: data)
+        XCTAssertTrue(decoded.activeHostProbe)
+        let copy = try SessionDuplication.copy(profile, among: [])
+        XCTAssertTrue(copy.activeHostProbe)
+        var old = try JSONSerialization.jsonObject(with: data) as! [String: Any]; old.removeValue(forKey: "activeHostProbe"); old["shellIntegrationOnly"] = false
+        let legacy = try JSONDecoder().decode(SessionProfile.self, from: JSONSerialization.data(withJSONObject: old))
+        XCTAssertTrue(!legacy.activeHostProbe)
+    }
+    func testSessionDefaults() throws {
+        var defaults = SessionDefaults(); defaults.sshPort = 2222; defaults.sshUsername = "ops"; defaults.identityFile = "~/.ssh/custom"
+        defaults.legacySSH = true; defaults.quickConnect = false; defaults.sshDirectory = "/srv"
+        defaults.ftpPort = 2121; defaults.ftpUsername = "files"; defaults.ftpDirectory = "/upload"
+        defaults.keepAlive.interval = 75; defaults.keepAlive.idleEnabled = true; defaults.keepAlive.idleText = "pwd\\n"
+        try defaults.validate()
+        let ssh = defaults.makeProfile(kind: .ssh, directory: "机房")
+        XCTAssertEqual(ssh.port, 2222); XCTAssertEqual(ssh.username, "ops"); XCTAssertEqual(ssh.group, "机房")
+        XCTAssertEqual(ssh.keepAlive, defaults.keepAlive); XCTAssertEqual(ssh.identityFile, "~/.ssh/custom")
+        XCTAssertTrue(ssh.legacySSH && !ssh.quickConnect && ssh.encryptedPassword == nil && ssh.host.isEmpty)
+        let sftp = defaults.makeProfile(kind: .sftp, directory: "")
+        XCTAssertEqual(sftp.keepAlive.interval, 75); XCTAssertTrue(!sftp.keepAlive.idleEnabled)
+        let ftp = defaults.makeProfile(kind: .ftp, directory: "")
+        XCTAssertEqual(ftp.port, 2121); XCTAssertEqual(ftp.username, "files"); XCTAssertEqual(ftp.initialDirectory, "/upload")
+        XCTAssertTrue(ftp.identityFile.isEmpty && !ftp.legacySSH)
+        var config = Configuration(profiles: [ssh]); config.sessionDefaults = defaults
+        let data = try JSONEncoder().encode(config)
+        XCTAssertEqual(try JSONDecoder().decode(Configuration.self, from: data).sessionDefaults, defaults)
+        var old = try JSONSerialization.jsonObject(with: data) as! [String: Any]; old.removeValue(forKey: "sessionDefaults")
+        XCTAssertEqual(try JSONDecoder().decode(Configuration.self, from: JSONSerialization.data(withJSONObject: old)).sessionDefaults, SessionDefaults())
+        config.sessionDefaults.keepAlive.interval = 90
+        XCTAssertEqual(config.profiles[0].keepAlive.interval, 75)
+        var invalid = defaults; invalid.sshPort = 0; XCTAssertThrowsError(try invalid.validate())
+        invalid = defaults; invalid.keepAlive.interval = 0; XCTAssertThrowsError(try invalid.validate())
+        invalid = defaults; invalid.keepAlive.idleText = "\\q"; XCTAssertThrowsError(try invalid.validate())
+    }
+    func testSessionDuplication() throws {
+        let master = "copy-fixture-master"
+        var source = SessionProfile(name: "复制源", group: "生产/机房", host: "192.0.2.8", username: "ops", identityFile: "~/.ssh/ops")
+        source.keepAlive.interval = 85; source.legacySSH = true; source.quickConnect = false; source.initialDirectory = "/srv"
+        var tunnel = TunnelRule(); tunnel.listenPort = 9999; source.tunnels = [tunnel]
+        source.proxy.kind = .socks5; source.proxy.host = "127.0.0.1"; source.proxy.username = "proxy-user"
+        source.encryptedPassword = try SessionCipher.encrypt("session-fixture", master: master, profile: source, identity: SSHIdentity(host: source.host, user: source.username, port: source.port))
+        let proxy = source.proxy.credentialProfile
+        source.proxy.encryptedPassword = try SessionCipher.encrypt("proxy-fixture", master: master, profile: proxy, identity: SSHIdentity(host: proxy.host, user: proxy.username, port: proxy.port))
+        let original = source
+        let copy = try SessionDuplication.copy(source, among: [source], master: master)
+        XCTAssertTrue(copy.id != source.id && copy.proxy.id != source.proxy.id && copy.tunnels[0].id != source.tunnels[0].id)
+        XCTAssertEqual(copy.name, "复制源 - 副本"); XCTAssertEqual(copy.group, source.group)
+        XCTAssertEqual(copy.keepAlive, source.keepAlive); XCTAssertEqual(copy.identityFile, source.identityFile)
+        XCTAssertEqual(copy.tunnels[0].listenPort, 9999); XCTAssertTrue(copy.legacySSH && !copy.quickConnect)
+        XCTAssertEqual(copy.proxy.host, source.proxy.host); XCTAssertEqual(copy.initialDirectory, "/srv")
+        XCTAssertEqual(try SessionCipher.decrypt(copy.encryptedPassword!, master: master, profile: copy), "session-fixture")
+        XCTAssertEqual(try SessionCipher.decrypt(copy.proxy.encryptedPassword!, master: master, profile: copy.proxy.credentialProfile), "proxy-fixture")
+        XCTAssertThrowsError(try SessionCipher.decrypt(copy.encryptedPassword!, master: master, profile: source))
+        XCTAssertThrowsError(try SessionDuplication.copy(source, among: [], master: "wrong"))
+        XCTAssertThrowsError(try SessionDuplication.copy(source, among: []))
+        XCTAssertEqual(source, original)
+        XCTAssertEqual(SessionDuplication.name(for: source, among: [source, copy]), "复制源 - 副本 2")
+        for kind in [SessionKind.sftp, .ftp] {
+            var file = SessionProfile(name: "文件", group: "文件", kind: kind, host: "192.0.2.2", port: kind == .ftp ? 21 : 22, username: "user")
+            file.initialDirectory = "/files"
+            let copied = try SessionDuplication.copy(file, among: [])
+            XCTAssertEqual(copied.kind, kind); XCTAssertEqual(copied.initialDirectory, "/files"); XCTAssertTrue(copied.id != file.id)
+        }
+        enum Cancelled: Error { case cancelled }
+        XCTAssertThrowsError(try SessionDuplication.copy(source, among: [], master: master, checkCancellation: { throw Cancelled.cancelled }))
+    }
+    func testSessionLinksPersistence() throws {
+        let first = SessionProfile(name: "开发", group: "服务器", host: "192.0.2.1", username: "ops")
+        let second = SessionProfile(name: "数据库", host: "192.0.2.2")
+        var config = Configuration(profiles: [first, second])
+        config.sessionLinks.add(profileID: first.id, name: "开发快捷链接")
+        config.sessionLinks.add(profileID: first.id, name: "开发重命名")
+        XCTAssertEqual(config.sessionLinks.entries.count, 1)
+        config.sessionLinks.add(profileID: second.id, name: "数据库", folder: "运维/生产")
+        config.sessionLinks.folders.append("空文件夹")
+        XCTAssertEqual(Set(config.sessionLinks.allFolders), Set(["运维", "运维/生产", "空文件夹"]))
+        config.sessionLinks.visible = false
+        let data = try JSONEncoder().encode(config)
+        let copy = try JSONDecoder().decode(Configuration.self, from: data)
+        XCTAssertEqual(copy.sessionLinks.entries, config.sessionLinks.entries)
+        XCTAssertTrue(!copy.sessionLinks.visible)
+        var old = try JSONSerialization.jsonObject(with: data) as! [String: Any]; old.removeValue(forKey: "sessionLinks")
+        let migrated = try JSONDecoder().decode(Configuration.self, from: JSONSerialization.data(withJSONObject: old))
+        XCTAssertTrue(migrated.sessionLinks.entries.isEmpty && migrated.sessionLinks.visible)
+        try config.sessionLinks.renameFolder("运维", to: "机房")
+        XCTAssertEqual(config.sessionLinks.entries.last?.folder, "机房/生产")
+        XCTAssertThrowsError(try config.sessionLinks.renameFolder("机房", to: "机房/嵌套"))
+        XCTAssertThrowsError(try config.sessionLinks.renameFolder("机房", to: "空文件夹"))
+        config.sessionLinks.removeFolder("机房")
+        XCTAssertEqual(config.sessionLinks.entries.count, 1)
+        XCTAssertEqual(config.profiles, [first, second])
+        config.sessionLinks.entries.append(SessionLink(profileID: UUID(), name: "失效引用"))
+        config.sessionLinks.normalize(profiles: [second])
+        XCTAssertTrue(config.sessionLinks.entries.isEmpty)
+        XCTAssertTrue(config.sessionLinks.allFolders.contains("空文件夹"))
+        let fields = try JSONSerialization.jsonObject(with: JSONEncoder().encode(SessionLink(profileID: first.id, name: "链接"))) as! [String: Any]
+        XCTAssertEqual(Set(fields.keys), Set(["id", "profileID", "name", "folder"]))
+    }
+    func testZmodemProgressCounters() {
+        let stream = Data("Receiving: 中文 空格.bin\r\nBytes received: 1024/ 4096 BPS:512 ETA 00:06  \rBytes received: 4096/4096 BPS:900 \r\nTransfer complete\n".utf8)
+        for split in 0...stream.count {
+            var parser = ZmodemProgressParser()
+            let updates = parser.consume(stream.prefix(split)) + parser.consume(stream.suffix(stream.count - split), end: true)
+            XCTAssertEqual(updates.count, 3)
+            XCTAssertEqual(updates.last?.filename, "中文 空格.bin")
+            XCTAssertEqual(updates.last?.bytes, 4096); XCTAssertEqual(updates.last?.fraction, 1)
+            XCTAssertEqual(updates.dropFirst().first?.bytesPerSecond, 512)
+            XCTAssertEqual(updates.dropFirst().first?.fraction, 0.25)
+        }
+        var parser = ZmodemProgressParser(uploadSizes: ["a": 2048])
+        var updates = [ZmodemProgress]()
+        for byte in Data("Sending: a\nBytes Sent:1024/2048 BPS:123 \rBytes Sent:2048 BPS:400\nSending: empty\nBytes Sent:0/0 BPS:0\n".utf8) {
+            updates += parser.consume(Data([byte]))
+        }
+        XCTAssertEqual(updates[0].total, 2048); XCTAssertEqual(updates[2].total, 2048)
+        XCTAssertEqual(updates[2].fraction, 1)
+        XCTAssertNil(updates[3].total); XCTAssertEqual(updates[3].bytesPerSecond, 0)
+        XCTAssertEqual(updates.last?.fraction, 1)
+        XCTAssertTrue(parser.consume(Data("ignored diagnostic BPS:900\nBytes Sent:bad BPS:1\n".utf8)).isEmpty)
+        _ = parser.consume(Data(repeating: 65, count: 20000))
+        XCTAssertTrue(parser.consume(Data("Bytes Sent:1/2 BPS:1\n".utf8)).isEmpty)
+        let final = parser.consume(Data("Receiving: unknown\nBytes received: 99 BPS:42".utf8), end: true)
+        XCTAssertNil(final.last?.total); XCTAssertEqual(final.last?.bytesPerSecond, 42)
+        let retry = parser.consume(Data("Bytes received: 9/10 BPS:3\rBytes received: 4/10 BPS:1\r".utf8))
+        XCTAssertEqual(retry.last?.fraction, 0.4)
+    }
+    func testSessionMetadataSearch() {
+        let profile = SessionProfile(name: "生产 Café", group: "机房/华东", host: "192.0.2.15", port: 2222, username: "Root")
+        let metadata = SessionSearchQuery.metadata(profile)
+        XCTAssertTrue(SessionSearchQuery("cafe root 2222").matches(normalized: metadata))
+        XCTAssertTrue(SessionSearchQuery("华东 SSH 192.0.2").matches(normalized: metadata))
+        XCTAssertTrue(!SessionSearchQuery("root 3333").matches(normalized: metadata))
+        XCTAssertTrue(SessionSearchQuery("   ").isEmpty)
+        XCTAssertTrue(!SessionSearchQuery(String(repeating: "x", count: 4097)).isValid)
+        XCTAssertTrue(!SessionSearchQuery(String(repeating: "word ", count: 33)).isValid)
+        var protected = profile
+        protected.identityFile = "search-private-key-marker"
+        protected.encryptedPassword = EncryptedPassword(salt: "search-salt-marker", ciphertext: "search-cipher-marker", identity: SSHIdentity(host: "hidden-identity-host", user: "secret-user", port: 22))
+        let indexed = SessionSearchQuery.metadata(protected)
+        for query in ["search-private-key-marker", "search-cipher-marker", "secret-user", "search-salt-marker"] {
+            XCTAssertTrue(!SessionSearchQuery(query).matches(normalized: indexed))
+        }
+    }
+    func testLegacyClientAndFileIO() throws {
+        XCTAssertTrue(OpenSSHCapabilities(version: "OpenSSH_7.6p1, LibreSSL").needsLegacyAskpass)
+        XCTAssertTrue(!OpenSSHCapabilities(version: "OpenSSH_8.4p1").needsLegacyAskpass)
+        XCTAssertTrue(!OpenSSHCapabilities(version: "OpenSSH_7.6p1").needsSCPLegacyFlag)
+        XCTAssertTrue(OpenSSHCapabilities(version: "OpenSSH_9.0p1").needsSCPLegacyFlag)
+        let pipe = Pipe(), data = Data("compatibility pipe test".utf8)
+        try pipe.fileHandleForWriting.oshellWrite(contentsOf: data); try pipe.fileHandleForWriting.oshellClose()
+        XCTAssertEqual(try pipe.fileHandleForReading.oshellRead(upToCount: 1024), data)
+        XCTAssertNil(try pipe.fileHandleForReading.oshellRead(upToCount: 1024))
+        try pipe.fileHandleForReading.oshellClose()
+        let broken = Pipe(); try broken.fileHandleForReading.oshellClose()
+        XCTAssertThrowsError(try broken.fileHandleForWriting.oshellWrite(contentsOf: data))
+        try broken.fileHandleForWriting.oshellClose()
+    }
+    func testFileZillaLaunchContract() throws {
+        let password = "p:a@ss% 中文"
+        let xml = """
+        <FileZilla3><Servers><Folder expanded="1">usmsso<Server><Host>192.0.2.10</Host><Port>2222</Port><Protocol>1</Protocol><Logontype>1</Logontype><User>user#asset</User><Pass encoding="base64">\(Data(password.utf8).base64EncodedString())</Pass><Name>测试站点</Name></Server></Folder><Folder>folder<Server><Host>192.0.2.11</Host><Port>21</Port><Protocol>0</Protocol><Logontype>1</Logontype><User>ftpuser</User><Pass>plain&amp;secret</Pass><Name>slash/site</Name></Server></Folder></Servers></FileZilla3>
+        """
+        let request = try FileLaunchRequest.parse(["--site=0/usmsso/测试站点"], siteData: { _ in Data(xml.utf8) })
+        XCTAssertEqual(request.profile.kind, .sftp); XCTAssertEqual(request.profile.host, "192.0.2.10")
+        XCTAssertEqual(request.profile.port, 2222); XCTAssertEqual(request.password, password)
+        XCTAssertNil(request.profile.encryptedPassword)
+        let anonymous = try FileLaunchRequest.parse(["ftp://192.0.2.1/"])
+        XCTAssertEqual(anonymous.profile.username, "anonymous"); XCTAssertEqual(anonymous.password, "anonymous@")
+        let ftp = try FileLaunchRequest.site("0/folder/slash\\/site", data: Data(xml.utf8))
+        XCTAssertEqual(ftp.profile.kind, .ftp); XCTAssertEqual(ftp.password, "plain&secret")
+        let uri = try FileLaunchRequest.parse(["sftp://user%40realm:pa%3Ass%40word%25@[2001:db8::2]:2200/path%20with%20spaces"])
+        XCTAssertEqual(uri.profile.username, "user@realm"); XCTAssertEqual(uri.password, "pa:ss@word%")
+        XCTAssertEqual(uri.profile.initialDirectory, "/path with spaces"); XCTAssertEqual(uri.profile.port, 2200)
+        XCTAssertThrowsError(try FileLaunchRequest.site("0/usmsso/missing", data: Data(xml.utf8)))
+        XCTAssertThrowsError(try FileLaunchRequest.site("0/usmsso/测试站点", data: Data(xml.replacingOccurrences(of: "<Protocol>1", with: "<Protocol>4").utf8)))
+        XCTAssertThrowsError(try FileLaunchRequest.site("0/usmsso/测试站点", data: Data(("<!DOCTYPE x [<!ENTITY x SYSTEM 'file:///etc/passwd'>]>" + xml).utf8)))
+        XCTAssertThrowsError(try FileLaunchRequest.parse(["ftps://user@192.0.2.1"]))
+        XCTAssertThrowsError(try FileLaunchRequest.parse(["--site=0/usmsso/测试站点", "--other"]))
+        let envelope = ExternalLaunchRequest(file: request)
+        let restored = try JSONDecoder().decode(ExternalLaunchRequest.self, from: JSONEncoder().encode(envelope))
+        XCTAssertEqual(restored.file?.password, password); XCTAssertEqual(restored.id, request.id)
+        let old = try ZOCLaunchRequest.parse(["/SSH:user@host.test"])
+        XCTAssertEqual(try JSONDecoder().decode(ExternalLaunchRequest.self, from: JSONEncoder().encode(old)).terminal?.host, "host.test")
+        XCTAssertEqual(FileSessionAddress.literal("[2001:db8::2]"), "2001:db8::2")
+        XCTAssertNil(FileSessionAddress.literal("host.test"))
+    }
+    func testRemoteIdentityAndEcho() throws {
+        let local = LocalHostIdentity.current()
+        XCTAssertTrue(!local.hostname.isEmpty)
+        if let ip = local.address { XCTAssertEqual(RemoteHostIdentity.address(ip), ip) }
+        XCTAssertEqual(TerminalHostname.fromPrompt("user@macbook ~ % "), "macbook")
+        XCTAssertTrue(RemoteHostIdentity.changesHost("user@macbook ~ % ssh other", containsPrompt: true))
+        var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(SessionProfile.local)) as! [String: Any]
+        legacy["automaticHostname"] = false; legacy["name"] = "旧的固定标题"
+        let migrated = try JSONDecoder().decode(SessionProfile.self, from: JSONSerialization.data(withJSONObject: legacy))
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(migrated)) as! [String: Any]
+        XCTAssertNil(encoded["automaticHostname"])
+        XCTAssertEqual(migrated.name, "旧的固定标题") // The session catalog name remains available.
+        XCTAssertEqual(RemoteHostIdentity.parse("db-real|10.0.0.8|192.0.2.1")?.address, "10.0.0.8")
+        XCTAssertEqual(RemoteHostIdentity.parse("db-real||127.0.0.1 2001:db8::2 10.0.0.3/24")?.address, "10.0.0.3")
+        XCTAssertEqual(RemoteHostIdentity.parse("db-real|2001:db8::3|")?.address, "2001:db8::3")
+        XCTAssertNil(RemoteHostIdentity.parse("db-real||127.0.0.1 ::1")?.address)
+        XCTAssertNil(RemoteHostIdentity.parse("bad host|10.0.0.1|"))
+        XCTAssertNil(RemoteHostIdentity.address("999.1.2.3"))
+        XCTAssertTrue(RemoteHostIdentity.sameHost("db", "db.example"))
+        XCTAssertTrue(!RemoteHostIdentity.sameHost("db.one", "db.two"))
+        XCTAssertTrue(RemoteHostIdentity.changesHost("[root@asset ~]# ssh other", containsPrompt: true))
+        XCTAssertTrue(RemoteHostIdentity.changesHost("exit\r", containsPrompt: false))
+        XCTAssertTrue(!RemoteHostIdentity.changesHost("root@host's password:", containsPrompt: true))
+        XCTAssertTrue(RemoteHostIdentity.isAuthenticationPrompt("test@host's password: "))
+        XCTAssertTrue(RemoteHostIdentity.isAuthenticationPrompt("验证码："))
+        XCTAssertTrue(!RemoteHostIdentity.isAuthenticationPrompt("root@host:/srv/passwords$ "))
+        let command = RemoteHostIdentity.command(token: "OSHELL_INFO_TEST:")
+        let raw = Data((command + "\r\nbackground output\r\n").utf8)
+        for split in 0...raw.count {
+            var filter = HostProbeEcho(command: command)
+            let result = filter.consume(raw.prefix(split)) + filter.consume(raw.suffix(raw.count - split)) + filter.flush()
+            XCTAssertEqual(result, Data("\r\u{1b}[2Kbackground output\r\n".utf8))
+        }
+        var wrapped = Data(), filter = HostProbeEcho(command: command)
+        for (index, byte) in command.utf8.enumerated() {
+            if index > 0 && index % 40 == 0 { wrapped.append(contentsOf: [32, 13]) }
+            wrapped.append(byte)
+        }
+        wrapped.append(contentsOf: [13, 10])
+        var visible = Data()
+        for byte in wrapped { visible.append(filter.consume(Data([byte]))) }
+        visible.append(filter.flush()); XCTAssertEqual(visible, Data("\r\u{1b}[2K".utf8))
+        for ending in ["\r\n", "\n", "\r"] {
+            let reply = "\u{1b}]2;OSHELL_INFO_TEST:db|10.0.0.1|\u{7}\u{1b}[32muser@db:~$ \u{1b}[0m"
+            let bytes = Data((command + ending + reply).utf8)
+            for split in 0...bytes.count {
+                var filter = HostProbeEcho(command: command)
+                let visible = filter.consume(bytes.prefix(split)) + filter.consume(bytes.suffix(bytes.count - split)) + filter.flush()
+                XCTAssertEqual(visible, Data(("\r\u{1b}[2K" + reply).utf8))
+            }
+        }
+        for other in ["background output\r\n", "\u{1b}]2;OSHELL_INFO_TEST:db|10.0.0.1|\u{7}", command + "\u{1b}[?2004l\r\n"] {
+            var filter = HostProbeEcho(command: command)
+            XCTAssertEqual(filter.consume(Data(other.utf8)) + filter.flush(), Data(other.utf8))
+        }
+        // Execute the generated POSIX script, validating quoting and field selection.
+        let task = Process(), out = Pipe()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh"); task.arguments = ["-c", RemoteHostIdentity.reportScript(token: "OSHELL_INFO_TEST:")]
+        var env = ProcessInfo.processInfo.environment; env["SSH_CONNECTION"] = "192.0.2.8 3456 10.7.8.9 22"; task.environment = env
+        task.standardOutput = out; task.standardError = FileHandle.nullDevice
+        try task.run(); let bytes = out.fileHandleForReading.readDataToEndOfFile(); task.waitUntilExit()
+        XCTAssertEqual(task.terminationStatus, 0)
+        XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("|10.7.8.9|\u{7}"))
+    }
+    func testTerminalHostnameHints() {
+        XCTAssertEqual(TerminalHostname.fromTitle("root@inner-node: ~/服务"), "inner-node")
+        XCTAssertEqual(TerminalHostname.fromTitle("[user@db.example /var]"), "db.example")
+        XCTAssertEqual(TerminalHostname.fromPrompt("[root@centos6 ~]# "), "centos6")
+        XCTAssertEqual(TerminalHostname.fromPrompt("user@ubuntu:/srv$ "), "ubuntu")
+        XCTAssertEqual(TerminalHostname.fromDirectory("file://inner.example/var/lib"), "inner.example")
+        for text in ["vim", "ssh root@target", "INFO root@target: log", "root@host's password:", "[root@host ~]# echo hello", "[root@host", "root@host:~/tmp\n$", String(repeating: "x", count: 3000)] {
+            XCTAssertNil(TerminalHostname.fromPrompt(text))
+        }
+        XCTAssertNil(TerminalHostname.fromTitle("log message from root@other"))
+        XCTAssertNil(TerminalHostname.fromDirectory("https://other/tmp"))
+        XCTAssertNil(TerminalHostname.fromDirectory("file://localhost/tmp"))
+    }
+    func testSSHLocaleIsolationPreservesConnectionEnvironment() {
+        let inherited = ["LC_CTYPE": "UTF-8", "LC_ALL": "C", "LC_MESSAGES": "en_US.UTF-8", "LANG": "en_US.UTF-8", "LANGUAGE": "zh_CN",
+                         "TERM": "xterm", "COLORTERM": "truecolor", "PATH": "/usr/bin:/bin", "SSH_AUTH_SOCK": "/tmp/test-agent",
+                         "OSHELL_AUTH_SOCKET": "/tmp/test-broker", "OSHELL_AUTH_TOKEN": "test-token"]
+        let expected = ["TERM": "xterm", "COLORTERM": "truecolor", "PATH": "/usr/bin:/bin", "SSH_AUTH_SOCK": "/tmp/test-agent",
+                        "OSHELL_AUTH_SOCKET": "/tmp/test-broker", "OSHELL_AUTH_TOKEN": "test-token"]
+        XCTAssertEqual(SSHEnvironment.remoteClient(inherited), expected)
+        XCTAssertEqual(inherited["LC_CTYPE"], "UTF-8")
+    }
+    func testOperatorPreferencesAndCommandsRoundTrip() throws {
+        var config = Configuration(); config.preferences.confirmMultilinePaste = false; config.preferences.highlightSetID = nil
+        let command = QuickCommand(name: "检查", text: "hostname\nwhoami", appendReturn: true)
+        config.quickCommands = [command]
+        var ftp = FTPProfile(); ftp.host = "ftp.example.test"; config.ftpProfiles = [ftp]
+        let restored = try JSONDecoder().decode(Configuration.self, from: JSONEncoder().encode(config))
+        XCTAssertEqual(restored.quickCommands, [command]); XCTAssertTrue(!restored.preferences.confirmMultilinePaste); XCTAssertNil(restored.preferences.highlightSetID)
+        XCTAssertTrue(restored.preferences.copyOnSelect && restored.preferences.rightClickPaste)
+        XCTAssertEqual(restored.ftpProfiles, [ftp])
+        var invalid = command; invalid.text = "bad\0"; XCTAssertThrowsError(try invalid.validate())
+    }
+    func testPasteFramingAndPathValidation() throws {
+        XCTAssertTrue(!InputText.isMultiline("ls -l")); XCTAssertTrue(InputText.isMultiline("one\r\ntwo"))
+        XCTAssertEqual(String(decoding: InputText.bytes("one\r\ntwo", bracketed: false, appendReturn: true), as: UTF8.self), "one\rtwo\r")
+        XCTAssertEqual(String(decoding: InputText.bytes("text\n", bracketed: false, appendReturn: true), as: UTF8.self), "text\r")
+        let framed = String(decoding: InputText.bytes("one\n\u{1b}[201~two", bracketed: true), as: UTF8.self)
+        XCTAssertEqual(framed, "\u{1b}[200~one\n[201~two\u{1b}[201~")
+        for name in ["..", ".", "../escape", "bad\nname", "a/b", "bad\0"] { XCTAssertTrue(!RemotePath.safeName(name)) }
+        XCTAssertTrue(RemotePath.safeName("中文 'space' name.txt")); XCTAssertThrowsError(try RemotePath.validate("/file\rDELE anything"))
+    }
+    func testHighlightRulesAndRegexBudget() throws {
+        let matcher = HighlightMatcher(set: .standard, hostname: "develop")
+        let text = "中文 ERROR warning develop"; let matches = matcher.matches(in: text)
+        XCTAssertEqual(matches.count, 3)
+        XCTAssertEqual(matches.map { (text as NSString).substring(with: $0.range) }, ["ERROR", "warning", "develop"])
+        XCTAssertEqual(matches.map(\.color), ["#FF5F56", "#FFAA33", "#F5D547"])
+        let bad = HighlightRule(pattern: "([", regex: true); XCTAssertThrowsError(try bad.validate())
+        let pathological = HighlightMatcher(set: HighlightSet(rules: [HighlightRule(pattern: "(a+)+$", regex: true)]), hostname: "host")
+        let start = Date(); _ = pathological.matches(in: String(repeating: "a", count: 2000) + "X")
+        XCTAssertTrue(Date().timeIntervalSince(start) < 1)
+        XCTAssertTrue(pathological.matches(in: String(repeating: "x", count: 5000)).isEmpty)
+    }
+    func testEndedSessionCommands() {
+        func send(_ parser: inout EndedSessionInput, _ text: String) -> Bool { parser.consume(Array(text.utf8)[...]).close }
+        for command in ["exit\r", "quit\n", "  EXIT  \r\n", "exiy\u{7f}t\r", "bad\u{15}quit\r", "bad\u{3}exit\r", "\u{1b}[200~exit\u{1b}[201~\r"] {
+            for split in 0...command.utf8.count {
+                var parser = EndedSessionInput(); let bytes = Array(command.utf8)
+                let a = parser.consume(bytes.prefix(split)), b = parser.consume(bytes.dropFirst(split))
+                XCTAssertTrue(a.close || b.close)
+            }
+        }
+        var parser = EndedSessionInput()
+        for text in ["ex", "it now\r", "echo exit\r", "exit;whoami\r", "ex中it\r", "\u{1b}]2;exit\u{7}\r", "\r\n"] { XCTAssertTrue(!send(&parser, text)) }
+        XCTAssertTrue(send(&parser, "quit\r"))
+        var bounded = EndedSessionInput(); XCTAssertTrue(!send(&bounded, String(repeating: "x", count: 10000) + "\r"))
+        XCTAssertTrue(send(&bounded, "exit\r"))
+    }
+    func testConnectionOptionsAndMigration() throws {
+        var profile = SessionProfile(name: "旧主机", host: "legacy.example", username: "root")
+        profile.legacySSH = true; profile.keepAlive.interval = 60; profile.keepAlive.tcp = false
+        var local = TunnelRule(); local.listenPort = 15432; local.destinationHost = "::1"; local.destinationPort = 5432
+        var remote = TunnelRule(); remote.kind = .remote; remote.listenPort = 18080
+        var dynamic = TunnelRule(); dynamic.kind = .dynamic; dynamic.listenPort = 1080
+        profile.tunnels = [local, remote, dynamic]
+        let args = try profile.sshArguments()
+        XCTAssertTrue(args.contains("ServerAliveInterval=60")); XCTAssertTrue(args.contains("TCPKeepAlive=no"))
+        XCTAssertTrue(args.contains("HostKeyAlgorithms=+ssh-rsa")); XCTAssertTrue(args.contains("StrictHostKeyChecking=ask"))
+        XCTAssertTrue(args.contains("127.0.0.1:15432:[::1]:5432")); XCTAssertTrue(args.contains("-R")); XCTAssertTrue(args.contains("-D"))
+        XCTAssertTrue(args.contains("ExitOnForwardFailure=yes"))
+        profile.tunnels.append(local); XCTAssertThrowsError(try profile.validate()); profile.tunnels.removeLast()
+        let decoded = try JSONDecoder().decode(SessionProfile.self, from: JSONEncoder().encode(profile)); XCTAssertEqual(decoded, profile)
+        var old = try JSONSerialization.jsonObject(with: JSONEncoder().encode(profile)) as! [String: Any]
+        for key in ["legacySSH", "tunnels", "proxy", "keepAlive", "automaticHostname", "quickConnect"] { old.removeValue(forKey: key) }
+        let migrated = try JSONDecoder().decode(SessionProfile.self, from: JSONSerialization.data(withJSONObject: old))
+        XCTAssertTrue(!migrated.legacySSH && migrated.tunnels.isEmpty)
+        XCTAssertEqual(migrated.keepAlive.interval, 30)
+        var invalid = local; invalid.bindHost = "127.0.0.1;touch /tmp/no"; XCTAssertThrowsError(try invalid.validate())
+        invalid = local; invalid.listenPort = 0; XCTAssertThrowsError(try invalid.validate())
+    }
+    func testProxyArgumentsAndCredentialIsolation() throws {
+        var profile = SessionProfile(host: "example.test")
+        profile.proxy.kind = .socks5; profile.proxy.host = "127.0.0.1"; profile.proxy.username = "user'with%quote"
+        let args = try profile.sshArguments(proxyHelper: URL(fileURLWithPath: "/tmp/helper with spaces"))
+        XCTAssertTrue(args.contains(where: { $0.contains("ProxyCommand='") && $0.contains("%%") && $0.contains("'\\''") }))
+        XCTAssertTrue(!args.contains("-J"))
+        profile.jumpHost = "bastion"; XCTAssertThrowsError(try profile.validate()); profile.jumpHost = ""
+        profile.proxy.kind = .jump; profile.proxy.host = "::1"; profile.proxy.username = "alice"; profile.proxy.port = 22
+        let jumpArgs = try profile.sshArguments(); XCTAssertTrue(jumpArgs.contains("alice@[::1]:22"))
+        let credential = profile.proxy.credentialProfile
+        let identity = SSHIdentity(host: credential.host, user: credential.username, port: credential.port)
+        let encrypted = try SessionCipher.encrypt("proxy-secret", master: "fixture-master", profile: credential, identity: identity)
+        XCTAssertEqual(try SessionCipher.decrypt(encrypted, master: "fixture-master", profile: credential), "proxy-secret")
+        XCTAssertThrowsError(try SessionCipher.decrypt(encrypted, master: "fixture-master", profile: profile))
+        profile.proxy.encryptedPassword = encrypted
+        let encoded = try JSONEncoder().encode(profile); XCTAssertTrue(!String(decoding: encoded, as: UTF8.self).contains("proxy-secret"))
+        profile.host = "host'$(id)"; XCTAssertThrowsError(try profile.validate())
+    }
+    func testKeepAliveEscapesAndDirectories() throws {
+        var keep = KeepAliveSettings(); keep.idleEnabled = true; keep.idleText = "ls\\n\\r\\t\\e\\\\"
+        XCTAssertEqual(try keep.idleBytes(), Array("ls\n\r\t\u{1b}\\".utf8))
+        keep.idleText = "bad\\x"; XCTAssertThrowsError(try keep.validate())
+        keep.idleText = "\\n"; keep.idleInterval = 0; XCTAssertThrowsError(try keep.validate())
+        var config = Configuration(profiles: [SessionProfile(group: "生产/机房/数据库", host: "db.test")])
+        config.directories = ["空目录/子目录"]
+        XCTAssertEqual(SessionDirectory.all(config), ["生产", "生产/机房", "生产/机房/数据库", "空目录", "空目录/子目录"].sorted { $0.localizedStandardCompare($1) == .orderedAscending })
+        XCTAssertEqual(SessionDirectory.normalize(" /生产\\机房// "), "生产/机房")
+        XCTAssertEqual(SessionDirectory.display(""), "/")
+        XCTAssertEqual(SessionDirectory.display("生产/机房"), "/生产/机房")
+        XCTAssertEqual(try SessionDirectory.resolvePath("/生产//机房/./../数据库/"), "生产/数据库")
+        XCTAssertEqual(try SessionDirectory.resolvePath("../华北", relativeTo: "生产/华东"), "生产/华北")
+        XCTAssertEqual(try SessionDirectory.resolvePath("数据库", relativeTo: "生产/华东"), "生产/华东/数据库")
+        XCTAssertEqual(try SessionDirectory.resolvePath("/研发", relativeTo: "生产/华东"), "研发")
+        XCTAssertEqual(try SessionDirectory.resolvePath("../../..", relativeTo: "生产"), "")
+        XCTAssertEqual(try SessionDirectory.resolvePath("/"), "")
+        XCTAssertEqual(try SessionDirectory.resolvePath(""), "")
+        XCTAssertEqual(try SessionDirectory.resolvePath("./.隐藏目录", relativeTo: "生产"), "生产/.隐藏目录")
+        XCTAssertThrowsError(try SessionDirectory.resolvePath("生产\\机房"))
+        XCTAssertThrowsError(try SessionDirectory.resolvePath("/生产\n机房"))
+        XCTAssertTrue(SessionSearchQuery("/生产/机房").matches(normalized: SessionSearchQuery.metadata(config.profiles[0])))
+        XCTAssertTrue(!SessionDirectory.contains("生产二", in: "生产"))
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(config)) as! [String: Any]; json.removeValue(forKey: "directories")
+        let restored = try JSONDecoder().decode(Configuration.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertTrue(restored.directories.contains("生产/机房"))
+    }
+    func testEncryptedSessionPasswordAndEndpointBinding() throws {
+        var profile = SessionProfile(name: "密码测试", host: "example.test", username: "alice")
+        let identity = SSHIdentity(host: "example.test", user: "alice", port: 22)
+        let secret = "fixture-password-不写入配置"
+        let sealed = try SessionCipher.encrypt(secret, master: "fixture-master-123", profile: profile, identity: identity)
+        profile.encryptedPassword = sealed
+        let json = try JSONEncoder().encode(profile)
+        XCTAssertTrue(!String(decoding: json, as: UTF8.self).contains(secret))
+        let restored = try JSONDecoder().decode(SessionProfile.self, from: json)
+        XCTAssertEqual(try SessionCipher.decrypt(restored.encryptedPassword!, master: "fixture-master-123", profile: restored), secret)
+        XCTAssertThrowsError(try SessionCipher.decrypt(sealed, master: "wrong-master", profile: profile))
+        var different = profile; different.host = "other.test"
+        XCTAssertThrowsError(try SessionCipher.decrypt(sealed, master: "fixture-master-123", profile: different))
+        var policy = SavedPasswordPolicy(identity: identity, password: secret)
+        XCTAssertNil(policy.reply(prompt: "bob@jump.test's password:", hint: ""))
+        XCTAssertNil(policy.reply(prompt: "Enter passphrase for key '/tmp/key':", hint: ""))
+        XCTAssertNil(policy.reply(prompt: "Password:", hint: ""))
+        XCTAssertNil(policy.reply(prompt: "alice@example.test's password:", hint: "confirm"))
+        XCTAssertEqual(policy.reply(prompt: "alice@example.test's password:", hint: ""), secret)
+        XCTAssertNil(policy.reply(prompt: "alice@example.test's password:", hint: ""))
+    }
+    func testZFINMissingOOWithKnownShellPrompt() {
+        let frame = Data("**\u{18}B0800000000022d".utf8) + Data([13, 138])
+        let prompt = Data("\u{1b}[?2004h\u{1b}]0;tester@buildhost: ~\u{7}\u{1b}[01;32mtester@buildhost\u{1b}[00m:~$ ".utf8)
+        for split in 0...prompt.count {
+            var handshake = ZmodemFinishHandshake(expectedHostname: "buildhost.example.test")
+            XCTAssertEqual(handshake.outgoing(frame), frame)
+            let first = handshake.incoming(Data(prompt.prefix(split)))
+            let second = handshake.incoming(Data(prompt.dropFirst(split)))
+            XCTAssertTrue(handshake.completed && handshake.completedFromPrompt)
+            XCTAssertEqual(first.protocolBytes + second.protocolBytes, Data("OO".utf8))
+            XCTAssertEqual(first.terminalBytes + second.terminalBytes, prompt)
+            XCTAssertEqual(handshake.outgoing(frame), Data())
+        }
+        var handshake = ZmodemFinishHandshake(expectedHostname: "buildhost")
+        XCTAssertEqual(handshake.incoming(prompt).protocolBytes, prompt)
+        XCTAssertTrue(!handshake.completed)
+        _ = handshake.outgoing(frame)
+        for text in ["100% complete", "other@another:~$ ", "some text $ ", "tester@buildhost:~$ still running"] {
+            XCTAssertTrue(handshake.incoming(Data(("\r\n" + text).utf8)).terminalBytes.isEmpty)
+            XCTAssertTrue(!handshake.completed)
+        }
+        _ = handshake.incoming(Data(repeating: 65, count: 20000))
+        let done = handshake.incoming(Data("\r\n".utf8) + prompt)
+        XCTAssertTrue(handshake.completedFromPrompt); XCTAssertEqual(done.terminalBytes, prompt)
+        var unknown = ZmodemFinishHandshake()
+        _ = unknown.outgoing(frame); _ = unknown.incoming(prompt)
+        XCTAssertTrue(!unknown.completed)
+    }
+    func testZFINRetriesBeforeAcknowledgementAreBlocked() {
+        let frame = Data("**\u{18}B0800000000022d".utf8) + Data([13, 138])
+        let burst = frame + frame + frame
+        for split in 0...burst.count {
+            var finish = ZmodemFinishHandshake()
+            let sent = finish.outgoing(Data(burst.prefix(split))) + finish.outgoing(Data(burst.dropFirst(split)))
+            XCTAssertEqual(sent, frame)
+            XCTAssertTrue(finish.awaitingOO && !finish.completed)
+            XCTAssertEqual(finish.outgoing(frame), Data())
+            XCTAssertEqual(finish.incoming(Data("\r\nstatus\r\n".utf8)).protocolBytes, Data())
+            XCTAssertEqual(finish.incoming(frame).protocolBytes, Data())
+            XCTAssertEqual(finish.incoming(Data("O".utf8)).protocolBytes, Data())
+            let ack = finish.incoming(Data("Ouser@host:~$ ".utf8))
+            XCTAssertEqual(ack.protocolBytes, Data("OO".utf8))
+            XCTAssertEqual(ack.terminalBytes, Data("user@host:~$ ".utf8))
+            XCTAssertTrue(finish.completed)
+        }
+        var splitEveryByte = ZmodemFinishHandshake(); var sent = Data()
+        for byte in burst { sent.append(splitEveryByte.outgoing(Data([byte]))) }
+        XCTAssertEqual(sent, frame)
+        var ordinary = ZmodemFinishHandshake()
+        let notFinish = Data("**\u{18}B0100000023be50\r\u{8a}\u{11}".utf8)
+        var forwarded = Data()
+        for byte in notFinish { forwarded.append(ordinary.outgoing(Data([byte]))) }
+        XCTAssertEqual(forwarded, notFinish)
+        XCTAssertTrue(!ordinary.awaitingOO)
+        XCTAssertEqual(ordinary.outgoing(Data()), Data())
+        var invalid = ZmodemFinishHandshake()
+        XCTAssertEqual(invalid.outgoing(Data("**\u{18}B0800000000ffff\r\u{8a}".utf8)), Data("**\u{18}B0800000000ffff\r\u{8a}".utf8))
+        XCTAssertTrue(!invalid.awaitingOO)
+    }
+    func testZFINTrailerKeepsPromptAndBlocksRetransmission() {
+        let finish = Data("**\u{18}B0800000000022d".utf8) + Data([13, 138])
+        for split in 0...finish.count {
+            var handshake = ZmodemFinishHandshake()
+            _ = handshake.outgoing(Data(finish.prefix(split))); _ = handshake.outgoing(Data(finish.dropFirst(split)))
+            XCTAssertTrue(handshake.awaitingOO)
+            let first = handshake.incoming(Data("O".utf8))
+            let second = handshake.incoming(Data("Otester@buildhost:~$ ".utf8))
+            XCTAssertEqual(first.protocolBytes + second.protocolBytes, Data("OO".utf8))
+            XCTAssertEqual(second.terminalBytes, Data("tester@buildhost:~$ ".utf8))
+            XCTAssertTrue(handshake.completed)
+            XCTAssertEqual(handshake.outgoing(finish), Data())
+        }
+    }
+    func testSSHArgumentsRemainSeparateAndKeepHostVerification() throws {
+        let profile = SessionProfile(name: "测试", host: "2001:db8::1", username: "root", identityFile: "/tmp/a key", jumpHost: "user@jump:2222")
+        let args = try profile.sshArguments()
+        XCTAssertTrue(args.contains("StrictHostKeyChecking=ask"))
+        XCTAssertEqual(Array(args.suffix(2)), ["--", "2001:db8::1"])
+        XCTAssertTrue(args.contains("/tmp/a key"))
+        XCTAssertTrue(args.contains("user@jump:2222"))
+        for host in ["-oProxyCommand=evil", "host\nother", "user@host", "host name", ""] {
+            XCTAssertThrowsError(try SessionProfile(host: host).sshArguments())
+        }
+    }
+    func testConfigurationRoundTripAndPermissions() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = ConfigurationStore(directory: folder)
+        var config = Configuration(profiles: [SessionProfile(name: "服务器", host: "example.test")])
+        config.preferences.scrollback = 999999
+        try store.save(config)
+        let restored = try store.load()
+        XCTAssertEqual(restored.profiles, config.profiles)
+        XCTAssertEqual(restored.preferences.scrollback, 20000)
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: store.url.path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        var legacy = try JSONSerialization.jsonObject(with: Data(contentsOf: store.url)) as! [String: Any]
+        var oldPreferences = legacy["preferences"] as! [String: Any]
+        oldPreferences.removeValue(forKey: "fontName"); legacy["preferences"] = oldPreferences
+        try JSONSerialization.data(withJSONObject: legacy).write(to: store.url)
+        XCTAssertEqual(try store.load().preferences.fontName, "")
+        let original = Data("invalid configuration".utf8); try original.write(to: store.url)
+        XCTAssertThrowsError(try store.load())
+        XCTAssertEqual(try Data(contentsOf: store.url), original)
+    }
+    func testSplitANSISequencesAndUTF8ArePreserved() {
+        var filter = PlainTextFilter()
+        let parts = [Data("中文\u{1b}[3".utf8), Data("1m红色\u{1b}[0m\u{1b}]52;clipboard".utf8), Data("\u{7}\r\nnext".utf8)]
+        let result = parts.reduce(into: Data()) { $0.append(filter.consume($1)) }
+        XCTAssertEqual(String(decoding: result, as: UTF8.self), "中文红色\r\nnext")
+        var byteFilter = PlainTextFilter()
+        let utf8 = Data("多字节🙂".utf8)
+        XCTAssertEqual(utf8.reduce(into: Data()) { $0.append(byteFilter.consume(Data([$1]))) }, utf8)
+    }
+    func testZmodemDetectionAcrossEveryBoundary() {
+        for kind: UInt8 in [0, 1] {
+            let payload: [UInt8] = [kind, 0, 0, 0, 0]
+            let crc = ZmodemDetector.crc(payload)
+            let header = Data(("**\u{18}B" + (payload + [UInt8(crc >> 8), UInt8(crc & 255)]).map { String(format: "%02x", $0) }.joined() + "\r\n").utf8)
+            for split in 0...header.count {
+                var detector = ZmodemDetector()
+                let first = detector.consume(Data("prompt\r\n".utf8) + header.prefix(split))
+                let second = detector.consume(first.direction == nil ? Data(header.dropFirst(split)) : Data())
+                let found = first.direction != nil ? first : second
+                XCTAssertEqual(found.direction, kind == 0 ? .download : .upload)
+                let displayed = String(decoding: first.text + second.text, as: UTF8.self)
+                XCTAssertTrue(displayed.hasPrefix("prompt\r\n"))
+                XCTAssertTrue(displayed.dropFirst(8).allSatisfy { $0 == "*" })
+                XCTAssertTrue(found.protocolBytes.starts(with: [42, 42, 24, 66]))
+            }
+        }
+    }
+    func testInvalidZmodemHeadersRemainOrdinaryOutput() {
+        var detector = ZmodemDetector()
+        XCTAssertEqual(detector.consume(Data()).text, Data())
+        let invalid = Data("text **\u{18}B0100000000ffff\r\nend".utf8)
+        let result = detector.consume(invalid)
+        XCTAssertNil(result.direction)
+        XCTAssertEqual(result.text + detector.flush(), invalid)
+        var typing = ZmodemDetector()
+        XCTAssertEqual(typing.consume(Data("*".utf8)).text, Data("*".utf8))
+        XCTAssertEqual(typing.consume(Data("x".utf8)).text, Data("x".utf8))
+    }
+    func testLoggerFlushesEveryAcceptedChunk() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".log")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let logger = try SessionLogger(url: url)
+        let chunk = Data("中文输出 \u{1b}[32mgreen\u{1b}[0m\n".utf8)
+        for _ in 0..<1000 { logger.append(chunk) }
+        logger.stop(); logger.waitUntilFlushed()
+        XCTAssertEqual(try Data(contentsOf: url), Data(String(repeating: "中文输出 green\n", count: 1000).utf8))
+    }
+    func testCancellationDropsInFlightBytesAcrossEveryBoundary() {
+        let input = Data("FILE_PAYLOAD".utf8) + Data(repeating: 24, count: 10) + Data(repeating: 8, count: 10) + Data("\r\nprompt".utf8)
+        for split in 0...input.count {
+            var drain = AbortDrain()
+            let result = drain.consume(Data(input.prefix(split))) + drain.consume(Data(input.dropFirst(split)))
+            XCTAssertEqual(result, Data("\r\nprompt".utf8)); XCTAssertTrue(drain.finished)
+        }
+    }
+}
+
+
+extension CoreTests {
+    private func credentialFixture() throws -> Configuration {
+        var ssh = SessionProfile(name: "生产服务器", group: "机房/生产", host: "server.example.test", username: "ops")
+        ssh.legacySSH = true; ssh.keepAlive.interval = 75
+        ssh.encryptedPassword = try SessionCipher.encrypt("SSH-test-secret", master: "old-master-123", profile: ssh, identity: SSHIdentity(host: ssh.host, user: ssh.username, port: ssh.port))
+        ssh.proxy.kind = .socks5; ssh.proxy.host = "proxy.example.test"; ssh.proxy.username = "proxy-user"
+        let proxy = ssh.proxy.credentialProfile
+        ssh.proxy.encryptedPassword = try SessionCipher.encrypt("proxy-test-secret", master: "old-master-123", profile: proxy, identity: SSHIdentity(host: proxy.host, user: proxy.username, port: proxy.port))
+        var ftp = FTPProfile(); ftp.host = "ftp.example.test"
+        ftp.encryptedPassword = try SessionCipher.encrypt("FTP-test-secret", master: "old-master-123", profile: ftp.credentialProfile, identity: SSHIdentity(host: ftp.host, user: ftp.username, port: ftp.port))
+        var configuration = Configuration(profiles: [ssh]); configuration.ftpProfiles = [ftp]; configuration.directories = ["机房/空目录"]
+        return configuration
+    }
+    func testMasterPasswordRemoval() throws {
+        let master = "old-master-123"
+        let key = LocalCredentialKey(secret: Data(repeating: 37, count: 32).base64EncodedString())
+        var original = try credentialFixture()
+        original.masterPasswordVerifier = try MasterPasswordProtection.createVerifier(master)
+        var sftp = SessionProfile(name: "文件会话", kind: .sftp, host: "sftp.example.test", username: "files")
+        sftp.encryptedPassword = try SessionCipher.encrypt("SFTP-fixture", master: master, profile: sftp, identity: SSHIdentity(host: sftp.host, user: sftp.username, port: sftp.port))
+        original.profiles.append(sftp)
+        var local = SessionProfile(name: "本机已保存", host: "local.example.test", username: "user")
+        var localEnvelope = try SessionCipher.encrypt("local-fixture", master: key.secret, profile: local, identity: SSHIdentity(host: local.host, user: local.username, port: local.port))
+        localEnvelope.localKeyID = key.id; local.encryptedPassword = localEnvelope; original.profiles.append(local)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let snapshot = try encoder.encode(original)
+        var requestedKey = false
+        XCTAssertThrowsError(try MasterPasswordProtection.disabling(original, password: "wrong", localKey: { requestedKey = true; return key }))
+        XCTAssertTrue(!requestedKey)
+        let result = try MasterPasswordProtection.disabling(original, password: master, localKey: { key })
+        XCTAssertTrue(!result.configuration.hasMasterPassword); XCTAssertNil(result.configuration.masterPasswordVerifier)
+        XCTAssertEqual(result.replacements.count, 4)
+        let before = ConfigurationCredentials.profiles(in: original), after = ConfigurationCredentials.profiles(in: result.configuration)
+        for (old, next) in zip(before, after) where old.encryptedPassword != nil {
+            let sourceKey = old.encryptedPassword!.localKeyID == nil ? master : key.secret
+            XCTAssertEqual(try SessionCipher.decrypt(old.encryptedPassword!, master: sourceKey, profile: old), try SessionCipher.decrypt(next.encryptedPassword!, master: key.secret, profile: next))
+            XCTAssertEqual(next.encryptedPassword!.localKeyID, key.id)
+        }
+        XCTAssertEqual(result.configuration.profiles.last, local)
+        XCTAssertEqual(result.configuration.directories, original.directories)
+        XCTAssertEqual(result.configuration.profiles[0].keepAlive, original.profiles[0].keepAlive)
+        XCTAssertEqual(try encoder.encode(original), snapshot)
+        let restored = try MasterPasswordProtection.enabling(result.configuration, password: "reset-master-456", credentialKey: { _ in key.secret })
+        try ConfigurationCredentials.verify(restored.configuration, master: "reset-master-456")
+        enum Stop: Error { case cancelled }
+        var steps = 0
+        XCTAssertThrowsError(try MasterPasswordProtection.disabling(original, password: master, localKey: { key }, check: { steps += 1; if steps == 5 { throw Stop.cancelled } }))
+        XCTAssertEqual(try encoder.encode(original), snapshot)
+        XCTAssertThrowsError(try MasterPasswordProtection.disabling(original, password: master, localKey: { throw Stop.cancelled }))
+        var damaged = original; damaged.profiles[0].encryptedPassword!.ciphertext = "broken"
+        XCTAssertThrowsError(try MasterPasswordProtection.disabling(damaged, password: master, localKey: { key }))
+        var empty = Configuration(profiles: []); empty.masterPasswordVerifier = original.masterPasswordVerifier
+        let cleared = try MasterPasswordProtection.disabling(empty, password: master, localKey: { throw Stop.cancelled })
+        XCTAssertTrue(!cleared.configuration.hasMasterPassword && cleared.replacements.isEmpty)
+        var legacy = original; legacy.masterPasswordVerifier = nil
+        let migratedLegacy = try MasterPasswordProtection.disabling(legacy, password: master, localKey: { key })
+        XCTAssertTrue(!migratedLegacy.configuration.hasMasterPassword)
+    }
+    func testCredentialRotationAllKinds() throws {
+        let original = try credentialFixture()
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let originalBytes = try encoder.encode(original)
+        let result = try ConfigurationCredentials.rotate(original, oldMaster: "old-master-123", newMaster: "new-master-456")
+        XCTAssertEqual(result.replacements.count, 3)
+        let previous = ConfigurationCredentials.profiles(in: original).filter { $0.encryptedPassword != nil }
+        let updated = ConfigurationCredentials.profiles(in: result.configuration).filter { $0.encryptedPassword != nil }
+        for (old, next) in zip(previous, updated) {
+            XCTAssertEqual(old.id, next.id)
+            XCTAssertEqual(try SessionCipher.decrypt(old.encryptedPassword!, master: "old-master-123", profile: old), try SessionCipher.decrypt(next.encryptedPassword!, master: "new-master-456", profile: next))
+            XCTAssertThrowsError(try SessionCipher.decrypt(next.encryptedPassword!, master: "old-master-123", profile: next))
+            XCTAssertTrue(old.encryptedPassword!.salt != next.encryptedPassword!.salt)
+            XCTAssertEqual(result.replacements[old.encryptedPassword!.ciphertext], next.encryptedPassword)
+        }
+        XCTAssertEqual(result.configuration.profiles[0].keepAlive, original.profiles[0].keepAlive)
+        XCTAssertEqual(result.configuration.directories, original.directories)
+        XCTAssertEqual(try encoder.encode(original), originalBytes)
+    }
+    func testRotationFailureAndCancellation() throws {
+        let config = try credentialFixture()
+        XCTAssertThrowsError(try ConfigurationCredentials.rotate(config, oldMaster: "incorrect", newMaster: "new-master-456"))
+        XCTAssertThrowsError(try ConfigurationCredentials.rotate(config, oldMaster: "old-master-123", newMaster: "short"))
+        XCTAssertThrowsError(try ConfigurationCredentials.rotate(config, oldMaster: "old-master-123", newMaster: "old-master-123"))
+        var damaged = config; damaged.ftpProfiles[0].host = "tampered.example.test"
+        XCTAssertThrowsError(try ConfigurationCredentials.rotate(damaged, oldMaster: "old-master-123", newMaster: "new-master-456"))
+        var calls = 0
+        XCTAssertThrowsError(try ConfigurationCredentials.rotate(config, oldMaster: "old-master-123", newMaster: "new-master-456", check: {
+            calls += 1; if calls > 2 { throw ModelError.invalid("cancelled") }
+        }))
+        try ConfigurationCredentials.verify(config, master: "old-master-123")
+    }
+    func testArchiveWithoutPasswordsAndMergeCopies() throws {
+        let config = try credentialFixture()
+        let archive = SessionArchive(profiles: config.profiles, directories: SessionDirectory.all(config), includePasswords: false)
+        let bytes = try archive.encoded(), decoded = try SessionArchive.decode(bytes)
+        XCTAssertEqual(decoded.passwordCount, 0)
+        XCTAssertTrue(!String(decoding: bytes, as: UTF8.self).contains("ciphertext"))
+        let next = try decoded.merging(into: config, includePasswords: false)
+        XCTAssertEqual(next.profiles.count, 2); XCTAssertEqual(next.profiles[0], config.profiles[0])
+        XCTAssertTrue(next.profiles[1].id != config.profiles[0].id)
+        XCTAssertTrue(next.profiles[1].proxy.id != config.profiles[0].proxy.id)
+        XCTAssertEqual(next.profiles[1].name, "生产服务器（导入副本）")
+        XCTAssertTrue(next.profiles[1].legacySSH)
+        XCTAssertEqual(next.profiles[1].keepAlive.interval, 75)
+        XCTAssertTrue(next.directories.contains("机房/空目录"))
+        XCTAssertEqual(next.ftpProfiles, config.ftpProfiles)
+        let twice = try decoded.merging(into: next, includePasswords: false)
+        XCTAssertEqual(twice.profiles.last?.name, "生产服务器（导入副本 2）")
+        let nested = try decoded.merging(into: Configuration(profiles: []), directory: "导入", includePasswords: false)
+        XCTAssertEqual(nested.profiles[0].group, "导入/机房/生产")
+        XCTAssertTrue(nested.directories.contains("导入/机房/空目录"))
+    }
+    func testEncryptedArchiveRebindingAndFailures() throws {
+        let config = try credentialFixture()
+        let archive = SessionArchive(profiles: config.profiles, directories: config.directories, includePasswords: true)
+        let bytes = try archive.encoded()
+        for value in ["SSH-test-secret", "proxy-test-secret", "old-master-123"] { XCTAssertTrue(!String(decoding: bytes, as: UTF8.self).contains(value)) }
+        let decoded = try SessionArchive.decode(bytes)
+        XCTAssertEqual(decoded.passwordCount, 2)
+        let destination = try ConfigurationCredentials.rotate(config, oldMaster: "old-master-123", newMaster: "local-master-789").configuration
+        let merged = try decoded.merging(into: destination, includePasswords: true, sourceMaster: "old-master-123", destinationMaster: "local-master-789")
+        try ConfigurationCredentials.verify(merged, master: "local-master-789")
+        let added = merged.profiles.last!
+        XCTAssertEqual(try SessionCipher.decrypt(added.encryptedPassword!, master: "local-master-789", profile: added), "SSH-test-secret")
+        XCTAssertEqual(try SessionCipher.decrypt(added.proxy.encryptedPassword!, master: "local-master-789", profile: added.proxy.credentialProfile), "proxy-test-secret")
+        XCTAssertThrowsError(try SessionCipher.decrypt(added.encryptedPassword!, master: "local-master-789", profile: config.profiles[0]))
+        XCTAssertThrowsError(try decoded.merging(into: destination, includePasswords: true, sourceMaster: "bad", destinationMaster: "local-master-789"))
+        XCTAssertThrowsError(try decoded.merging(into: destination, includePasswords: true, sourceMaster: "old-master-123", destinationMaster: "wrong-local"))
+        let stripped = try decoded.merging(into: destination, includePasswords: false)
+        XCTAssertNil(stripped.profiles.last?.encryptedPassword); XCTAssertNil(stripped.profiles.last?.proxy.encryptedPassword)
+        var corrupted = decoded; corrupted.profiles[0].proxy.host = "changed.example.test"
+        XCTAssertThrowsError(try corrupted.merging(into: destination, includePasswords: true, sourceMaster: "old-master-123", destinationMaster: "local-master-789"))
+    }
+    func testArchiveValidationLimits() throws {
+        let config = Configuration()
+        let archive = SessionArchive(profiles: config.profiles, directories: [], includePasswords: false)
+        var newer = archive; newer.version = 3; XCTAssertThrowsError(try newer.encoded())
+        var duplicate = archive; duplicate.profiles += archive.profiles; XCTAssertThrowsError(try duplicate.encoded())
+        var invalid = archive; invalid.directories = ["../escaped"]; XCTAssertThrowsError(try invalid.encoded())
+        XCTAssertThrowsError(try SessionArchive.decode(Data("{}".utf8)))
+        XCTAssertThrowsError(try SessionArchive.decode(Data(repeating: 32, count: SessionArchive.maximumBytes + 1)))
+    }
+    func testPrivateAtomicFileAndFailedWrite() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("sessions.json")
+        try PrivateFile.write(Data("old".utf8), to: file)
+        try PrivateFile.write(Data("new".utf8), to: file)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "new")
+        let permissions = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o600)
+        XCTAssertThrowsError(try PrivateFile.write(Data("failed".utf8), to: root))
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "new")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).count, 1)
+        let config = try credentialFixture(), store = ConfigurationStore(directory: root)
+        try store.save(config)
+        let rotated = try ConfigurationCredentials.rotate(config, oldMaster: "old-master-123", newMaster: "new-master-456")
+        try store.save(rotated.configuration)
+        try ConfigurationCredentials.verify(store.load(), master: "new-master-456")
+        XCTAssertThrowsError(try ConfigurationCredentials.verify(store.load(), master: "old-master-123"))
+    }
+}
+
+
+extension CoreTests {
+    func testUnifiedFileSessionMigrationAndArchive() throws {
+        var ftp = FTPProfile(); ftp.name = "旧 FTP"; ftp.host = "ftp.example.test"; ftp.username = "files"; ftp.initialDirectory = "/uploads"
+        ftp.encryptedPassword = try SessionCipher.encrypt("legacy-ftp-password", master: "old-master-123", profile: ftp.credentialProfile, identity: SSHIdentity(host: ftp.host, user: ftp.username, port: ftp.port))
+        var config = Configuration(profiles: [.local]); config.ftpProfiles = [ftp]
+        try config.migrateFileSessions()
+        let migrated = config.profiles.last!
+        XCTAssertEqual(migrated.id, ftp.id); XCTAssertEqual(migrated.kind, .ftp); XCTAssertEqual(migrated.group, "FTP"); XCTAssertEqual(migrated.initialDirectory, "/uploads")
+        XCTAssertEqual(try SessionCipher.decrypt(migrated.encryptedPassword!, master: "old-master-123", profile: migrated), "legacy-ftp-password")
+        XCTAssertTrue(config.ftpProfiles.isEmpty)
+        try config.migrateFileSessions(); XCTAssertEqual(config.profiles.count, 2)
+        let rotated = try ConfigurationCredentials.rotate(config, oldMaster: "old-master-123", newMaster: "new-master-456")
+        try ConfigurationCredentials.verify(rotated.configuration, master: "new-master-456")
+        let archive = SessionArchive(profiles: config.profiles, directories: config.directories, includePasswords: true)
+        XCTAssertEqual(archive.version, 2)
+        let decoded = try SessionArchive.decode(archive.encoded())
+        let imported = try decoded.merging(into: Configuration(profiles: []), includePasswords: true, sourceMaster: "old-master-123", destinationMaster: "new-master-456")
+        let copy = imported.profiles.last!
+        XCTAssertEqual(copy.kind, .ftp); XCTAssertEqual(copy.initialDirectory, "/uploads"); XCTAssertTrue(copy.id != ftp.id)
+        XCTAssertEqual(try SessionCipher.decrypt(copy.encryptedPassword!, master: "new-master-456", profile: copy), "legacy-ftp-password")
+        var collision = Configuration(profiles: [SessionProfile(id: ftp.id, host: "other.test")]); collision.ftpProfiles = [ftp]
+        XCTAssertThrowsError(try collision.migrateFileSessions()); XCTAssertEqual(collision.ftpProfiles, [ftp])
+        var legacy = SessionArchive(profiles: [SessionProfile(host: "legacy.test")], directories: [], includePasswords: false); legacy.version = 1
+        XCTAssertEqual(try SessionArchive.decode(legacy.encoded()).profiles[0].host, "legacy.test")
+        legacy.profiles = [migrated]; XCTAssertThrowsError(try legacy.validate())
+    }
+    func testFileSessionModelValidationAndStorage() throws {
+        var sftp = SessionProfile(name: "SFTP", kind: .sftp, host: "server.test", username: "files")
+        sftp.initialDirectory = "/data/中文"; sftp.legacySSH = true
+        try sftp.validate(); XCTAssertEqual(try sftp.sshArguments().contains("HostKeyAlgorithms=+ssh-rsa"), true)
+        var ftp = SessionProfile(name: "FTP", kind: .ftp, host: "ftp.test", port: 21, username: "anonymous")
+        try ftp.validate(); XCTAssertThrowsError(try ftp.sshArguments())
+        ftp.initialDirectory = "bad\npath"; XCTAssertThrowsError(try ftp.validate())
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ConfigurationStore(directory: root)
+        var old = FTPProfile(); old.host = "old.test"
+        var config = Configuration(profiles: [sftp]); config.ftpProfiles = [old]
+        try store.save(config)
+        let loaded = try store.load()
+        XCTAssertTrue(loaded.ftpProfiles.isEmpty); XCTAssertEqual(loaded.profiles.count, 2); XCTAssertEqual(loaded.profiles[0], sftp)
+        XCTAssertEqual(loaded.profiles[1].id, old.id)
+    }
+}
+
+
+extension CoreTests {
+    func testOutputActivityAcrossChunks() {
+        for text in ["hello", "中文输出", "\u{1b}[31mERROR\u{1b}[0m", "\u{7}"] {
+            var detector = OutputActivity(); XCTAssertTrue(detector.consume(Data(text.utf8)))
+        }
+        let controls = Data("\u{1b}[31m\u{1b}[0m\u{1b}[2;3H\u{1b}]0;title\u{7}\u{1b}]7;file://host/path\u{1b}\\\u{1b}(B\u{1b}Ppayload\u{1b}\\\r\n \t".utf8)
+        for split in 0...controls.count {
+            var detector = OutputActivity()
+            XCTAssertTrue(!detector.consume(Data(controls.prefix(split))))
+            XCTAssertTrue(!detector.consume(Data(controls.dropFirst(split))))
+            XCTAssertTrue(detector.consume(Data("visible".utf8)))
+        }
+        var split = OutputActivity()
+        XCTAssertTrue(!split.consume(Data("\u{1b}]0;".utf8)))
+        XCTAssertTrue(!split.consume(Data(repeating: 65, count: 100_000)))
+        XCTAssertTrue(!split.consume(Data([27])))
+        XCTAssertTrue(split.consume(Data("\\真实输出".utf8)))
+        var utf8 = OutputActivity()
+        for byte in "中".utf8 { XCTAssertTrue(utf8.consume(Data([byte]))) }
+    }
+}
+
+
+extension CoreTests {
+    func testLocalToolParsingAndResolution() throws {
+        let curl = try LocalToolCommand.parse("Curl -H 'X-Test: 中文' \"https://example.test/Case?a=1&b=2\"")
+        XCTAssertEqual(curl.name, "curl"); XCTAssertEqual(curl.arguments, ["-H", "X-Test: 中文", "https://example.test/Case?a=1&b=2"])
+        XCTAssertEqual(try curl.executable(), "/usr/bin/curl")
+        XCTAssertEqual(try LocalToolCommand.parse("NETWORKQUALITY -h").name, "networkQuality")
+        XCTAssertEqual(try LocalToolCommand.parse("networkquality -h").executable(), "/usr/bin/networkQuality")
+        XCTAssertEqual(try LocalToolCommand.parse("dig example.test").permitsManagedInput, true)
+        XCTAssertEqual(try LocalToolCommand.parse("openssl s_client -connect example.test:443").permitsManagedInput, false)
+        XCTAssertEqual(try LocalToolCommand.parse(#"curl "a\zb""#).arguments, ["a\\zb"])
+        XCTAssertEqual(try LocalToolCommand.parse("ssh -oProxyCommand=\"nc %h %p\" host").arguments, ["-oProxyCommand=nc %h %p", "host"])
+        XCTAssertEqual(try LocalToolCommand.parse("curl --data '' 'literal$(text)' ").arguments, ["--data", "", "literal$(text)"])
+        XCTAssertThrowsError(try LocalToolCommand.parse("curl 'unterminated"))
+        XCTAssertThrowsError(try LocalToolCommand.parse("curl a | sh"))
+        XCTAssertThrowsError(try LocalToolCommand.parse("sh -c anything"))
+        XCTAssertThrowsError(try LocalToolCommand.parse("curl bad\narg"))
+        XCTAssertThrowsError(try LocalToolCommand.parse("/missing/oshell-tools/telnet").executable(environmentPath: ""))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true); defer { try? FileManager.default.removeItem(at: root) }
+        let link = root.appendingPathComponent("curl")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "/usr/bin/curl")
+        XCTAssertEqual(try LocalToolCommand.parse(link.path + " --version").executable(), link.path)
+    }
+    func testLocalToolInputRequestsAndRemainder() throws {
+        let command = "curl -H 'X-Test: 中文' http://127.0.0.1/\r\nquit\r"
+        let bytes = Array(command.utf8)
+        for split in 0...bytes.count {
+            var input = EndedSessionInput(allowsLocalTools: true)
+            let a = input.consume(bytes.prefix(split))
+            let request = a.command == nil ? input.consume(bytes.dropFirst(split)) : a
+            XCTAssertEqual(request.command?.name, "curl")
+            XCTAssertEqual(request.command?.arguments, ["-H", "X-Test: 中文", "http://127.0.0.1/"])
+        }
+        var input = EndedSessionInput(allowsLocalTools: true)
+        let request = input.consume(bytes[...])
+        XCTAssertEqual(String(decoding: request.remaining, as: UTF8.self), "\nquit\r")
+        XCTAssertTrue(input.consume(request.remaining[...]).close)
+        var unicode = EndedSessionInput(allowsLocalTools: true)
+        let edited = unicode.consume(Array("curl '中文\u{7f}X'\r".utf8)[...])
+        XCTAssertEqual(edited.command?.arguments, ["中X"])
+        var long = EndedSessionInput(allowsLocalTools: true)
+        XCTAssertNil(long.consume(Array(("curl " + String(repeating: "x", count: 9000) + "\r").utf8)[...]).command)
+        var tools = EndedSessionInput(allowsLocalTools: true)
+        let availability = tools.consume(Array("tools\r".utf8)[...])
+        XCTAssertNil(availability.command)
+        XCTAssertTrue(String(decoding: availability.echo, as: UTF8.self).contains("/usr/bin/dig"))
+        var help = EndedSessionInput(allowsLocalTools: true)
+        XCTAssertTrue(String(decoding: help.consume(Array("help\r".utf8)[...]).echo, as: UTF8.self).contains("DNS 查询"))
+    }
+}
+
+
+extension CoreTests {
+    func testUSMZOCLaunchParsing() throws {
+        let password = "pa:ss!a@b \"quoted\""
+        let request = try ZOCLaunchRequest.parse(["/DEV:SSH", "/CONNECT:user#asset:" + password + "@127.0.0.1:2222", "/EMU:Xterm", "/TITLE:资产-测试"])
+        XCTAssertEqual(request.username, "user#asset"); XCTAssertEqual(request.password, password)
+        XCTAssertEqual(request.host, "127.0.0.1"); XCTAssertEqual(request.port, 2222); XCTAssertEqual(request.title, "资产-测试")
+        let profile = try request.profile()
+        XCTAssertTrue(!profile.quickConnect); XCTAssertNil(profile.encryptedPassword)
+        XCTAssertEqual(try profile.sshArguments().contains(password), false)
+        let unix = try ZOCLaunchRequest.parse(["-ssh", "user@host.test:22", "-sshpassword", password, "-emu", "VT100", "-title", "with spaces"])
+        XCTAssertEqual(unix.password, password); XCTAssertEqual(unix.terminalType, "vt100")
+        let ipv6 = try ZOCLaunchRequest.parse(["/CONNECT=SSH!user:secret@[::1]:2200"])
+        XCTAssertEqual(ipv6.host, "::1"); XCTAssertEqual(ipv6.port, 2200)
+        let override = try ZOCLaunchRequest.parse(["/SSH:host.test", "/SSHUSER:user@domain", "/SSHPASSWORD:secret", "/SSHKEY:/tmp/key with spaces"])
+        XCTAssertEqual(override.username, "user@domain"); XCTAssertEqual(override.keyFile, "/tmp/key with spaces")
+    }
+    func testZOCLaunchRejectsUnsupportedAndMalformed() throws {
+        for arguments in [["/RUN:script.zrx"], ["/DEV:TELNET", "/CONNECT:host.test"], ["/DEV:RLOGIN", "/CONNECT:host.test"], ["/SSH:host.test", "/CHARSET:GBK"], ["/SSH:host.test", "/EMU:unsupported"], ["/SSH:host.test:70000"], ["/SSH:host.test", "/SSH:other.test"], ["/CONNECT:-option"], ["/SSH:[::1"], ["/SSH:host.test", "/TITLE:bad\nname"]] {
+            XCTAssertThrowsError(try ZOCLaunchRequest.parse(arguments))
+        }
+        do { _ = try ZOCLaunchRequest.parse(["/SSHPASSWORD:test-secret", "/RUN:bad"]) }
+        catch { XCTAssertTrue(!error.localizedDescription.contains("test-secret")) }
+        var request = try ZOCLaunchRequest.parse(["/SSH:user@host.test"]); request.version = 99
+        XCTAssertThrowsError(try request.profile())
+    }
+    func testLaunchEndpointPermissions() throws {
+        let config = FileManager.default.temporaryDirectory.appendingPathComponent("zoc-test-" + UUID().uuidString)
+        let directory = try LaunchEndpoint.directory(for: config)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mode = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o700)
+        let fd = try LaunchEndpoint.lock("test.lock", directory: directory)
+        XCTAssertThrowsError(try LaunchEndpoint.lock("test.lock", directory: directory, nonblocking: true))
+        close(fd)
+        try FileManager.default.createSymbolicLink(atPath: directory.appendingPathComponent("bad.lock").path, withDestinationPath: "/tmp/nonexistent-zoc-lock")
+        XCTAssertThrowsError(try LaunchEndpoint.lock("bad.lock", directory: directory))
+    }
+}
+
+@main struct CheckRunner {
+    static func main() throws {
+        signal(SIGPIPE, SIG_IGN)
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1].hasPrefix("--crypto-fixture-") {
+            let url = URL(fileURLWithPath: CommandLine.arguments[2])
+            if CommandLine.arguments[1] == "--crypto-fixture-write" {
+                var profile = SessionProfile(name: "compatibility", host: "interop.example", username: "fixture")
+                profile.encryptedPassword = try SessionCipher.encrypt("shared-format-fixture", master: "cross-platform-fixture-master", profile: profile, identity: SSHIdentity(host: profile.host, user: profile.username, port: profile.port))
+                try PrivateFile.write(JSONEncoder().encode(profile), to: url)
+            } else {
+                let profile = try JSONDecoder().decode(SessionProfile.self, from: Data(contentsOf: url))
+                guard try SessionCipher.decrypt(profile.encryptedPassword!, master: "cross-platform-fixture-master", profile: profile) == "shared-format-fixture" else { exit(1) }
+            }
+            print("PASS: encrypted session interoperability"); return
+        }
+        let tests = CoreTests()
+        try tests.testUpdateSource()
+        try tests.testMasterStartupProtection()
+        try tests.testLocalCredentialKeyStorage()
+        try tests.testMixedLocalPasswordsAndArchives()
+        try tests.testQuickSendScopePreference()
+        try tests.testColorSchemesAndMigration()
+        try tests.testColorSchemeImport()
+        try tests.testLiveIdleSettingsMerge()
+        try tests.testShellIntegrationReport()
+        try tests.testSessionDefaults()
+        try tests.testSessionDuplication()
+        try tests.testSessionLinksPersistence()
+        tests.testSessionMetadataSearch()
+        try tests.testLegacyClientAndFileIO()
+        tests.testZmodemProgressCounters()
+        try tests.testFileZillaLaunchContract()
+        try tests.testRemoteIdentityAndEcho()
+        tests.testTerminalHostnameHints()
+        tests.testSSHLocaleIsolationPreservesConnectionEnvironment()
+        try tests.testUSMZOCLaunchParsing()
+        try tests.testZOCLaunchRejectsUnsupportedAndMalformed()
+        try tests.testLaunchEndpointPermissions()
+        try tests.testLocalToolParsingAndResolution()
+        try tests.testLocalToolInputRequestsAndRemainder()
+        tests.testOutputActivityAcrossChunks()
+        try tests.testUnifiedFileSessionMigrationAndArchive()
+        try tests.testFileSessionModelValidationAndStorage()
+        try tests.testMasterPasswordRemoval()
+        try tests.testCredentialRotationAllKinds()
+        try tests.testRotationFailureAndCancellation()
+        try tests.testArchiveWithoutPasswordsAndMergeCopies()
+        try tests.testEncryptedArchiveRebindingAndFailures()
+        try tests.testArchiveValidationLimits()
+        try tests.testPrivateAtomicFileAndFailedWrite()
+        try tests.testOperatorPreferencesAndCommandsRoundTrip()
+        try tests.testPasteFramingAndPathValidation()
+        try tests.testHighlightRulesAndRegexBudget()
+        tests.testEndedSessionCommands()
+        try tests.testConnectionOptionsAndMigration()
+        try tests.testProxyArgumentsAndCredentialIsolation()
+        try tests.testKeepAliveEscapesAndDirectories()
+        tests.testZFINMissingOOWithKnownShellPrompt()
+        tests.testZFINRetriesBeforeAcknowledgementAreBlocked()
+        tests.testZFINTrailerKeepsPromptAndBlocksRetransmission()
+        try tests.testEncryptedSessionPasswordAndEndpointBinding()
+        try tests.testSSHArgumentsRemainSeparateAndKeepHostVerification()
+        try tests.testConfigurationRoundTripAndPermissions()
+        tests.testSplitANSISequencesAndUTF8ArePreserved()
+        tests.testZmodemDetectionAcrossEveryBoundary()
+        tests.testInvalidZmodemHeadersRemainOrdinaryOutput()
+        try tests.testLoggerFlushesEveryAcceptedChunk()
+        tests.testCancellationDropsInFlightBytesAcrossEveryBoundary()
+        if failures.isEmpty { print("PASS: 52 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
+        else { failures.forEach { print("FAIL: \($0)") }; exit(1) }
+    }
+}

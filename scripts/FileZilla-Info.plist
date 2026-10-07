@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>app.oshell.filezilla-launcher</string>
+<key>CFBundleName</key><string>OShell FileZilla Launcher</string>
+<key>CFBundleExecutable</key><string>OShell-FileZilla</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>3.70.0</string>
+<key>CFBundleVersion</key><string>3.70.0</string>
+<key>CFBundleGetInfoString</key><string>OShell launcher; FileZilla configuration compatibility level 3.70.0. Not FileZilla.</string>
+<key>LSUIElement</key><true/>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+</dict></plist>

@@ -1,0 +1,74 @@
+OShell third-party notices
+
+OShell original code and project assets: Copyright (c) 2026 OShell contributors.
+Licensed under GNU GPL version 3 only (SPDX: GPL-3.0-only); see LICENSE.
+Third-party components retain the notices and terms listed below.
+
+OShell includes:
+
+SwiftTerm v1.20.0, commit 5d14406844143538cd8f8851d2d8a67c1fe443e5
+https://github.com/migueldeicaza/SwiftTerm
+MIT license, included in Vendor/SwiftTerm/LICENSE.
+OShell changes: a standalone package manifest and fixed build identity; 8 KiB PTY reads,
+1 MiB receive backlog / 256 KiB resume threshold; skip scheduled redraws for detached tabs;
+allow the host application to override remote clipboard requests.
+OShell also makes focus notification overridable and reaps terminated PTY children off-main,
+resetting their PID to avoid signalling a stale PID on repeated termination.
+Main-queue receive batches yield after 1 ms. Exit statuses are decoded and Metal shader
+libraries are shared per GPU device to avoid recompiling the same shaders for each pane.
+The shared library cache is weak; live renderers own their libraries so closing the
+last terminal releases the application cache. Grayscale/color glyph atlases start
+at 512/256 pixels and retain their existing adaptive growth and maximum sizes.
+PTY writes use a dedicated ordered DispatchIO stream channel on a duplicated master FD;
+the read and write channels are separate and both are closed on termination.
+PTY exit monitoring uses the child PID rather than the I/O running flag, so an earlier PTY EOF cannot suppress exit notification or child reaping.
+The host can override key-down/key-up handling for explicit user-input synchronization, and select-all for copy-on-selection behavior.
+A host-supplied, display-only foreground highlight hook is shared by the Metal and CoreGraphics renderers; selection colors retain priority.
+PTY descriptors are marked close-on-exec so later sessions cannot retain another session's terminal.
+PTY output-drained status includes EOF and queued deliveries. Backpressured reads
+continue after child exit so short-lived local tools do not lose their final output.
+On macOS, line-cell storage uses page-backed, size-classed slabs rather than the
+process-wide malloc cache; empty slabs unmap immediately, including after reflow.
+Allocation ownership follows BufferLine copies/resizes and is synchronized for
+independent terminals. Other platforms retain their existing allocation path.
+The host can clear optional shared CoreText/font/color drawing caches when idle.
+Bounded live-cursor line text access supports prompt inspection independently
+of the scrolled viewport, resolving wide cells and grapheme storage correctly.
+
+lrzsz 0.12.20
+https://www.ohse.de/uwe/software/lrzsz.html
+GPL version 2 or later. Copyright holders and full license are in the original source archive.
+The lrz/lsz programs are separate executables, started only during a transfer.
+Complete corresponding unmodified source and build instructions are distributed alongside
+the binaries; the same archive is embedded in the app's Resources directory.
+Built using Apple clang, -Os -std=gnu89, NLS and timesync disabled.
+
+Legacy macOS build only: CryptoSwift 1.10.0 (tag f2a627b).
+https://github.com/krzyzanowskim/CryptoSwift/releases/tag/1.10.0
+This product includes software developed by the "Marcin Krzyzanowski" (http://krzyzanowskim.com/).
+Full license is included as CryptoSwift-LICENSE.txt in the legacy application.
+OShell alteration: prefer Foundation over FoundationEssentials under OSHELL_LEGACY,
+for pre-10.14 deployment. Cryptographic algorithms are unchanged. Used only for
+AES-256-GCM on macOS 10.13; PBKDF2 remains CommonCrypto, and modern builds use CryptoKit.
+
+Additional SwiftTerm alterations for OShell legacy builds: disable Metal and os
+signpost instrumentation, provide CoreGraphics-compatible rendering entry points,
+backport find icons/accent colors.
+
+Additional SwiftTerm search changes: Unicode whole-word and wrapped-line matching fixes,
+regex anchor preservation and bounded execution, compiled-pattern/result caching,
+content/scrollback invalidation, and public search diagnostics.
+
+Terminal color schemes: NetSarang Xshell-ColorScheme (MIT), Copyright (c) 2021
+NetSarang Computer Inc. Reference files and full license: Vendor/ColorSchemes/;
+the app includes ColorSchemes-LICENSE.txt. Dracula is the Xshell library variant;
+Tango is adapted for ANSI roles and readable light foreground.
+Solarized colors: Ethan Schoonover, https://ethanschoonover.com/solarized/
+Nord colors: Arctic Ice Studio / Sven Greb, https://www.nordtheme.com/
+OShell maps these published palettes to terminal foreground, background and ANSI roles.
+
+Sparkle 2.9.6 — https://github.com/sparkle-project/Sparkle (MIT and bundled component notices). Full license: Resources/Sparkle-LICENSE.txt.
+
+Public-source packaging changes: SwiftTerm debug buffer dumps use private temporary files instead of an upstream developer home path. Sparkle dSYM files are omitted from the public tree; the XCFramework manifest no longer references them. The framework executables are unchanged before architecture selection and local signing. Sparkle upstream source is included as Vendor/Sparkle-2.9.6-source.tar.gz; build instructions are in that archive.
+
+OShell mouse-focus change: macOS Metal rendering surfaces pass hit testing to the parent terminal view, retaining native scrollbars and terminal selection/mouse reporting.

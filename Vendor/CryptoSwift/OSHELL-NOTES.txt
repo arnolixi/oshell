@@ -1,0 +1,1 @@
+CryptoSwift 1.10.0, official source archive. OShell modification: FoundationEssentials import guards exclude OSHELL_LEGACY, using Foundation on old macOS. Algorithms unmodified. See LICENSE.
