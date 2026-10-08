@@ -3,12 +3,14 @@
 
 import AppKit
 import Sparkle
+import OShellCore
 
 /// Explicit isolated fixtures only. Uses Sparkle's real network and installer pipeline.
 final class UpdateIntegrationTest: NSObject, SPUUserDriver, SPUUpdaterDelegate {
     private static var retained: UpdateIntegrationTest?
     private let workspace: WorkspaceController, root: URL, mode: String
     private var updater: SPUUpdater!
+    private var bridge: ReleaseUpdateBridge?
     private var status = [String: Any](), finished = false, confirmations = 0
     private var timer: Timer?
     init(workspace: WorkspaceController, root: URL, mode: String) { self.workspace = workspace; self.root = root; self.mode = mode; super.init() }
@@ -31,6 +33,18 @@ final class UpdateIntegrationTest: NSObject, SPUUserDriver, SPUUpdaterDelegate {
     private func finish(_ outcome: String) { guard !finished else { return }; finished = true; status["outcome"] = outcome; write(); workspace.shutdown(); NSApp.terminate(nil) }
     private func start() {
         if mode == "install" { workspace.newLocal() }
+        do {
+            if let path = ProcessInfo.processInfo.environment["OSHELL_UPDATE_INTEGRATION_RELEASE"] {
+                let file = URL(fileURLWithPath: path).standardizedFileURL
+                guard file.path.hasPrefix(root.path + "/") else { finish("invalid-fixture"); return }
+                let source = try UpdateSource("example-org/OShell")
+                bridge = try ReleaseUpdateBridge { try GitHubReleaseUpdate.read(Data(contentsOf: file), source: source, flavor: .arm64).signedFeed }
+            } else if let path = ProcessInfo.processInfo.environment["OSHELL_UPDATE_INTEGRATION_FEED_FILE"] {
+                let file = URL(fileURLWithPath: path).standardizedFileURL
+                guard file.path.hasPrefix(root.path + "/") else { finish("invalid-fixture"); return }
+                bridge = try ReleaseUpdateBridge { try Data(contentsOf: file) }
+            }
+        } catch { status["error"] = error.localizedDescription; finish("bridge-error"); return }
         updater = SPUUpdater(hostBundle: .main, applicationBundle: .main, userDriver: self, delegate: self)
         do { try updater.start(); updater.automaticallyChecksForUpdates = false; updater.checkForUpdates() }
         catch { status["error"] = error.localizedDescription; finish("start-error") }
@@ -55,7 +69,7 @@ final class UpdateIntegrationTest: NSObject, SPUUserDriver, SPUUpdaterDelegate {
             RunLoop.main.add(timer!, forMode: .common); RunLoop.main.add(timer!, forMode: .modalPanel)
         }
     }
-    func feedURLString(for updater: SPUUpdater) -> String? { ProcessInfo.processInfo.environment["OSHELL_UPDATE_INTEGRATION_URL"] }
+    func feedURLString(for updater: SPUUpdater) -> String? { bridge?.url.absoluteString ?? ProcessInfo.processInfo.environment["OSHELL_UPDATE_INTEGRATION_URL"] }
     func updater(_ updater: SPUUpdater, shouldPostponeRelaunchForUpdate item: SUAppcastItem, untilInvokingBlock installHandler: @escaping () -> Void) -> Bool {
         workspace.appUpdater.updater(updater, shouldPostponeRelaunchForUpdate: item, untilInvokingBlock: installHandler)
     }

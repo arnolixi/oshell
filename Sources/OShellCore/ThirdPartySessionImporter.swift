@@ -16,13 +16,16 @@ public struct SessionImportIssue {
     public let skipped: Bool
 }
 public struct ThirdPartySessionReport {
+    public init() {}
     public var profiles = [SessionProfile]()
     public var directories = [String]()
     public var issues = [SessionImportIssue]()
+    public var xshellPasswords = [UUID: XshellSavedPassword]()
+    public var passwordCount: Int { xshellPasswords.count }
     public var skippedCount: Int { issues.filter(\.skipped).count }
     public var archive: SessionArchive { .init(profiles: profiles, directories: directories, includePasswords: false) }
     public var notes: String {
-        (["仅迁移可识别的连接信息；密码、私钥内容、主机指纹、登录脚本、宏、外观和快捷键不迁移。", "代理、跳板机和隧道不迁移，请在导入后重新配置；不会自动连接。"] + issues.map { ($0.skipped ? "跳过 · " : "提示 · ") + $0.source + "：" + $0.message }).joined(separator: "\n")
+        (["Xshell 检测到 \(passwordCount) 项加密密码，可选择输入原 Xshell 主密码迁移。SecureCRT 密码、私钥内容、主机指纹、登录脚本、宏、外观和快捷键不迁移。", "代理、跳板机和隧道不迁移，请在导入后重新配置；不会自动连接。"] + issues.map { ($0.skipped ? "跳过 · " : "提示 · ") + $0.source + "：" + $0.message }).joined(separator: "\n")
     }
 }
 
@@ -167,7 +170,7 @@ public enum ThirdPartySessionImporter {
             if format == .secureCRT {
                 return ["is session", "hostname", "protocol name", "username", "[ssh2] port", "port", "identity filename v2", "send protocol noop", "send protocol no-op", "nop interval", "firewall name", "port forward filter", "reverse forward filter", "script filename v2", "use script file", "auto session setup"].contains(key)
             }
-            return ["connection/host", "connection/protocol", "connection/port", "connection:authentication/username", "connection:authentication/userkey", "connection:keepalive/keepalive", "connection:keepalive/keepaliveinterval", "connection:keepalive/tcpkeepalive", "connection:keepalive/sendkeepalive", "connection:proxy/proxy", "connection:proxy/proxyname", "connection:proxy/proxyhost", "connection:proxy/proxytype", "connection:ssh/tunneling", "connection:ssh/portforwarding", "connection:ssh/forwardx11", "connection:ssh/remotecommand", "connection:login script/usescript", "connection:authentication/useexpectsend"] .contains(key) || key.hasPrefix("connection:ssh:tunneling/")
+            return ["sessioninfo/version", "connection:authentication/password", "connection/host", "connection/protocol", "connection/port", "connection:authentication/username", "connection:authentication/userkey", "connection:keepalive/keepalive", "connection:keepalive/keepaliveinterval", "connection:keepalive/tcpkeepalive", "connection:keepalive/sendkeepalive", "connection:proxy/proxy", "connection:proxy/proxyname", "connection:proxy/proxyhost", "connection:proxy/proxytype", "connection:ssh/tunneling", "connection:ssh/portforwarding", "connection:ssh/forwardx11", "connection:ssh/remotecommand", "connection:login script/usescript", "connection:authentication/useexpectsend"] .contains(key) || key.hasPrefix("connection:ssh:tunneling/")
         }
         func add(path: String, fields: [String: String]) throws {
             try check()
@@ -212,6 +215,9 @@ public enum ThirdPartySessionImporter {
                 if get("connection:keepalive/sendkeepalive") == "1" || get("use script file") == "1" || get("auto session setup") == "1" || !get("connection:ssh/remotecommand").isEmpty || get("connection:login script/usescript") == "1" || get("connection:authentication/useexpectsend") == "1" { issue(path, "自动登录、远端命令或空闲字符串未启用，请按需重新配置。") }
                 try profile.validate()
                 directories.insert(group); report.profiles.append(profile)
+                if isX, !get("connection:authentication/password").isEmpty {
+                    report.xshellPasswords[profile.id] = XshellSavedPassword(encoded: get("connection:authentication/password"))
+                }
             } catch { issue(path, error.localizedDescription, skipped: true) }
         }
         func xml(_ data: Data) throws {

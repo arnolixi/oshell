@@ -153,6 +153,8 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     var onCloseRequested: ((TerminalPane) -> Void)?
     var onUserInput: ((TerminalPane, [UInt8]) -> Bool)?
     var onPaste: ((TerminalPane, String) -> Void)?
+    var credentialsForConnection: (() -> SessionProfile)?
+    var onSaveAuthenticatedPassword: ((SessionProfile, String, SSHIdentity) -> Void)?
     var onFilesDropped: ((TerminalPane, [URL]) -> Void)?
     private(set) var remoteDirectory = "."
     var copyOnSelect: Bool { preferences.copyOnSelect }
@@ -389,7 +391,8 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
             else { environment["LC_CTYPE"] = "UTF-8" }
             if profile.kind == .ssh && !reusesSSHConnection {
                 let password = oneTimePassword; oneTimePassword = nil
-                let broker = try AuthBroker(profile: profile, oneTimePassword: password); authBroker = broker
+                let broker = try AuthBroker(profile: credentialsForConnection?() ?? profile, oneTimePassword: password, permitsSaving: sshConnectionGroup?.isExternal != true); authBroker = broker
+                broker.onSavePassword = onSaveAuthenticatedPassword
                 broker.onAuthenticated = { [weak self] in
                     self?.sshConnectionGroup?.authenticatedConnectionReady()
                     self?.sessionReady = true; self?.observeTransportPeer(); self?.refreshHeader(); self?.onState?()

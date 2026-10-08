@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 from release_targets import TARGETS, RELEASE_FLAVORS
+import installer_metadata
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -87,6 +88,7 @@ def main():
                     run(['hdiutil', 'attach', '-nobrowse', '-readonly', '-mountpoint', mount, dmg]); attached = True
                     verify_app(mount/'OShell.app', staged, target, expected, flavor == 'legacy')
                     assert (mount/'Applications').is_symlink()
+                    installer_metadata.verify(mount, version=version, build=str(expected['CFBundleVersion']), flavor=flavor, minimum=target.minimum, architectures=target.architectures)
                 finally:
                     if attached:
                         run(['hdiutil', 'detach', mount])

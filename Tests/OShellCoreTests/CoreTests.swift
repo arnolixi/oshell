@@ -24,22 +24,49 @@ final class CoreTests {
     func testUpdateSource() throws {
         let source = try UpdateSource("https://github.com/example-org/OShell.git")
         XCTAssertEqual(source.repository, "example-org/OShell")
-        XCTAssertEqual(source.feedURL(for: .arm64).absoluteString, "https://github.com/example-org/OShell/releases/latest/download/OShell-macOS13-arm64.xml")
+        XCTAssertEqual(source.latestReleaseURL.absoluteString, "https://api.github.com/repos/example-org/OShell/releases/latest")
         XCTAssertEqual(UpdateFlavor.select(appleSilicon: true, majorOS: 13), .arm64)
-        XCTAssertEqual(UpdateFlavor.select(appleSilicon: true, majorOS: 12), .intel)
-        XCTAssertEqual(UpdateFlavor.select(appleSilicon: false, majorOS: 26), .intel)
+        XCTAssertEqual(UpdateFlavor.select(appleSilicon: true, majorOS: 12), .universal)
+        XCTAssertEqual(UpdateFlavor.select(appleSilicon: false, majorOS: 26), .intelModern)
         for invalid in ["", "../repo", "owner/..", "owner/repo/releases", "https://github.com.evil.test/a/b", "http://github.com/a/b", "https://token@github.com/a/b", "https://github.com/a/b?token=secret", "a/b#c"] { XCTAssertThrowsError(try UpdateSource(invalid)) }
-        let url = URL(string: "https://github.com/example-org/OShell/releases/download/v0.2.42/OShell-0.2.42-macOS13-arm64-update.zip")!
+        let url = URL(string: "https://github.com/example-org/OShell/releases/download/v0.2.42/OShell-0.2.42-macOS13-arm64.dmg")!
         XCTAssertTrue(source.acceptsArchive(url, flavor: .arm64))
-        XCTAssertTrue(source.acceptsArchive(URL(string: "https://github.com/EXAMPLE-ORG/oshell/releases/download/v1/OShell-1-macOS13-arm64-update.zip")!, flavor: .arm64))
-        XCTAssertTrue(!source.acceptsArchive(URL(string: "https://github.com/example-org/OShell/releases/download/../OShell-1-macOS13-arm64-update.zip")!, flavor: .arm64))
+        XCTAssertTrue(source.acceptsArchive(URL(string: "https://github.com/EXAMPLE-ORG/oshell/releases/download/v1/OShell-1-macOS13-arm64.dmg")!, flavor: .arm64))
+        XCTAssertTrue(!source.acceptsArchive(URL(string: "https://github.com/example-org/OShell/releases/download/../OShell-1-macOS13-arm64.dmg")!, flavor: .arm64))
         XCTAssertTrue(!source.acceptsArchive(url, flavor: .intel))
-        XCTAssertTrue(!source.acceptsArchive(URL(string: "https://github.com/another/repo/releases/download/v1/OShell-1-macOS13-arm64-update.zip")!, flavor: .arm64))
+        XCTAssertTrue(!source.acceptsArchive(URL(string: "https://github.com/another/repo/releases/download/v1/OShell-1-macOS13-arm64.dmg")!, flavor: .arm64))
         var prefs = Preferences(); prefs.updateRepository = source.repository; prefs.automaticUpdateChecks = true
         let restored = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(prefs))
         XCTAssertEqual(restored.updateRepository, source.repository); XCTAssertTrue(restored.automaticUpdateChecks)
         let old = try JSONDecoder().decode(Preferences.self, from: Data("{}".utf8))
         XCTAssertTrue(old.updateRepository.isEmpty && !old.automaticUpdateChecks)
+    }
+    func testGitHubReleaseMetadata() throws {
+        let source = try UpdateSource("example-org/OShell")
+        let signature = Data(repeating: 1, count: 64).base64EncodedString()
+        func release(_ flavor: UpdateFlavor = .arm64) -> [String: Any] {
+            let name = "OShell-1.2.3-\(flavor.rawValue).dmg"
+            let url = "https://github.com/example-org/OShell/releases/download/v1.2.3/" + name
+            let xml = "<rss xmlns:sparkle=\"http://www.andymatuschak.org/xml-namespaces/sparkle\"><channel><item><sparkle:version>45</sparkle:version><sparkle:shortVersionString>1.2.3</sparkle:shortVersionString><sparkle:minimumSystemVersion>\(flavor.minimumOS)</sparkle:minimumSystemVersion><enclosure url=\"\(url)\" length=\"1234\" sparkle:edSignature=\"\(signature)\"/></item></channel></rss>"
+            return ["draft": false, "prerelease": false, "tag_name": "v1.2.3", "body": "Release notes\n<!-- oshell-update-v1:\(flavor.rawValue):\(Data(xml.utf8).base64EncodedString()) -->", "assets": [["name": name, "size": 1234, "state": "uploaded", "browser_download_url": url]]]
+        }
+        func read(_ object: [String: Any], _ flavor: UpdateFlavor = .arm64) throws -> GitHubReleaseUpdate { try GitHubReleaseUpdate.read(JSONSerialization.data(withJSONObject: object), source: source, flavor: flavor) }
+        for flavor in [UpdateFlavor.arm64, .intel, .intelModern, .universal] {
+            let result = try read(release(flavor), flavor)
+            XCTAssertEqual(result.version, "1.2.3"); XCTAssertEqual(result.build, "45")
+            XCTAssertTrue(result.archiveURL.pathExtension == "dmg")
+            XCTAssertTrue(String(decoding: result.signedFeed, as: UTF8.self).contains(signature))
+        }
+        for key in ["draft", "prerelease"] { var bad = release(); bad[key] = true; XCTAssertThrowsError(try read(bad)) }
+        var bad = release(); bad["tag_name"] = "v9.9.9"; XCTAssertThrowsError(try read(bad))
+        bad = release(); bad["body"] = "no signed update information"; XCTAssertThrowsError(try read(bad))
+        bad = release(); bad["body"] = (bad["body"] as! String) + (bad["body"] as! String); XCTAssertThrowsError(try read(bad))
+        bad = release(); bad["assets"] = []; XCTAssertThrowsError(try read(bad))
+        bad = release(); var assets = bad["assets"] as! [[String: Any]]; assets[0]["size"] = 99; bad["assets"] = assets; XCTAssertThrowsError(try read(bad))
+        bad = release(); assets = bad["assets"] as! [[String: Any]]; assets[0]["browser_download_url"] = "https://other.example/file.dmg"; bad["assets"] = assets; XCTAssertThrowsError(try read(bad))
+        XCTAssertThrowsError(try read(release(), .intel))
+        XCTAssertThrowsError(try GitHubReleaseUpdate.read(Data(repeating: 65, count: 1_048_577), source: source, flavor: .arm64))
+        XCTAssertTrue(!source.acceptsArchive(URL(string: "https://github.com/example-org/OShell/releases/download/v1.2.3/OShell-1.2.3-macOS13-arm64-update.zip")!, flavor: .arm64))
     }
     func testMasterStartupProtection() throws {
         let master = "startup-master-fixture", next = "changed-master-fixture"
@@ -136,6 +163,55 @@ final class CoreTests {
         let stripped = SessionArchive(profiles: config.profiles, directories: [], includePasswords: false)
         XCTAssertEqual(stripped.passwordCount, 0); _ = try stripped.encoded()
     }
+    func testXshellMasterPasswordMigration() throws {
+        let cipher = "Rrm3P3AL0iDV7nBbS2bHvh7ZAvuN1NSJl8ZFL11+UJ+82+KAixa89O3OTAfRTg=="
+        let second = "QbS9Iz4GgWbdtnBLSncXw"
+        let record = XshellSavedPassword(encoded: cipher)
+        XCTAssertEqual(try record.decrypt(master: "123123"), "This is a test")
+        XCTAssertEqual(try XshellSavedPassword(encoded: "TaNuRIYAqRCMnEiseXgqJgwobNCbit204blttGz1BxMTz0hzI+Ok44+AT+NsLndE").decrypt(master: "test-master-密码"), "测试口令🔐")
+        XCTAssertThrowsError(try record.decrypt(master: "incorrect"))
+        XCTAssertThrowsError(try XshellSavedPassword(encoded: "not-base64").decrypt(master: "123123"))
+        XCTAssertThrowsError(try XshellSavedPassword(encoded: second).decrypt(master: "123123"))
+        XCTAssertTrue(!String(describing: record).contains(cipher) && !String(reflecting: record).contains(cipher))
+        let a = SessionProfile(name: "one", group: "Xshell/目录", host: "one.example.test", username: "ops")
+        let b = SessionProfile(name: "two", group: "Xshell/目录", host: "two.example.test", username: "ops")
+        var report = ThirdPartySessionReport(); report.profiles = [a,b]; report.directories = [a.group]
+        report.xshellPasswords = [a.id: record, b.id: XshellSavedPassword(encoded: "QbS9Iz4GgWbdtnBLSncPjYqRWhrcVcyc4Hi701PbicsgAgyASoj6yZ17E4uMNT3j7wHdMKQYig==")]
+        let local = LocalCredentialKey(secret: Data(repeating: 11, count: 32).base64EncodedString()), empty = Configuration(profiles: [])
+        let imported = try report.importingPasswords(into: empty, directory: "迁移", sourceMaster: "123123", destinationSecret: local.secret, destinationLocalKeyID: local.id, fillMissingOnly: false)
+        XCTAssertEqual(imported.importedPasswords, 2); XCTAssertEqual(imported.importedSessions, 2)
+        let one = imported.configuration.profiles[0], two = imported.configuration.profiles[1]
+        XCTAssertTrue(one.id != a.id && one.encryptedPassword?.localKeyID == local.id)
+        XCTAssertEqual(try SessionCipher.decrypt(one.encryptedPassword!, master: local.secret, profile: one), "This is a test")
+        XCTAssertEqual(try SessionCipher.decrypt(two.encryptedPassword!, master: local.secret, profile: two), "Second fixture password")
+        let encoded = String(decoding: try JSONEncoder().encode(imported.configuration), as: UTF8.self)
+        XCTAssertTrue(!encoded.contains(cipher) && !encoded.contains("This is a test") && !encoded.contains("Second fixture password"))
+        var existing = imported.configuration
+        existing.profiles[0].encryptedPassword = nil
+        let patched = try report.importingPasswords(into: existing, directory: "迁移", sourceMaster: "123123", destinationSecret: local.secret, destinationLocalKeyID: local.id, fillMissingOnly: true)
+        XCTAssertEqual(patched.configuration.profiles.map(\.id), existing.profiles.map(\.id))
+        XCTAssertEqual(patched.importedPasswords, 1); XCTAssertEqual(patched.preservedPasswords, 1)
+        XCTAssertEqual(patched.configuration.profiles[1].encryptedPassword, existing.profiles[1].encryptedPassword)
+        XCTAssertThrowsError(try report.importingPasswords(into: existing, directory: "迁移", sourceMaster: "wrong", destinationSecret: local.secret, destinationLocalKeyID: local.id, fillMissingOnly: true))
+        XCTAssertNil(existing.profiles[0].encryptedPassword)
+        var duplicate = existing; var copy = existing.profiles[0]; copy.id = UUID(); duplicate.profiles.append(copy)
+        XCTAssertThrowsError(try report.importingPasswords(into: duplicate, directory: "迁移", sourceMaster: "123123", destinationSecret: local.secret, destinationLocalKeyID: local.id, fillMissingOnly: true))
+        let noMatch = try report.importingPasswords(into: existing, directory: "其他", sourceMaster: "123123", destinationSecret: local.secret, destinationLocalKeyID: local.id, fillMissingOnly: true)
+        XCTAssertEqual(noMatch.unmatchedSessions, 2); XCTAssertEqual(noMatch.configuration.profiles, existing.profiles)
+        var bad = report; bad.xshellPasswords[b.id] = XshellSavedPassword(encoded: "invalid")
+        XCTAssertThrowsError(try bad.importingPasswords(into: empty, directory: "", sourceMaster: "123123", destinationSecret: local.secret, destinationLocalKeyID: local.id, fillMissingOnly: false))
+        XCTAssertTrue(empty.profiles.isEmpty)
+        enum Stop: Error { case cancelled }
+        XCTAssertThrowsError(try report.importingPasswords(into: empty, directory: "", sourceMaster: "123123", destinationSecret: local.secret, destinationLocalKeyID: local.id, fillMissingOnly: false, check: { throw Stop.cancelled }))
+        let master = "OShell-master-fixture"
+        let protected = try MasterPasswordProtection.enabling(empty, password: master, credentialKey: { _ in "unused" }).configuration
+        let protectedImport = try report.importingPasswords(into: protected, directory: "", sourceMaster: "123123", destinationSecret: master, destinationLocalKeyID: nil, fillMissingOnly: false)
+        let target = protectedImport.configuration.profiles[0]
+        XCTAssertNil(target.encryptedPassword?.localKeyID)
+        XCTAssertEqual(try SessionCipher.decrypt(target.encryptedPassword!, master: master, profile: target), "This is a test")
+        XCTAssertThrowsError(try report.importingPasswords(into: protected, directory: "", sourceMaster: "123123", destinationSecret: local.secret, destinationLocalKeyID: local.id, fillMissingOnly: false))
+    }
+
     func testThirdPartySessionImports() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("oshell-import-fixture-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1454,12 +1530,14 @@ extension CoreTests {
         }
         let tests = CoreTests()
         try tests.testUpdateSource()
+        try tests.testGitHubReleaseMetadata()
         try tests.testMasterStartupProtection()
         try tests.testLocalCredentialKeyStorage()
         try tests.testMixedLocalPasswordsAndArchives()
         try tests.testQuickSendScopePreference()
         try tests.testKeyboardShortcuts()
         try tests.testThirdPartySessionImports()
+        try tests.testXshellMasterPasswordMigration()
         try tests.testColorSchemesAndMigration()
         try tests.testColorSchemeImport()
         try tests.testLiveIdleSettingsMerge()
@@ -1511,7 +1589,7 @@ extension CoreTests {
         tests.testInvalidZmodemHeadersRemainOrdinaryOutput()
         try tests.testLoggerFlushesEveryAcceptedChunk()
         tests.testCancellationDropsInFlightBytesAcrossEveryBoundary()
-        if failures.isEmpty { print("PASS: 58 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
+        if failures.isEmpty { print("PASS: 60 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
         else { failures.forEach { print("FAIL: \($0)") }; exit(1) }
     }
 }

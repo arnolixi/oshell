@@ -39,7 +39,7 @@ enum SessionTransfer {
 
     static func importSessions(workspace: WorkspaceController, directory: String) {
         let source = PopupAlert(); source.messageText = "选择会话导入来源"
-        source.informativeText = "SecureCRT 支持 XML、INI 和 Sessions 目录；Xshell 支持 XSH、ZIP 结构 XTS 和 Sessions 目录。第三方密码与自动执行脚本不迁移，导入前可预览结果。"
+        source.informativeText = "SecureCRT 支持 XML、INI 和 Sessions 目录；Xshell 支持 XSH、ZIP 结构 XTS 和 Sessions 目录。Xshell 可使用原主密码迁移已保存的登录密码，导入前可预览；SecureCRT 密码及自动执行脚本不迁移。"
         source.addButton(withTitle: "选择文件或目录…"); source.addButton(withTitle: "取消")
         let kinds = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 420, height: 28))
         kinds.addItems(withTitles: ["OShell 会话导出（JSON）", "SecureCRT 会话（XML / INI / 目录）", "Xshell 会话（XSH / XTS / ZIP / 目录）"])
@@ -71,19 +71,67 @@ enum SessionTransfer {
 
     static func importExternalReport(_ report: ThirdPartySessionReport, format: ThirdPartySessionFormat, workspace: WorkspaceController, directory: String) throws {
         let preview = PopupAlert(); preview.messageText = format.title + "：可导入 \(report.profiles.count) 个会话，跳过 \(report.skippedCount) 项"
-        preview.informativeText = "目标：" + SessionDirectory.display(directory) + "。会话按来源放入 " + format.title + " 子目录并保留层级。同名会话另存为导入副本，原有会话保留。密码、代理和隧道不迁移，登录自动化不启用；导入后不会自动连接。"
+        preview.informativeText = "目标：" + SessionDirectory.display(directory) + "。新会话保留来源目录层级；可选择只为已导入会话补充空密码。代理、隧道和登录自动化不迁移，导入后不会自动连接。"
         preview.addButton(withTitle: "导入"); preview.addButton(withTitle: "取消")
         preview.buttons.first?.isEnabled = !report.profiles.isEmpty
-        preview.accessoryView = ThirdPartyImportPreview(report)
+        let passwords = NSButton(checkboxWithTitle: "迁移 \(report.passwordCount) 项 Xshell 加密密码（需要原 Xshell 主密码）", target: nil, action: nil)
+        passwords.identifier = .init("import.xshell.passwords"); passwords.state = report.passwordCount > 0 ? .on : .off
+        passwords.isEnabled = format == .xshell && report.passwordCount > 0
+        let fillMissing = NSButton(checkboxWithTitle: "仅补充已导入会话的空密码，不新建会话、不覆盖已有密码", target: nil, action: nil)
+        fillMissing.identifier = .init("import.xshell.fillMissing"); fillMissing.isEnabled = passwords.isEnabled
+        let listing = ThirdPartyImportPreview(report)
+        listing.widthAnchor.constraint(equalToConstant: 760).isActive = true
+        listing.heightAnchor.constraint(equalToConstant: 340).isActive = true
+        let content = NSStackView(views: [passwords, fillMissing, listing])
+        content.orientation = .vertical; content.alignment = .leading; content.spacing = 10
+        content.frame = NSRect(x: 0, y: 0, width: 760, height: 410)
+        preview.accessoryView = content
         guard preview.runModal() == .alertFirstButtonReturn, !report.profiles.isEmpty else { return }
+        let include = passwords.isEnabled && passwords.state == .on
+        let fillOnly = fillMissing.isEnabled && fillMissing.state == .on
+        guard !fillOnly || include else { throw ModelError.invalid("补充密码时请同时勾选迁移 Xshell 加密密码。") }
         let snapshot = workspace.configuration, revision = workspace.configurationRevision
-        guard let result = CredentialTask.run(title: "正在导入会话…", message: "正在合并目录和会话。完成后一次性保存；取消不会修改配置。", work: { token in
-            try report.archive.merging(into: snapshot, directory: directory, includePasswords: false, check: token.check)
-        }) else { return }
-        let updated = try result.get()
-        guard workspace.configurationRevision == revision else { throw ModelError.invalid("处理期间配置已变化，请重新导入。") }
-        guard workspace.saveConfiguration(updated) else { return }
-        Dialogs.message("已导入 \(report.profiles.count) 个会话，原有会话已保留。第三方保存的密码未迁移；请在连接前核对用户名、私钥、代理及隧道设置。")
+        var importedPasswords = 0, preservedPasswords = 0, unmatched = 0
+        let updated: Configuration
+        if include {
+            guard let sourceMaster = promptXshellMaster() else { return }
+            let destinationSecret: String, localID: UUID?
+            if snapshot.hasMasterPassword {
+                guard let master = PasswordVault.shared.masterForImport(hasSavedPasswords: true) else { return }
+                destinationSecret = master; localID = nil
+            } else {
+                let key = try PasswordVault.shared.localKeyForSaving(knownProfiles: workspace.credentialProfiles)
+                destinationSecret = key.secret; localID = key.id
+            }
+            guard let result = CredentialTask.run(title: "正在迁移 Xshell 密码…", message: "校验原主密码，并重新加密保存。任一密码校验失败或取消时，不写入会话配置。", work: { token in
+                try report.importingPasswords(into: snapshot, directory: directory, sourceMaster: sourceMaster,
+                                              destinationSecret: destinationSecret, destinationLocalKeyID: localID,
+                                              fillMissingOnly: fillOnly, check: token.check)
+            }) else { return }
+            let value = try result.get(); updated = value.configuration
+            importedPasswords = value.importedPasswords; preservedPasswords = value.preservedPasswords; unmatched = value.unmatchedSessions
+        } else {
+            guard let result = CredentialTask.run(title: "正在导入会话…", message: "正在合并目录和会话。完成后一次性保存；取消不会修改配置。", work: { token in
+                try report.archive.merging(into: snapshot, directory: directory, includePasswords: false, check: token.check)
+            }) else { return }
+            updated = try result.get()
+        }
+        guard workspace.isSecurityUnlocked, workspace.configurationRevision == revision else { throw ModelError.invalid("处理期间配置已变化或已锁定，请重新导入。") }
+        if !fillOnly || importedPasswords > 0 { guard workspace.saveConfiguration(updated) else { return } }
+        let summary = fillOnly ? "已补充 \(importedPasswords) 项密码；保留 \(preservedPasswords) 项已有密码；\(unmatched) 个会话未匹配。没有新建会话。" : "已导入 \(report.profiles.count) 个会话，迁移 \(importedPasswords) 项密码，原有会话已保留。"
+        Dialogs.message(summary + (include ? "" : "本次未迁移密码。") + "请在连接前核对用户名、私钥、代理及隧道设置。")
+    }
+
+    private static func promptXshellMaster() -> String? {
+        let alert = PopupAlert(); alert.messageText = "输入原 Xshell 主密码"
+        alert.informativeText = "用于解密本次导出的 Xshell 登录密码，不会保存或成为 OShell 主密码。密码将使用 OShell 当前的保护方式重新加密。"
+        alert.addButton(withTitle: "确定"); alert.addButton(withTitle: "取消")
+        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 420, height: 26))
+        input.identifier = .init("import.xshell.master"); input.placeholderString = "Xshell 主密码（不是服务器密码）"
+        alert.accessoryView = input; alert.window.initialFirstResponder = input
+        defer { input.stringValue = "" }
+        while alert.runModal() == .alertFirstButtonReturn { if !input.stringValue.isEmpty { return input.stringValue } }
+        return nil
     }
 
     static func importArchive(at url: URL, workspace: WorkspaceController, directory: String) {

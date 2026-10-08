@@ -5,14 +5,17 @@ import Foundation
 import Darwin
 
 public enum UpdateFlavor: String {
-    case intel = "macOS10.13-Intel", arm64 = "macOS13-arm64"
-    public static func select(appleSilicon: Bool, majorOS: Int) -> UpdateFlavor { appleSilicon && majorOS >= 13 ? .arm64 : .intel }
+    case intel = "macOS10.13-Intel", arm64 = "macOS13-arm64", intelModern = "macOS13-x86_64", universal = "macOS11-Universal"
+    public static func select(appleSilicon: Bool, majorOS: Int) -> UpdateFlavor {
+        if appleSilicon { return majorOS >= 13 ? .arm64 : .universal }
+        return majorOS >= 13 ? .intelModern : .intel
+    }
     public static var current: UpdateFlavor {
         var value: Int32 = 0, size = MemoryLayout<Int32>.size
         let appleSilicon = sysctlbyname("hw.optional.arm64", &value, &size, nil, 0) == 0 && value == 1
         return select(appleSilicon: appleSilicon, majorOS: ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
     }
-    public var feedName: String { "OShell-\(rawValue).xml" }
+    public var minimumOS: String { self == .intel ? "10.13" : (self == .universal ? "11.0" : "13.0") }
 }
 public struct UpdateSource: Equatable {
     public let repository: String
@@ -30,14 +33,14 @@ public struct UpdateSource: Equatable {
               pieces[1] != ".", pieces[1] != ".." else { throw ModelError.invalid("仓库格式应为 owner/repo，或对应的 GitHub HTTPS 地址。") }
         repository = value
     }
-    public func feedURL(for flavor: UpdateFlavor) -> URL { URL(string: "https://github.com/\(repository)/releases/latest/download/\(flavor.feedName)")! }
+    public var latestReleaseURL: URL { URL(string: "https://api.github.com/repos/\(repository)/releases/latest")! }
     public func acceptsArchive(_ url: URL, flavor: UpdateFlavor) -> Bool {
         guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false), parts.scheme == "https", parts.host?.lowercased() == "github.com",
               parts.user == nil, parts.password == nil, parts.port == nil, parts.query == nil, parts.fragment == nil,
-              url.path.lowercased().hasPrefix("/\(repository.lowercased())/releases/download/"), url.pathExtension == "zip" else { return false }
+              url.path.lowercased().hasPrefix("/\(repository.lowercased())/releases/download/"), url.pathExtension == "dmg" else { return false }
         let segments = url.path.split(separator: "/")
         guard segments.count == 6, segments[4] != ".", segments[4] != ".." else { return false }
-        let suffix = "-\(flavor.rawValue)-update.zip"
+        let suffix = "-\(flavor.rawValue).dmg"
         return url.lastPathComponent.hasPrefix("OShell-") && url.lastPathComponent.hasSuffix(suffix)
     }
 }

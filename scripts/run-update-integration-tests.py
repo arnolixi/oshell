@@ -23,12 +23,13 @@ for mode in ['no-update','network-error','unsigned-feed','tampered-feed','bad-ar
     bundle_id='app.oshell.update-test.'+uuid.uuid4().hex
     run(['ditto',ROOT/'dist/OShell.app',live])
     info_path=live/'Contents/Info.plist';info=plistlib.loads(info_path.read_bytes());old_build=int(info['CFBundleVersion']);new_build=old_build+10000
-    info.update(CFBundleIdentifier=bundle_id,SUPublicEDKey=public,SUDefaultsDomain=bundle_id,NSAppTransportSecurity={'NSAllowsArbitraryLoads':True})
+    info.update(CFBundleIdentifier=bundle_id,SUPublicEDKey=public,SUDefaultsDomain=bundle_id)
     info_path.write_bytes(plistlib.dumps(info));run(['codesign','--force','--sign','-',live])
     old_digest=hash_file(info_path)
     run(['ditto',live,new]);after=dict(info,CFBundleVersion=str(new_build),OShellUpdateTestAfter=True,OShellUpdateTestRoot=folder)
     (new/'Contents/Info.plist').write_bytes(plistlib.dumps(after));run(['codesign','--force','--sign','-',new])
-    archive=web/'update.zip';run(['ditto','-c','-k','--keepParent',new,archive])
+    image=root/'image';image.mkdir();run(['ditto',new,image/'OShell.app']);(image/'Applications').symlink_to('/Applications')
+    archive=web/'update.dmg';run(['hdiutil','create','-quiet','-format','UDZO','-fs','HFS+','-volname','OShell Update Test','-srcfolder',image,archive])
     signature=run([SIGN,'--ed-key-file',key,'-p',archive])
     if mode=='bad-archive':
         with archive.open('ab') as f:f.write(b'tampered-test-data')
@@ -37,14 +38,19 @@ for mode in ['no-update','network-error','unsigned-feed','tampered-feed','bad-ar
     feed=web/'appcast.xml';rss=ET.Element('rss',{'version':'2.0'});channel=ET.SubElement(rss,'channel');ET.SubElement(channel,'title').text='Isolated test'
     item=ET.SubElement(channel,'item');ET.SubElement(item,'title').text='Test update'
     ET.SubElement(item,f'{{{NS}}}version').text=str(old_build if mode=='no-update' else new_build)
-    ET.SubElement(item,f'{{{NS}}}shortVersionString').text='0.2.42-test'
+    ET.SubElement(item,f'{{{NS}}}shortVersionString').text=info['CFBundleShortVersionString']
     ET.SubElement(item,f'{{{NS}}}minimumSystemVersion').text='13.0'
-    ET.SubElement(item,'enclosure',{'url':f'http://127.0.0.1:{port}/update.zip','length':str(archive.stat().st_size),'type':'application/octet-stream',f'{{{NS}}}edSignature':signature})
+    uses_release = mode in ['no-update','unsigned-feed','tampered-feed']
+    name=f"OShell-{info['CFBundleShortVersionString']}-macOS13-arm64.dmg"
+    archive_url=f"https://github.com/example-org/OShell/releases/download/v{info['CFBundleShortVersionString']}/{name}" if uses_release else f'http://127.0.0.1:{port}/update.dmg'
+    ET.SubElement(item,'enclosure',{'url':archive_url,'length':str(archive.stat().st_size),'type':'application/octet-stream',f'{{{NS}}}edSignature':signature})
     ET.ElementTree(rss).write(feed,encoding='utf-8',xml_declaration=True)
     if mode!='unsigned-feed': run([SIGN,'--ed-key-file',key,'-p',feed])
     if mode=='tampered-feed':feed.write_bytes(feed.read_bytes().replace(b'Test update',b'Changed update'))
+    release=web/'release.json';release.write_text(json.dumps(dict(draft=False,prerelease=False,tag_name='v'+info['CFBundleShortVersionString'],body='<!-- oshell-update-v1:macOS13-arm64:'+base64.b64encode(feed.read_bytes()).decode()+' -->',assets=[dict(name=name,size=archive.stat().st_size,state='uploaded',browser_download_url=archive_url)])))
     config_file=config/'configuration.json';config_file.write_text('{"profiles":[],"preferences":{}}');config_digest=hash_file(config_file)
-    env=os.environ.copy();env.update(OSHELL_DATA_DIR=str(config),OSHELL_BACKGROUND_TEST='1',OSHELL_UPDATE_INTEGRATION_ROOT=folder,OSHELL_UPDATE_INTEGRATION_MODE=mode,OSHELL_UPDATE_INTEGRATION_URL=f'http://127.0.0.1:{port}/'+('missing.xml' if mode=='network-error' else 'appcast.xml'))
+    env=os.environ.copy();env.update(OSHELL_DATA_DIR=str(config),OSHELL_BACKGROUND_TEST='1',OSHELL_UPDATE_INTEGRATION_ROOT=folder,OSHELL_UPDATE_INTEGRATION_MODE=mode)
+    env['OSHELL_UPDATE_INTEGRATION_RELEASE' if uses_release else 'OSHELL_UPDATE_INTEGRATION_FEED_FILE']=str(release if uses_release else (web/'missing.xml' if mode=='network-error' else feed))
     process=None
     try:
         with open(ROOT/f'validation/updater-integration-{mode}.log','w') as log:

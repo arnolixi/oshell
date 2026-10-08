@@ -14,11 +14,15 @@ final class AuthBroker {
     private var stopped = false
     private var policy: SavedPasswordPolicy?
     private var proxyAttempted = false
+    private var pendingPassword: (String, SSHIdentity)?
+    private let permitsSaving: Bool
+    private lazy var loginIdentity: SSHIdentity? = try? SSHIdentity.resolve(profile)
     private let profile: SessionProfile
     var onAuthenticated: (() -> Void)?
+    var onSavePassword: ((SessionProfile, String, SSHIdentity) -> Void)?
     var manualPrompt: ((AuthRequest, @escaping (AuthResponse) -> Void) -> Void)?
-    init(profile: SessionProfile, oneTimePassword: String? = nil) throws {
-        self.profile = profile
+    init(profile: SessionProfile, oneTimePassword: String? = nil, permitsSaving: Bool = true) throws {
+        self.profile = profile; self.permitsSaving = permitsSaving && oneTimePassword == nil
         if let oneTimePassword { policy = SavedPasswordPolicy(identity: try SSHIdentity.resolve(profile), password: oneTimePassword) }
         directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("oa-" + String(UUID().uuidString.prefix(8)))
         endpoint = directory.appendingPathComponent("s")
@@ -69,7 +73,17 @@ final class AuthBroker {
         return values
     }
     private func respond(_ request: AuthRequest, completion: @escaping (AuthResponse) -> Void) {
-        if request.hint == "oshell-session-ready" { onAuthenticated?(); completion(AuthResponse(success: true)); return }
+        if request.hint == "oshell-session-ready" {
+            let pending = pendingPassword; pendingPassword = nil
+            onAuthenticated?(); completion(AuthResponse(success: true))
+            if let pending {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.stopped else { return }
+                    self.onSavePassword?(self.profile, pending.0, pending.1)
+                }
+            }
+            return
+        }
         if request.hint == "oshell-proxy" {
             guard profile.proxy.supportsPassword, !profile.proxy.username.isEmpty, !proxyAttempted else { completion(AuthResponse(success: false)); return }
             proxyAttempted = true
@@ -92,6 +106,13 @@ final class AuthBroker {
             return
         }
         if request.hint == "none" { completion(AuthResponse(success: true)); return }
+        let saveIdentity: SSHIdentity? = {
+            guard permitsSaving, profile.kind == .ssh, onSavePassword != nil, let identity = loginIdentity else { return nil }
+            var match = SavedPasswordPolicy(identity: identity, password: "probe")
+            return match.reply(prompt: request.prompt, hint: request.hint) == nil ? nil : identity
+        }()
+        // A repeated password prompt means the preceding attempt was rejected.
+        if saveIdentity != nil { pendingPassword = nil }
         if var policy, let answer = policy.reply(prompt: request.prompt, hint: request.hint) {
             self.policy = policy; completion(AuthResponse(success: true, answer: answer)); return
         }
@@ -118,11 +139,28 @@ final class AuthBroker {
             completion(AuthResponse(success: true, answer: alert.runModal() == .alertFirstButtonReturn ? "yes" : "no")); return
         }
         alert.addButton(withTitle: "确定"); alert.addButton(withTitle: "取消")
-        let field = NSSecureTextField(); field.frame = NSRect(x: 0, y: 0, width: 330, height: 26)
-        alert.accessoryView = field; alert.window.initialFirstResponder = field
-        let accepted = alert.runModal() == .alertFirstButtonReturn
-        completion(AuthResponse(success: accepted, answer: accepted ? field.stringValue : "")); field.stringValue = ""
+        let field = NSSecureTextField(); field.identifier = .init("ssh.auth.password")
+        let save = NSButton(checkboxWithTitle: "连接成功后保存密码到会话配置", target: nil, action: nil)
+        save.identifier = .init("ssh.auth.savePassword"); save.state = .off
+        save.isEnabled = saveIdentity != nil
+        save.toolTip = saveIdentity == nil ? "仅保存当前目标的 SSH 登录密码；密钥口令、验证码及一次性凭据不保存。" : "使用 OShell 当前的主密码或本机密钥加密保存，下次连接时使用。"
+        var controls: [NSView] = [field]
+        if let identity = saveIdentity {
+            let account = NSTextField(labelWithString: "账号：\(identity.user)    主机：\(identity.host):\(identity.port)")
+            account.lineBreakMode = .byTruncatingMiddle; controls.insert(account, at: 0)
+        }
+        if onSavePassword != nil { controls.append(save) }
+        let content = NSStackView(views: controls); content.orientation = .vertical; content.alignment = .leading; content.spacing = 10
+        content.frame = NSRect(x: 0, y: 0, width: 440, height: CGFloat(controls.count) * 30)
+        field.widthAnchor.constraint(equalToConstant: 440).isActive = true
+        alert.accessoryView = content; alert.window.initialFirstResponder = field
+        let accepted = alert.runModal() == .alertFirstButtonReturn && !stopped
+        let answer = accepted ? field.stringValue : ""; field.stringValue = ""
+        if accepted, save.state == .on, let identity = saveIdentity, !answer.isEmpty { pendingPassword = (answer, identity) }
+        else if !accepted { pendingPassword = nil }
+        completion(AuthResponse(success: accepted, answer: answer))
     }
-    func stop() { stopped = true; policy = nil; source?.cancel(); source = nil; try? FileManager.default.removeItem(at: directory) }
+
+    func stop() { stopped = true; policy = nil; pendingPassword = nil; source?.cancel(); source = nil; try? FileManager.default.removeItem(at: directory) }
     deinit { source?.cancel(); try? FileManager.default.removeItem(at: directory) }
 }

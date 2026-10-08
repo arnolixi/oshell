@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--flavor', required=True, choices=['arm64', 'legacy'])
+    parser.add_argument('--flavor', required=True, choices=['arm64', 'legacy', 'compat', 'intel'])
     parser.add_argument('--tag', required=True)
     args = parser.parse_args()
     secret = os.environ.get('OSHELL_UPDATE_SIGNING_KEY', '').strip()

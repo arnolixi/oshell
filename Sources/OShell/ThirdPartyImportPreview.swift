@@ -11,7 +11,7 @@ final class ThirdPartyImportPreview: NSView, NSTableViewDataSource, NSTableViewD
         self.report = report
         super.init(frame: NSRect(x: 0, y: 0, width: 760, height: 340))
         table.delegate = self; table.dataSource = self; table.rowHeight = 27; table.usesAlternatingRowBackgroundColors = true
-        for (key, title, width) in [("name", "名称", 150.0), ("folder", "目录", 155.0), ("protocol", "协议", 60.0), ("host", "主机", 170.0), ("port", "端口", 55.0), ("user", "用户名", 110.0)] {
+        for (key, title, width) in [("name", "名称", 150.0), ("folder", "目录", 155.0), ("protocol", "协议", 60.0), ("host", "主机", 170.0), ("port", "端口", 55.0), ("user", "用户名", 110.0), ("password", "保存的密码", 100.0)] {
             let column = NSTableColumn(identifier: .init(key)); column.title = title; column.width = width; table.addTableColumn(column)
         }
         table.identifier = .init("import.external.sessions")
@@ -33,6 +33,7 @@ final class ThirdPartyImportPreview: NSView, NSTableViewDataSource, NSTableViewD
         case "protocol": value = profile.kind.title
         case "host": value = profile.host
         case "port": value = String(profile.port)
+        case "password": value = report.xshellPasswords[profile.id] == nil ? "未提供" : "已检测（待校验）"
         default: value = profile.username.isEmpty ? "（未提供）" : profile.username
         }
         let cell = NSTableCellView(), label = NSTextField(labelWithString: value)

@@ -396,6 +396,21 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         let knownHosts = store.url.deletingLastPathComponent().appendingPathComponent("known_hosts")
         try? FileManager.default.createDirectory(at: knownHosts.deletingLastPathComponent(), withIntermediateDirectories: true)
         let pane = TerminalPane(profile: profile, preferences: configuration.preferences, knownHostsFile: knownHosts, oneTimePassword: oneTimePassword, terminalType: terminalType, connectionGroup: connectionGroup, reuseConnection: reuseConnection, blank: blank)
+        var wasSaved = configuration.profiles.contains { $0.id == profile.id }
+        pane.credentialsForConnection = { [weak self] in
+            var candidate = profile
+            if let saved = self?.configuration.profiles.first(where: { $0.id == profile.id }) {
+                wasSaved = true
+                let sameUser = saved.username == profile.username || (profile.username.isEmpty && saved.username == (try? SSHIdentity.resolve(profile))?.user)
+                if saved.host == profile.host && saved.port == profile.port && sameUser && saved.kind == profile.kind {
+                    candidate.username = saved.username; candidate.encryptedPassword = saved.encryptedPassword
+                }
+            }
+            return candidate
+        }
+        pane.onSaveAuthenticatedPassword = { [weak self] original, password, identity in
+            self?.saveAuthenticatedPassword(password, profile: original, identity: identity, requireExisting: wasSaved) { if $0 { wasSaved = true } }
+        }
         pane.onFocus = { [weak self] pane in
             guard let self, let tab = self.tabs.first(where: { $0.layout.panes.contains(where: { $0 === pane }) }) else { return }
             tab.activePane = pane

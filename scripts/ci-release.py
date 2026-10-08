@@ -3,6 +3,7 @@
 # Copyright (c) 2026 OShell contributors
 """Validate tag builds, collect four verified DMGs, and publish a complete Release."""
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -88,41 +89,29 @@ def stage(meta, flavor, output):
     manifest = dict(meta, flavor=flavor, file=name, sha256=sha256(dmg), size=dmg.stat().st_size, verification=entry)
     (output/'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
-def update_asset_names(version):
-    return {name for flavor in ['arm64', 'legacy'] for name in [
-        f'OShell-{version}-{TARGETS[flavor].suffix}-update.zip', f'OShell-{TARGETS[flavor].suffix}.xml']}
-
-def collect_updates(meta, artifacts, repository):
-    if {path.name for path in artifacts.iterdir()} != {'updates-arm64', 'updates-legacy'}:
-        raise ValueError('Both signed update architectures are required')
-    assets = []
+def collect_updates(meta, artifacts, repository, installers):
+    if {path.name for path in artifacts.iterdir()} != {'updates-' + flavor for flavor in RELEASE_FLAVORS}:
+        raise ValueError('Signed DMG metadata for all four targets is required')
+    notes = []
     sparkle = '{http://www.andymatuschak.org/xml-namespaces/sparkle}'
-    for flavor in ['arm64', 'legacy']:
+    for flavor in RELEASE_FLAVORS:
         folder = artifacts/('updates-' + flavor)
-        suffix = TARGETS[flavor].suffix
-        names = {f"OShell-{meta['version']}-{suffix}-update.zip", f'OShell-{suffix}.xml'}
-        manifest = json.loads((folder/'release-assets.json').read_text())
-        if any(manifest.get(key) != value for key, value in dict(version=meta['version'], build=meta['build'], tag=meta['tag'], repository=repository).items()) or set(manifest.get('assets', [])) != names:
-            raise ValueError('Update assets do not match this release')
-        if {p.name for p in folder.iterdir()} != names | {'release-assets.json', 'SHA256SUMS.txt'}:
-            raise ValueError('Unexpected update artifact files')
-        checksums = {}
-        for line in (folder/'SHA256SUMS.txt').read_text().splitlines():
-            digest, name = line.split('  ', 1)
-            if name not in names or name in checksums: raise ValueError('Invalid update checksum list')
-            checksums[name] = digest
-        if set(checksums) != names: raise ValueError('Missing update checksums')
-        for name in sorted(names):
-            path = folder/name
-            if path.is_symlink() or sha256(path) != checksums[name]: raise ValueError('Update artifact integrity check failed')
-            assets.append(path)
-        item = ET.parse(folder/f'OShell-{suffix}.xml').find('./channel/item')
-        if item is None or item.findtext(sparkle+'version') != meta['build'] or item.findtext(sparkle+'shortVersionString') != meta['version'] or item.findtext(sparkle+'minimumSystemVersion') != TARGETS[flavor].minimum:
-            raise ValueError('Update feed version or deployment target mismatch')
-        enclosure = item.find('enclosure'); archive = folder/f"OShell-{meta['version']}-{suffix}-update.zip"
-        if enclosure is None or enclosure.get('url') != f"https://github.com/{repository}/releases/download/{meta['tag']}/{archive.name}" or enclosure.get('length') != str(archive.stat().st_size) or not enclosure.get(sparkle+'edSignature'):
-            raise ValueError('Update feed has no valid matching signed enclosure')
-    return assets
+        if {path.name for path in folder.iterdir()} != {flavor + '.json'}: raise ValueError('Unexpected update metadata files')
+        record = json.loads((folder/(flavor + '.json')).read_text())
+        expected = next(value for value in installers if value['flavor'] == flavor)
+        fields = dict(format='OShell.release-update.v1', version=meta['version'], build=meta['build'], tag=meta['tag'], repository=repository, flavor=flavor, file=expected['file'], sha256=expected['sha256'], size=expected['size'])
+        if any(record.get(key) != value for key,value in fields.items()): raise ValueError('Signed update metadata does not match the verified DMG')
+        data = base64.b64decode(record['signedFeed'], validate=True)
+        if len(data) > 32768 or b'<!DOCTYPE' in data.upper() or b'<!ENTITY' in data.upper(): raise ValueError('Invalid update metadata')
+        items = ET.fromstring(data).findall('./channel/item')
+        if len(items)!=1: raise ValueError('Expected one signed update item')
+        item=items[0]; enclosure=item.find('enclosure')
+        if item.findtext(sparkle+'version') != meta['build'] or item.findtext(sparkle+'shortVersionString') != meta['version'] or item.findtext(sparkle+'minimumSystemVersion') != TARGETS[flavor].minimum:
+            raise ValueError('Signed update version or deployment target mismatch')
+        if enclosure is None or enclosure.get('url') != f"https://github.com/{repository}/releases/download/{meta['tag']}/{expected['file']}" or enclosure.get('length') != str(expected['size']) or len(base64.b64decode(enclosure.get(sparkle+'edSignature', ''), validate=True)) != 64:
+            raise ValueError('Signed update enclosure does not match DMG')
+        notes.append(f"<!-- oshell-update-v1:{TARGETS[flavor].suffix}:{record['signedFeed']} -->")
+    return notes
 
 def collect(meta, artifacts, source, output, updates_artifacts=None, repository=""):
     expected_dirs = {'dmg-' + flavor for flavor in RELEASE_FLAVORS}
@@ -149,7 +138,7 @@ def collect(meta, artifacts, source, output, updates_artifacts=None, repository=
         records.append(record)
     if source.name != f"OShell-{meta['version']}-source.tar.gz" or not source.is_file() or source.is_symlink():
         raise ValueError('Expected the audited source archive for this version')
-    updates = collect_updates(meta, updates_artifacts, repository) if updates_artifacts else []
+    updates = collect_updates(meta, updates_artifacts, repository, records) if updates_artifacts else []
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise ValueError('Release output must be empty')
@@ -158,8 +147,7 @@ def collect(meta, artifacts, source, output, updates_artifacts=None, repository=
     shutil.copy2(source, output/source.name)
     release_manifest = dict(meta, signing='ad-hoc', notarized=False, installers=records,
                             source=dict(file=source.name, sha256=sha256(source)))
-    for path in updates: shutil.copy2(path, output/path.name)
-    if updates: release_manifest['updateAssets'] = [dict(file=p.name, sha256=sha256(p)) for p in updates]
+    if updates: release_manifest['updateMetadata'] = 'embedded-in-release-notes-v1'
     (output/'release-manifest.json').write_text(json.dumps(release_manifest, indent=2) + '\n')
     assets = sorted(output.iterdir())
     (output/'SHA256SUMS.txt').write_text(''.join(f'{sha256(path)}  {path.name}\n' for path in assets))
@@ -172,14 +160,14 @@ OShell {meta['version']}（build {meta['build']}）
 {rows}
 
 现代版以 macOS 13 为最低目标，也适用于更新系统；Universal 同时包含 Intel 与 Apple Silicon。
-下载适合本机的一种 DMG，将 OShell.app 拖入 Applications。SHA256SUMS.txt 提供校验值，对应源码包随附。
+下载适合本机的一种 DMG，将 OShell.app 拖入 Applications。包内附带 SHA256SUMS.txt（包内文件校验）和 release-manifest.json（构建信息）；对应源码包单独提供。
 
 这些安装包使用 ad-hoc 签名，未进行 Developer ID 签名或 Apple 公证。流水线校验架构、部署目标、载荷和签名完整性，并运行构建机原生架构的核心测试；不代表已在 macOS 10.13/11 的真实系统上完成验证。
-{'包含两个架构的签名 ZIP 与 XML 清单，可用于 OShell 内置更新。' if updates else '本次仅发布手动安装包，不包含内置更新文件。'}
+{'内置更新直接使用上述 DMG，签名更新信息包含在本页中，无需额外 XML 或更新 ZIP。旧客户端请手动安装本版本一次。' if updates else '本次仅发布手动安装包，不包含内置更新信息。'}
 
 对应提交：`{meta['commit']}`
 """
-    (output/'RELEASE_NOTES.md').write_text(notes)
+    (output/'RELEASE_NOTES.md').write_text(notes + '\n' + '\n'.join(updates) + '\n')
     return release_manifest
 
 def gh(*args, check=True):
@@ -198,22 +186,20 @@ def verify_remote_tag(repository, tag, commit):
 def publish(meta, repository, output):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
         raise ValueError('Repository must be owner/repo')
-    files = sorted(path for path in output.iterdir() if path.name != 'RELEASE_NOTES.md')
-    expected = {artifact_name(meta['version'], flavor) for flavor in RELEASE_FLAVORS} | {f"OShell-{meta['version']}-source.tar.gz", 'release-manifest.json', 'SHA256SUMS.txt'}
+    internal = {'RELEASE_NOTES.md', 'release-manifest.json', 'SHA256SUMS.txt'}
+    files = sorted(path for path in output.iterdir() if path.name not in internal)
+    expected = {artifact_name(meta['version'], flavor) for flavor in RELEASE_FLAVORS} | {f"OShell-{meta['version']}-source.tar.gz"}
     manifest = json.loads((output/'release-manifest.json').read_text())
-    if manifest.get('updateAssets'):
-        names = {record['file'] for record in manifest['updateAssets']}
-        if names != update_asset_names(meta['version']): raise ValueError('Both update flavors must be published together')
-        expected |= names
     if {path.name for path in files} != expected:
         raise ValueError('Release asset set is incomplete')
+    expected_checksums = expected | {'release-manifest.json'}
     checked = set()
     for line in (output/'SHA256SUMS.txt').read_text().splitlines():
         digest, name = line.split('  ', 1)
-        if Path(name).name != name or name not in expected or name in checked or (output/name).is_symlink() or sha256(output/name) != digest:
+        if Path(name).name != name or name not in expected_checksums or name in checked or (output/name).is_symlink() or sha256(output/name) != digest:
             raise ValueError('Release checksum verification failed')
         checked.add(name)
-    if checked != expected - {'SHA256SUMS.txt'}:
+    if checked != expected_checksums:
         raise ValueError('Release checksums do not cover every asset')
     verify_remote_tag(repository, meta['tag'], meta['commit'])
     existing = gh('release', 'view', meta['tag'], '--repo', repository, '--json', 'isDraft,body', check=False)
@@ -227,8 +213,11 @@ def publish(meta, repository, output):
     else:
         raise RuntimeError(existing.stderr)
     # --clobber is used only for an unpublished draft owned by this workflow/commit.
+    gh('release', 'edit', meta['tag'], '--repo', repository, '--notes-file', str(output/'RELEASE_NOTES.md'))
     gh('release', 'upload', meta['tag'], *map(str, files), '--repo', repository, '--clobber')
-    assets = json.loads(gh('release', 'view', meta['tag'], '--repo', repository, '--json', 'assets').stdout)['assets']
+    published = json.loads(gh('release', 'view', meta['tag'], '--repo', repository, '--json', 'assets,body').stdout)
+    if published.get('body') != (output/'RELEASE_NOTES.md').read_text(): raise ValueError('Remote signed update metadata changed; Release remains a draft')
+    assets = published['assets']
     remote = {asset['name']: asset['size'] for asset in assets}
     if remote != {path.name: path.stat().st_size for path in files}:
         raise ValueError('Incomplete remote assets; Release remains a draft')

@@ -114,20 +114,20 @@ jobs:
           options=()
           if [ "$PUBLISH_RELEASE" != true ]; then options+=(--build-only); fi
           python3 scripts/ci-release.py stage --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --flavor "$FLAVOR" --output work/ci-output "${options[@]}"
-      - name: Prepare signed in-app updates
-        if: needs.metadata.outputs.publish == 'true' && (matrix.flavor == 'arm64' || matrix.flavor == 'legacy')
+      - name: Sign verified DMG update metadata
+        if: needs.metadata.outputs.publish == 'true'
         env:
           OSHELL_UPDATE_SIGNING_KEY: ${{ secrets.OSHELL_UPDATE_SIGNING_KEY }}
         run: |
           if [ -z "$OSHELL_UPDATE_SIGNING_KEY" ]; then
-            echo '::error::Configure the existing OSHELL_UPDATE_SIGNING_KEY secret before publishing. A DMG-only Release breaks in-app update checks.'
+            echo '::error::Configure the existing OSHELL_UPDATE_SIGNING_KEY secret before publishing. Signed Release metadata is required for in-app updates.'
             exit 1
           fi
           python3 -m venv work/update-signing
-          work/update-signing/bin/python -m pip install -r scripts/requirements-release.txt
+          (unset OSHELL_UPDATE_SIGNING_KEY; work/update-signing/bin/python -m pip install -r scripts/requirements-release.txt)
           work/update-signing/bin/python scripts/sign-ci-updates.py --flavor "$FLAVOR" --tag "$RELEASE_TAG"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: needs.metadata.outputs.publish == 'true' && (matrix.flavor == 'arm64' || matrix.flavor == 'legacy')
+        if: needs.metadata.outputs.publish == 'true'
         with:
           name: updates-${{ matrix.flavor }}
           path: work/ci-updates/

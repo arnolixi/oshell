@@ -3,6 +3,7 @@
 # Copyright (c) 2026 OShell contributors
 """Offline checks: no GitHub mutations and no macOS toolchain required."""
 import importlib.util
+import base64
 import json
 import plistlib
 from pathlib import Path
@@ -11,6 +12,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from release_targets import TARGETS, RELEASE_FLAVORS
+import installer_metadata
 
 SCRIPTS = Path(__file__).resolve().parent
 
@@ -204,26 +206,26 @@ class ReleaseTests(unittest.TestCase):
         import xml.etree.ElementTree as ET
         root = self.root/'updates'; root.mkdir()
         namespace = '{http://www.andymatuschak.org/xml-namespaces/sparkle}'
-        for flavor in ['arm64', 'legacy']:
+        for flavor in RELEASE_FLAVORS:
             folder = root/('updates-' + flavor); folder.mkdir(); target = TARGETS[flavor]
-            archive = folder/f"OShell-{META['version']}-{target.suffix}-update.zip"; archive.write_bytes(b'offline archive fixture')
-            feed = folder/f'OShell-{target.suffix}.xml'
+            record = json.loads((self.incoming/('dmg-' + flavor)/'manifest.json').read_text())
             rss = ET.Element('rss'); channel = ET.SubElement(rss, 'channel'); item = ET.SubElement(channel, 'item')
             for key, value in [('version', META['build']), ('shortVersionString', META['version']), ('minimumSystemVersion', target.minimum)]: ET.SubElement(item, namespace+key).text = value
-            ET.SubElement(item, 'enclosure', {'url': f"https://github.com/owner/repo/releases/download/{META['tag']}/{archive.name}", 'length': str(archive.stat().st_size), namespace+'edSignature': 'offline structural fixture'})
-            ET.ElementTree(rss).write(feed)
-            (folder/'release-assets.json').write_text(json.dumps(dict(version=META['version'],build=META['build'],tag=META['tag'],repository='owner/repo',assets=[archive.name,feed.name])))
-            (folder/'SHA256SUMS.txt').write_text(''.join(f'{CI.sha256(p)}  {p.name}\n' for p in [archive,feed]))
+            ET.SubElement(item, 'enclosure', {'url': f"https://github.com/owner/repo/releases/download/{META['tag']}/{record['file']}", 'length': str(record['size']), namespace+'edSignature': base64.b64encode(b'x'*64).decode()})
+            (folder/(flavor+'.json')).write_text(json.dumps(dict(format='OShell.release-update.v1',version=META['version'],build=META['build'],tag=META['tag'],repository='owner/repo',flavor=flavor,file=record['file'],size=record['size'],sha256=record['sha256'],signedFeed=base64.b64encode(ET.tostring(rss)).decode())))
         return root
 
-    def test_signed_update_artifacts_included_in_release(self):
+    def test_signed_update_metadata_embedded_without_extra_assets(self):
         updates = self.update_artifacts()
         result = CI.collect(META, self.incoming, self.source, self.output, updates, 'owner/repo')
-        self.assertEqual({r['file'] for r in result['updateAssets']}, CI.update_asset_names(META['version']))
+        self.assertEqual(result['updateMetadata'], 'embedded-in-release-notes-v1')
+        notes = (self.output/'RELEASE_NOTES.md').read_text()
+        for flavor in RELEASE_FLAVORS: self.assertIn('<!-- oshell-update-v1:'+TARGETS[flavor].suffix+':', notes)
         calls = []
         with patch.object(CI, 'gh', self.fake_gh(calls)): CI.publish(META, 'owner/repo', self.output)
         upload = next(call for call in calls if call[:2] == ('release', 'upload'))
-        for name in CI.update_asset_names(META['version']): self.assertIn(str(self.output/name), upload)
+        self.assertFalse(any(path.endswith(('.xml','-update.zip','.json','.txt')) for path in upload))
+        self.assertEqual(len(list(self.output.glob('*.dmg'))),4)
 
     def test_missing_update_architecture_prevents_release(self):
         import shutil
@@ -232,7 +234,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_changed_update_archive_rejected(self):
-        updates = self.update_artifacts(); next((updates/'updates-arm64').glob('*.zip')).write_bytes(b'changed')
+        updates = self.update_artifacts()
+        path=updates/'updates-arm64/arm64.json';record=json.loads(path.read_text());record['sha256']='bad';path.write_text(json.dumps(record))
         with self.assertRaises(ValueError): CI.collect(META, self.incoming, self.source, self.output, updates, 'owner/repo')
         self.assertFalse(self.output.exists())
 
@@ -263,9 +266,9 @@ class ReleaseTests(unittest.TestCase):
                 if args[-1] == 'isDraft,body':
                     if existing is None: status, error = 1, 'release not found'
                     else: output = json.dumps(existing)
-                elif args[-1] == 'assets':
-                    assets = [dict(name=path.name, size=path.stat().st_size) for path in self.output.iterdir() if path.name != 'RELEASE_NOTES.md']
-                    output = json.dumps({'assets': assets[:-1] if incomplete else assets})
+                elif args[-1] == 'assets,body':
+                    assets = [dict(name=path.name, size=path.stat().st_size) for path in self.output.iterdir() if path.name not in {'RELEASE_NOTES.md', 'release-manifest.json', 'SHA256SUMS.txt'}]
+                    output = json.dumps({'assets': assets[:-1] if incomplete else assets, 'body': (self.output/'RELEASE_NOTES.md').read_text()})
             elif args[:2] == ('release', 'upload') and fail_upload:
                 raise subprocess.CalledProcessError(1, ['gh', *args])
             return subprocess.CompletedProcess(['gh', *args], status, output, error)
@@ -280,18 +283,21 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(steps[-1], ('release', 'edit'))
         self.assertIn('--draft', next(call for call in calls if call[:2] == ('release', 'create')))
         self.assertIn('--draft=false', calls[-1])
+        upload = next(call for call in calls if call[:2] == ('release', 'upload'))
+        self.assertNotIn(str(self.output/'SHA256SUMS.txt'), upload)
+        self.assertNotIn(str(self.output/'release-manifest.json'), upload)
 
     def test_upload_failure_leaves_draft(self):
         self.collect(); calls = []
         with patch.object(CI, 'gh', self.fake_gh(calls, fail_upload=True)), self.assertRaises(subprocess.CalledProcessError):
             CI.publish(META, 'owner/repo', self.output)
-        self.assertFalse(any(call[:2] == ('release', 'edit') for call in calls))
+        self.assertFalse(any('--draft=false' in call for call in calls))
 
     def test_incomplete_remote_assets_never_published(self):
         self.collect(); calls = []
         with patch.object(CI, 'gh', self.fake_gh(calls, incomplete=True)), self.assertRaises(ValueError):
             CI.publish(META, 'owner/repo', self.output)
-        self.assertFalse(any(call[:2] == ('release', 'edit') for call in calls))
+        self.assertFalse(any('--draft=false' in call for call in calls))
 
     def test_published_release_is_immutable(self):
         self.collect(); calls = []
@@ -314,10 +320,51 @@ class ReleaseTests(unittest.TestCase):
             CI.publish(META, 'owner/repo', self.output)
         self.assertEqual(len(calls), 1)
 
+    def installer_fixture(self):
+        root = self.root/'image'; contents = root/'OShell.app/Contents'; contents.mkdir(parents=True)
+        (contents/'Info.plist').write_bytes(plistlib.dumps(dict(CFBundleShortVersionString='1.2.3', CFBundleVersion='45', LSMinimumSystemVersion='13.0')))
+        (contents/'binary').write_bytes(b'unchanged signed payload fixture')
+        (contents/'alias').symlink_to('binary'); (root/'Applications').symlink_to('/Applications')
+        (root/'安装说明.txt').write_text('安装说明')
+        options = dict(version='1.2.3',build='45',flavor='arm64',minimum='13.0',architectures=['arm64'])
+        installer_metadata.write(root, **options, source_root=self.root)
+        return root, options
+
+    def test_installer_metadata_covers_payload_without_changing_it(self):
+        root, options = self.installer_fixture()
+        record = installer_metadata.verify(root, **options)
+        self.assertEqual((root/'OShell.app/Contents/binary').read_bytes(), b'unchanged signed payload fixture')
+        self.assertIsNone(record['commit'])
+        names = {line.split('  ',1)[1] for line in (root/'SHA256SUMS.txt').read_text().splitlines()}
+        self.assertIn('release-manifest.json', names)
+        self.assertIn('OShell.app/Contents/binary', names)
+        self.assertNotIn('SHA256SUMS.txt', names)
+        self.assertEqual(record['symlinks']['Applications'], '/Applications')
+
+    def test_installer_metadata_detects_modified_payload(self):
+        root, options = self.installer_fixture()
+        (root/'OShell.app/Contents/binary').write_bytes(b'tampered')
+        with self.assertRaises(ValueError): installer_metadata.verify(root, **options)
+
+    def test_installer_metadata_detects_missing_checksums_and_changed_links(self):
+        root, options = self.installer_fixture()
+        sums = (root/'SHA256SUMS.txt').read_text(); (root/'SHA256SUMS.txt').write_text('')
+        with self.assertRaises(ValueError): installer_metadata.verify(root, **options)
+        (root/'SHA256SUMS.txt').write_text(sums)
+        alias = root/'OShell.app/Contents/alias'; alias.unlink(); alias.symlink_to('Info.plist')
+        with self.assertRaises(ValueError): installer_metadata.verify(root, **options)
+
+    def test_installer_metadata_rejects_wrong_version_or_extra_files(self):
+        root, options = self.installer_fixture()
+        with self.assertRaises(ValueError): installer_metadata.write(root, **dict(options, version='9.9.9'), source_root=self.root)
+        (root/'OShell.app/Contents/unexpected').write_text('extra')
+        with self.assertRaises(ValueError): installer_metadata.verify(root, **options)
+
     def test_dmg_only_skips_pkg_tools(self):
         root = self.root/'package'; root.mkdir(); (root/'LICENSE').write_text('license fixture')
         app = root/'app/OShell.app'; resources = app/'Contents/Resources'; resources.mkdir(parents=True)
         (resources/'OShell-LICENSE.txt').write_text('license fixture')
+        (app/'Contents/Info.plist').write_bytes(plistlib.dumps(dict(CFBundleShortVersionString=PACK.VERSION, CFBundleVersion=PACK.INFO['CFBundleVersion'], LSMinimumSystemVersion='13.0')))
         work, out = root/'work', root/'out'; (work/'arm64').mkdir(parents=True); out.mkdir()
         calls = []
         def fake_run(args, **kwargs):
@@ -328,6 +375,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual([path.suffix for path in artifacts], ['.dmg'])
         self.assertFalse(any(call[0] in ['pkgbuild', 'productbuild'] for call in calls))
         self.assertTrue(any(call[:2] == ['hdiutil', 'verify'] for call in calls))
+        self.assertTrue((work/'arm64/image/SHA256SUMS.txt').is_file())
+        self.assertTrue((work/'arm64/image/release-manifest.json').is_file())
 
 if __name__ == '__main__':
     unittest.main()

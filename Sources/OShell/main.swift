@@ -9,7 +9,7 @@ import Darwin
 // without taking keyboard focus from the user's foreground application.
 private let backgroundTransferTest = ProcessInfo.processInfo.environment["OSHELL_BACKGROUND_TEST"] == "1"
     && ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] != nil
-    && CommandLine.arguments.contains(where: { ["--third-party-import-test", "--keyboard-shortcuts-test", "--toolbar-actions-test", "--quicksend-groups-test", "--tab-behavior-test", "--layout-test", "--zmodem-progress-test", "--zmodem-regression-test", "--file-feature-test", "--search-test", "--host-identity-test", "--session-links-test", "--session-defaults-test", "--shell-integration-test", "--live-keepalive-test", "--appearance-test", "--quicksend-persistence-test", "--local-password-test", "--management-test", "--startup-protection-test", "--tab-drag-test", "--tab-actions-test", "--master-removal-test", "--update-feature-test", "--update-integration-test", "--terminal-focus-test", "--terminal-symbols-test", "--session-directory-test", "--quicksend-focus-test", "--arrangement-scroll-test", "--tab-number-test", "--links-catalog-test", "--named-tab-groups-test"].contains($0) })
+    && CommandLine.arguments.contains(where: { ["--login-password-save-test", "--third-party-import-test", "--keyboard-shortcuts-test", "--toolbar-actions-test", "--quicksend-groups-test", "--tab-behavior-test", "--layout-test", "--zmodem-progress-test", "--zmodem-regression-test", "--file-feature-test", "--search-test", "--host-identity-test", "--session-links-test", "--session-defaults-test", "--shell-integration-test", "--live-keepalive-test", "--appearance-test", "--quicksend-persistence-test", "--local-password-test", "--management-test", "--startup-protection-test", "--tab-drag-test", "--tab-actions-test", "--master-removal-test", "--update-feature-test", "--update-integration-test", "--terminal-focus-test", "--terminal-symbols-test", "--session-directory-test", "--quicksend-focus-test", "--arrangement-scroll-test", "--tab-number-test", "--links-catalog-test", "--named-tab-groups-test"].contains($0) })
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: WorkspaceController!
@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--links-catalog-test") { LinksCatalogTest.run(controller) }
         if CommandLine.arguments.contains("--tab-number-test") { TabNumberTest.run(controller) }
         if CommandLine.arguments.contains("--arrangement-scroll-test") { ArrangementScrollTest.run(controller) }
+        if CommandLine.arguments.contains("--login-password-save-test") { LoginPasswordSavingTest.run(controller) }
         if CommandLine.arguments.contains("--third-party-import-test") { ThirdPartyImportTest.run(controller) }
         if CommandLine.arguments.contains("--keyboard-shortcuts-test") { KeyboardShortcutsTest.run(controller) }
         if CommandLine.arguments.contains("--toolbar-actions-test") { ToolbarActionsTest.run(controller) }

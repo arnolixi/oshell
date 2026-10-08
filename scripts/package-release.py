@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 from release_targets import TARGETS, RELEASE_FLAVORS
+import installer_metadata
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / 'work/release'
@@ -167,7 +168,8 @@ def package(flavor, arches, minimum, app, package_format="both"):
     shutil.copytree(app,image/'OShell.app',dirs_exist_ok=True,symlinks=True)
     if not (image/'Applications').is_symlink():(image/'Applications').symlink_to('/Applications')
     pkg_hint='，或使用同版本 PKG 安装' if package_format == 'both' else ''
-    (image/'安装说明.txt').write_text(f'OShell {VERSION}\n适用：macOS {minimum} 或更新版本；架构 {archlist}。\n把 OShell.app 拖入 Applications{pkg_hint}。\n各版本使用同一个应用及会话目录，只需安装适合本机的一种。\n本包为本地 ad-hoc 签名，未进行 Developer ID 签名或 Apple 公证。\n构建校验不等同于最低系统的实际运行验证。\n')
+    (image/'安装说明.txt').write_text(f'OShell {VERSION}\n适用：macOS {minimum} 或更新版本；架构 {archlist}。\n把 OShell.app 拖入 Applications{pkg_hint}。\n各版本使用同一个应用及会话目录，只需安装适合本机的一种。\n本包为本地 ad-hoc 签名，未进行 Developer ID 签名或 Apple 公证。\n构建校验不等同于最低系统的实际运行验证。\n包内 release-manifest.json 记录构建信息；SHA256SUMS.txt 校验包内文件，不包含外层 DMG 自身。\n')
+    installer_metadata.write(image, version=VERSION, build=str(INFO['CFBundleVersion']), flavor=flavor, minimum=minimum, architectures=arches, source_root=ROOT)
     dmg=OUT/(base+'.dmg')
     run(['hdiutil','create','-ov','-format','UDZO','-fs','HFS+','-volname',f'OShell {VERSION}','-srcfolder',image,dmg],log=f'package-{flavor}-dmg.log')
     run(['hdiutil','verify',dmg],log=f'package-{flavor}-dmg-verify.log')
