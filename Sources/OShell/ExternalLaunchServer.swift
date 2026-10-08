@@ -12,6 +12,11 @@ final class ExternalLaunchServer {
     private var stopped = false
     private let queue = DispatchQueue(label: "OShell.launch.accept")
     private let pending = DispatchSemaphore(value: 8)
+    var workspaceProvider: (() -> WorkspaceController?)?
+    private func targetWorkspace() -> WorkspaceController? {
+        if let workspaceProvider { return workspaceProvider() }
+        return workspace
+    }
     private weak var workspace: WorkspaceController?
     private var recent = [UUID]() // Deduplicate retries, never retain the password here.
     init(workspace: WorkspaceController) throws {
@@ -48,7 +53,7 @@ final class ExternalLaunchServer {
                         DispatchQueue.main.async { [weak self] in
                             func respond(_ allowed: Bool) {
                                 let response: ZOCLaunchResponse
-                                if allowed, let self, !self.stopped, let workspace = self.workspace {
+                                if allowed, let self, !self.stopped, let workspace = self.targetWorkspace() {
                                     if !self.recent.contains(request.id) {
                                         self.recent.append(request.id); if self.recent.count > 256 { self.recent.removeFirst() }
                                         if let terminal = request.terminal { workspace.openExternal(terminal) }
@@ -58,7 +63,7 @@ final class ExternalLaunchServer {
                                 } else { response = ZOCLaunchResponse(accepted: false, message: "OShell 尚未解锁或正在关闭。") }
                                 DispatchQueue.global().async { defer { close(client); pending.signal() }; try? AuthIPC.write(response, fd: client) }
                             }
-                            if let self, !self.stopped, let workspace = self.workspace { workspace.whenStartupUnlocked(respond) }
+                            if let self, !self.stopped, let workspace = self.targetWorkspace() { workspace.whenStartupUnlocked(respond) }
                             else { respond(false) }
                         }
                     } catch {

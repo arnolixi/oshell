@@ -42,6 +42,7 @@ open dist/OShell.app
 
 - [使用指南](docs/usage.md)
 - [SecureCRT / Xshell 会话导入教程](docs/session-import.md)
+- [其他终端会话转换指南（借助 AI 开发脚本）](docs/session-conversion.md)
 - [Shell 集成](shell-integration/README.md)
 - [开发与测试](docs/development.md)
 - [构建与发布更新](docs/releases.md)

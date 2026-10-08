@@ -91,7 +91,7 @@ final class AppearanceSettingsView: NSView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     private func addWell(_ index: Int, title: String, frame: NSRect) {
-        let well = NSColorWell(frame: frame); well.tag = index; well.target = self; well.action = #selector(colorChanged(_:)); well.setAccessibilityLabel(title)
+        let well = PopupColorWell(frame: frame); well.tag = index; well.target = self; well.action = #selector(colorChanged(_:)); well.setAccessibilityLabel(title)
         addSubview(well); wells.append(well)
     }
     private func stashName() { if let index = custom.firstIndex(where: { $0.id == selectedID }) { custom[index].name = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) } }
@@ -153,7 +153,7 @@ final class AppearanceSettingsView: NSView {
     }
     @objc private func importScheme() {
         let panel = NSOpenPanel(); panel.title = "导入终端配色"; panel.allowedFileTypes = ["json", "xcs"]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runPopupModal() == .OK, let url = panel.url else { return }
         do {
             let handle = try FileHandle(forReadingFrom: url); defer { handle.closeFile() }
             let imported = try TerminalColorScheme.decodeImport(handle.readData(ofLength: 65537))
@@ -165,7 +165,7 @@ final class AppearanceSettingsView: NSView {
         do {
             stashName(); try selected.validate()
             let panel = NSSavePanel(); panel.title = "导出终端配色"; panel.oshellJSONFilesOnly(); panel.nameFieldStringValue = "OShell-colors.json"
-            guard panel.runModal() == .OK, let url = panel.url else { return }
+            guard panel.runPopupModal() == .OK, let url = panel.url else { return }
             let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; try PrivateFile.write(encoder.encode(selected), to: url)
         } catch { Dialogs.message(error.localizedDescription) }
     }

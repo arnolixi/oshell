@@ -17,6 +17,18 @@ enum AppearanceFeatureTest {
             let timer = Timer(timeInterval: 0.08, repeats: false) { _ in if let root = NSApp.modalWindow?.contentView { body(root) } }
             RunLoop.main.add(timer, forMode: .common); RunLoop.main.add(timer, forMode: RunLoop.Mode("NSModalPanelRunLoopMode"))
         }
+        let catalog = TerminalFontCatalog.available()
+        checks["systemFontCatalogExpanded"] = catalog.filter(\.system).count > 8
+        checks["fontCatalogHasNoDuplicateFaces"] = Set(catalog.map(\.name)).count == catalog.count
+        checks["catalogFontsAreLocallyAvailable"] = catalog.allSatisfy { NSFont(name: $0.name, size: 13) != nil }
+        checks["catalogContainsMonospacedAndProportional"] = catalog.contains { $0.system && $0.monospaced } && catalog.contains { $0.system && !$0.monospaced }
+        let missingPicker = NSPopUpButton()
+        TerminalFontCatalog.populate(missingPicker, selected: "OShell-Missing-Font-Fixture")
+        checks["missingFontSelectionPreserved"] = missingPicker.selectedItem?.representedObject as? String == "OShell-Missing-Font-Fixture"
+        checks["missingFontUsesSystemPreview"] = TerminalFontCatalog.previewFont(missingPicker).fontName == NSFont.oshellMonospacedSystemFont(ofSize: 13, weight: .regular).fontName
+        checks["fontSectionHeadersDisabled"] = missingPicker.itemArray.filter { $0.representedObject == nil }.allSatisfy { !$0.isEnabled || $0.isSeparatorItem }
+        let additionalSystemFont = catalog.first { $0.system && $0.monospaced && !["Menlo-Regular", "Monaco", "SFMono-Regular", "CourierNewPSMT"].contains($0.name) }
+        checks["additionalSystemMonospaceAvailable"] = additionalSystemFont != nil
         let terminal = ProbeTerminal(frame: NSRect(x: 0, y: 0, width: 720, height: 240))
         terminal.feed(text: "HISTORY_PRESERVED 中文\r\n\u{1b}[31mRED\u{1b}[0m \u{1b}[38;2;1;2;3mTRUECOLOR\u{1b}[0m\r\n")
         let original = terminal.getTerminal().getBufferAsData()
@@ -85,6 +97,25 @@ enum AppearanceFeatureTest {
         checks["appliesAllOpenTerminals"] = panes.allSatisfy { $0.terminal.nativeBackgroundColor.rgbHex == "#2E3440" }
         checks["doesNotRecreateConnections"] = panes.map { $0.terminal.process.shellPid } == pids
         checks["appThemeApplied"] = ApplicationAppearance.theme == .dark && controller.window?.appearance?.name == .oshellDark
+        if let additionalSystemFont {
+            modal { root in
+                let tabs = descendants(root).compactMap { $0 as? NSTabView }.first
+                tabs?.selectTabViewItem(at: 0)
+                let picker = descendants(root).compactMap { $0 as? NSPopUpButton }.first { $0.identifier?.rawValue == "settings.terminal.font" }
+                if let picker, let item = picker.itemArray.first(where: { ($0.representedObject as? String) == additionalSystemFont.name }) {
+                    picker.select(item); picker.sendAction(picker.action!, to: picker.target)
+                    if let page = descendants(root).first(where: { $0 is GeneralSettingsView }) {
+                        root.layoutSubtreeIfNeeded()
+                        checks["expandedFontControlsFitPage"] = descendants(page).filter { $0 is NSButton || $0 is NSTextField }.allSatisfy { page.bounds.contains($0.convert($0.bounds, to: page)) }
+                    }
+                } else { checks["additionalFontInPicker"] = false }
+                descendants(root).compactMap { $0 as? NSButton }.first { $0.title == "应用" }?.performClick(nil)
+            }
+            controller.showPreferences()
+            checks["systemFontSavedAndApplied"] = (try? controller.store.load().preferences.fontName) == additionalSystemFont.name && panes.allSatisfy { $0.terminal.font.fontName == additionalSystemFont.name }
+            checks["systemFontKeepsConnections"] = panes.map { $0.terminal.process.shellPid } == pids
+            checks["systemFontKeepsSymbolFallback"] = panes.allSatisfy { $0.terminal.privateUseFallbackFont != nil }
+        }
         let popup = PopupWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
         popup.isReleasedWhenClosed = false; popup.makeKeyAndOrderFront(nil); popup.orderOut(nil)
         checks["newPopupUsesTheme"] = popup.appearance?.name == .oshellDark; popup.close()

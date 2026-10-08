@@ -114,12 +114,16 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         super.init(window: window); window.delegate = self; window.onFind = { [weak self] in self?.focusSearch() }; window.center(); build(); reload()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func show() { filesOnly = false; fileSelection = nil; table.allowsMultipleSelection = true; window?.title = "会话管理"; reload(); showWindow(nil); window?.makeKeyAndOrderFront(nil) }
+    private func present() {
+        if let popup = window as? PopupWindow, let owner = workspace?.window { popup.present(over: owner) }
+        else { showWindow(nil); window?.makeKeyAndOrderFront(nil) }
+    }
+    func show() { filesOnly = false; fileSelection = nil; table.allowsMultipleSelection = true; window?.title = "会话管理"; reload(); present() }
     func showFiles(selection: @escaping (SessionProfile) -> Void) {
         filesOnly = true; fileSelection = selection; table.deselectAll(nil); table.allowsMultipleSelection = false; kindFilter.selectItem(at: 0)
-        window?.title = "会话管理 · 选择文件会话"; reload(); showWindow(nil); window?.makeKeyAndOrderFront(nil)
+        window?.title = "会话管理 · 选择文件会话"; reload(); present()
     }
-    func showPreservingMode() { reload(); showWindow(nil); window?.makeKeyAndOrderFront(nil) }
+    func showPreservingMode() { reload(); present() }
     private func clearFileSelection() { fileSelection = nil; filesOnly = false; table.allowsMultipleSelection = true; window?.title = "会话管理" }
     func windowWillClose(_ notification: Notification) { clearFileSelection() }
     var visibleProfiles: [SessionProfile] { rows.compactMap(connectionProfile) }

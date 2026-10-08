@@ -679,6 +679,14 @@ final class CoreTests {
         XCTAssertNil(FileSessionAddress.literal("host.test"))
     }
     func testRemoteIdentityAndEcho() throws {
+        let runtime = "vpn-alias.tail000000.ts.net"
+        XCTAssertEqual(LocalHostIdentity.preferredHostname(configured: "Test-Mac", runtime: runtime), "Test-Mac")
+        XCTAssertEqual(LocalHostIdentity.preferredHostname(configured: nil, runtime: runtime), runtime)
+        XCTAssertEqual(LocalHostIdentity.preferredHostname(configured: "invalid name", runtime: runtime), runtime)
+        XCTAssertEqual(LocalHostIdentity.canonicalHostname(runtime, configured: "Test-Mac", runtime: runtime), "Test-Mac")
+        XCTAssertEqual(LocalHostIdentity.canonicalHostname("TEST-MAC.local.", configured: "Test-Mac", runtime: runtime), "Test-Mac")
+        XCTAssertEqual(LocalHostIdentity.canonicalHostname("another.tail000000.ts.net", configured: "Test-Mac", runtime: runtime), "another.tail000000.ts.net")
+        XCTAssertEqual(LocalHostIdentity.canonicalHostname("server.example.test", configured: "Test-Mac", runtime: runtime), "server.example.test")
         let local = LocalHostIdentity.current()
         XCTAssertTrue(!local.hostname.isEmpty)
         if let ip = local.address { XCTAssertEqual(RemoteHostIdentity.address(ip), ip) }

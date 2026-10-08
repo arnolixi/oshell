@@ -26,6 +26,10 @@ extension WorkspaceController {
     }
 }
 final class HighlightManager: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+    override func showWindow(_ sender: Any?) {
+        if let popup = window as? PopupWindow, let owner = workspace?.window { popup.present(over: owner) }
+        else { super.showWindow(sender) }
+    }
     private weak var workspace: WorkspaceController?
     private let sets = NSPopUpButton(), table = NSTableView()
     private var selectedID: UUID?
@@ -49,7 +53,7 @@ final class HighlightManager: NSWindowController, NSTableViewDataSource, NSTable
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     private var current: HighlightSet? { workspace?.configuration.highlightSets.first { $0.id == selectedID } }
     func show() { reload(); showWindow(nil); window?.makeKeyAndOrderFront(nil) }
-    private func reload() {
+    func reload() {
         guard let workspace else { return }; sets.removeAllItems()
         if selectedID == nil { selectedID = workspace.configuration.preferences.highlightSetID ?? workspace.configuration.highlightSets.first?.id }
         for set in workspace.configuration.highlightSets {
@@ -100,7 +104,7 @@ final class HighlightManager: NSWindowController, NSTableViewDataSource, NSTable
         if existing == nil && current.rules.count >= 32 { Dialogs.message("每个突出显示集最多 32 条规则。"); return }
         var rule = existing ?? HighlightRule()
         let alert = PopupAlert(); alert.messageText = "突出显示规则"; alert.addButton(withTitle: "保存"); alert.addButton(withTitle: "取消")
-        let pattern = NSTextField(string: rule.pattern), regex = NSButton(checkboxWithTitle: "使用正则表达式", target: nil, action: nil), sensitive = NSButton(checkboxWithTitle: "区分大小写", target: nil, action: nil), enabled = NSButton(checkboxWithTitle: "启用", target: nil, action: nil), color = NSColorWell()
+        let pattern = NSTextField(string: rule.pattern), regex = NSButton(checkboxWithTitle: "使用正则表达式", target: nil, action: nil), sensitive = NSButton(checkboxWithTitle: "区分大小写", target: nil, action: nil), enabled = NSButton(checkboxWithTitle: "启用", target: nil, action: nil), color = PopupColorWell()
         regex.state = rule.regex ? .on : .off; sensitive.state = rule.caseSensitive ? .on : .off; enabled.state = rule.enabled ? .on : .off; color.color = NSColor(hex: rule.color) ?? .systemRed
         let grid = NSGridView(views: [[NSTextField(labelWithString: "匹配内容"), pattern], [NSTextField(labelWithString: "文字颜色"), color], [NSTextField(labelWithString: ""), regex], [NSTextField(labelWithString: ""), sensitive], [NSTextField(labelWithString: ""), enabled]])
         grid.column(at: 0).width = 90; grid.column(at: 1).xPlacement = .fill; grid.rowSpacing = 12; grid.frame = NSRect(x: 0, y: 0, width: 560, height: 200); alert.accessoryView = grid

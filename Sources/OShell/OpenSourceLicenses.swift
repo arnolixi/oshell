@@ -4,6 +4,16 @@
 import AppKit
 
 extension WorkspaceController {
+    @objc func showAbout() {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = info["CFBundleShortVersionString"] as? String ?? ""
+        let build = info["CFBundleVersion"] as? String ?? ""
+        let alert = PopupAlert(); alert.messageText = "OShell"
+        alert.informativeText = "版本 \(version)（\(build)）\nmacOS SSH 与文件传输客户端\nCopyright © 2026 OShell contributors."
+        alert.addButton(withTitle: "关闭"); alert.addButton(withTitle: "开源许可")
+        if alert.runModal() == .alertSecondButtonReturn { showOpenSourceLicenses() }
+    }
+
     @objc func showOpenSourceLicenses() {
         let alert = PopupAlert(); alert.messageText = "OShell 开源许可"
         alert.informativeText = "Copyright © 2026 OShell contributors.\n\nOShell 原创代码按 GNU GPL 第 3 版授权。你可以依照许可证使用、修改和再分发；本软件不提供任何担保。第三方组件保留各自的版权及许可条款。"

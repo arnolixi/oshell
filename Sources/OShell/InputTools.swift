@@ -95,6 +95,10 @@ final class CommandComposer: NSView {
 }
 
 final class QuickCommandManager: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+    override func showWindow(_ sender: Any?) {
+        if let popup = window as? PopupWindow, let owner = workspace?.window { popup.present(over: owner) }
+        else { super.showWindow(sender) }
+    }
     private weak var workspace: WorkspaceController?
     private let table = NSTableView()
     init(workspace: WorkspaceController) {
@@ -112,6 +116,7 @@ final class QuickCommandManager: NSWindowController, NSTableViewDataSource, NSTa
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     private var commands: [QuickCommand] { workspace?.configuration.quickCommands ?? [] }
+    func reload() { table.reloadData() }
     func show() { table.reloadData(); showWindow(nil); window?.makeKeyAndOrderFront(nil) }
     func numberOfRows(in tableView: NSTableView) -> Int { commands.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {

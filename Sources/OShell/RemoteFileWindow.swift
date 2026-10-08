@@ -6,6 +6,10 @@ import OShellCore
 
 /// Each tab owns its backend, worker queue and complete browsing/transfer UI.
 final class RemoteFileWindow: NSWindowController, NSWindowDelegate {
+    override func showWindow(_ sender: Any?) {
+        if let popup = window as? PopupWindow, let owner = workspace?.window { popup.present(over: owner) }
+        else { super.showWindow(sender) }
+    }
     private weak var workspace: WorkspaceController?
     private let strip = TabStripView(), host = NSView()
     private(set) var sessions = [RemoteFileSession]()
@@ -31,7 +35,7 @@ final class RemoteFileWindow: NSWindowController, NSWindowDelegate {
         strip.onClose = { [weak self] id in self?.closeTab(id) }
         strip.onDuplicate = { [weak self] id in
             guard let self, let session = self.sessions.first(where: { $0.id == id }), let profile = session.profile else { return }
-            self.open(profile, directory: session.directory, password: session.transientPassword)
+            self.open(profile, directory: session.directory, password: session.transientPassword, connectionGroup: session.connectionGroup)
         }
         _ = addBlank()
     }
@@ -43,15 +47,15 @@ final class RemoteFileWindow: NSWindowController, NSWindowDelegate {
         session.onChooseConnection = { [weak self] in self?.chooseSession() }
         sessions.append(session); select(session); return session
     }
-    func show(profile: SessionProfile? = nil, directory: String = ".", uploading: [URL] = [], password: String? = nil) {
+    func show(profile: SessionProfile? = nil, directory: String = ".", uploading: [URL] = [], password: String? = nil, connectionGroup: SSHConnectionGroup? = nil) {
         showWindow(nil); window?.makeKeyAndOrderFront(nil)
-        if let profile { open(profile, directory: directory, uploading: uploading, password: password) } else { chooseSession() }
+        if let profile { open(profile, directory: directory, uploading: uploading, password: password, connectionGroup: connectionGroup) } else { chooseSession() }
     }
-    func open(_ profile: SessionProfile, directory: String? = nil, uploading: [URL] = [], password: String? = nil) {
+    func open(_ profile: SessionProfile, directory: String? = nil, uploading: [URL] = [], password: String? = nil, connectionGroup: SSHConnectionGroup? = nil) {
         guard !closed, profile.kind != .local else { return }
         let session = selectedSession?.profile == nil ? selectedSession : addBlank()
         guard let session else { return }
-        select(session); session.connect(profile, directory: directory, uploading: uploading, password: password); updateTabs()
+        select(session); session.connect(profile, directory: directory, uploading: uploading, password: password, connectionGroup: connectionGroup); updateTabs()
     }
     func select(_ session: RemoteFileSession) {
         guard !closed, sessions.contains(where: { $0 === session }) else { return }
@@ -93,10 +97,17 @@ final class RemoteFileWindow: NSWindowController, NSWindowDelegate {
 extension WorkspaceController {
     var credentialProfiles: [SessionProfile] { ConfigurationCredentials.profiles(in: configuration) }
     @objc func showFiles() {
-        if let pane = selectedTab?.activePane, !pane.ended, pane.profile.kind.usesSSH { openFiles(for: pane.profile, directory: pane.remoteDirectory) }
+        if let pane = selectedTab?.activePane, !pane.ended, pane.profile.kind.usesSSH { openFiles(from: pane) }
         else { openFiles(for: nil) }
     }
-    func openFiles(for profile: SessionProfile?, directory: String = ".", uploading: [URL] = [], password: String? = nil) {
+    func openFiles(from pane: TerminalPane, uploading: [URL] = []) {
+        guard isSecurityUnlocked, !pane.isShutdown, !pane.ended, pane.profile.kind.usesSSH else { return }
+        guard let group = pane.sshConnectionGroup, group.isAvailable else {
+            Dialogs.message("当前 SSH 连接尚未完成认证或已失效。请先重新连接 SSH 会话，再打开 SFTP 文件管理。"); return
+        }
+        openFiles(for: pane.profile, directory: pane.remoteDirectory, uploading: uploading, connectionGroup: group)
+    }
+    func openFiles(for profile: SessionProfile?, directory: String = ".", uploading: [URL] = [], password: String? = nil, connectionGroup: SSHConnectionGroup? = nil) {
         guard isSecurityUnlocked else { return }
         let manager: RemoteFileWindow
         if let existing = fileWindows.first { manager = existing }
@@ -104,7 +115,7 @@ extension WorkspaceController {
             manager = RemoteFileWindow(workspace: self); fileWindows.append(manager)
             manager.onClosed = { [weak self, weak manager] in guard let manager else { return }; self?.fileWindows.removeAll { $0 === manager } }
         }
-        manager.show(profile: profile, directory: directory, uploading: uploading, password: password)
+        manager.show(profile: profile, directory: directory, uploading: uploading, password: password, connectionGroup: connectionGroup)
     }
 }
 

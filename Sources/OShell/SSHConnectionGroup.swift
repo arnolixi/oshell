@@ -72,3 +72,21 @@ final class SSHConnectionGroup {
     static func finishCleanup() { _ = cleanup.wait(timeout: .now() + 3) }
     deinit { close() }
 }
+
+/// File sessions/channels keep the authenticated transport alive independently
+/// of terminal tabs. Release is idempotent across cancellation and deinit.
+final class SSHConnectionLease {
+    let group: SSHConnectionGroup
+    private let id = UUID(), lock = NSLock()
+    private var released = false
+    init(group: SSHConnectionGroup, profile: SessionProfile) throws {
+        guard profile.kind.usesSSH else { throw ModelError.invalid("只有 SSH/SFTP 会话可以复用 SSH 连接。") }
+        _ = try group.arguments(for: profile, clone: true)
+        self.group = group; group.attach(id)
+    }
+    func release() {
+        lock.lock(); let detach = !released; released = true; lock.unlock()
+        if detach { group.detach(id) }
+    }
+    deinit { release() }
+}

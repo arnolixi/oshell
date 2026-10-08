@@ -3,10 +3,85 @@
 
 import AppKit
 
+/// Set Space membership before AppKit orders an auxiliary window on screen.
+enum PopupPresentation {
+    static func owner(excluding window: NSWindow) -> NSWindow? {
+        func eligible(_ candidate: NSWindow) -> Bool {
+            candidate !== window && candidate.isVisible && !(candidate is NSColorPanel) && !isDescendant(candidate, of: window)
+        }
+        if let foreground = [NSApp.modalWindow, NSApp.keyWindow].compactMap({ $0 }).first(where: eligible) { return foreground }
+        // During app/window activation AppKit can temporarily report no key/main
+        // window. Preserve the frontmost app-owned popup/workspace as the owner.
+        if let ordered = NSApp.orderedWindows.first(where: { ($0 is PopupWindow || $0 is WorkspaceWindow) && eligible($0) }) { return ordered }
+        return NSApp.mainWindow.flatMap { eligible($0) ? $0 : nil }
+    }
+    private static func isDescendant(_ candidate: NSWindow, of window: NSWindow) -> Bool {
+        var parent = candidate.parent
+        while let current = parent { if current === window { return true }; parent = current.parent }
+        return false
+    }
+    static func prepare(_ window: NSWindow, over owner: NSWindow?) {
+        window.appearance = ApplicationAppearance.appearance
+        window.collectionBehavior.subtract([.fullScreenPrimary, .fullScreenNone, .canJoinAllSpaces])
+        window.collectionBehavior.formUnion([.fullScreenAuxiliary, .moveToActiveSpace])
+        guard let owner, owner !== window, !isDescendant(owner, of: window) else { return }
+        let reposition = !window.isVisible || window.parent !== owner
+        if window.parent !== owner { window.parent?.removeChildWindow(window) }
+        if reposition {
+            // Fixed-size settings/alerts can be larger than the invoking window.
+            // Fit the screen, not the parent, so their controls are not clipped.
+            let area = (owner.screen?.visibleFrame ?? owner.frame).insetBy(dx: 12, dy: 12)
+            var size = window.frame.size
+            if window.styleMask.contains(.resizable) {
+                size.width = min(size.width, area.width); size.height = min(size.height, area.height)
+            }
+            let x = max(area.minX, min(owner.frame.midX - size.width / 2, area.maxX - size.width))
+            let y = max(area.minY, min(owner.frame.midY - size.height / 2, area.maxY - size.height))
+            window.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size).integral, display: false)
+        }
+        if window.parent !== owner { owner.addChildWindow(window, ordered: .above) }
+    }
+    static func detach(_ window: NSWindow) {
+        for child in window.childWindows ?? [] where child is NSColorPanel {
+            child.orderOut(nil); window.removeChildWindow(child)
+        }
+        window.parent?.removeChildWindow(window)
+    }
+}
+
+extension NSSavePanel {
+    func runPopupModal() -> NSApplication.ModalResponse {
+        PopupPresentation.prepare(self, over: PopupPresentation.owner(excluding: self))
+        defer { orderOut(nil); PopupPresentation.detach(self) }
+        return runModal()
+    }
+}
+
+final class PopupColorWell: NSColorWell {
+    override func activate(_ exclusive: Bool) {
+        let panel = NSColorPanel.shared
+        PopupPresentation.prepare(panel, over: window)
+        super.activate(exclusive)
+    }
+}
+
 /// Marks an auxiliary window. Esc never closes the main terminal window.
 final class PopupWindow: NSWindow {
+    func present(over owner: NSWindow) {
+        PopupPresentation.prepare(self, over: owner)
+        makeKeyAndOrderFront(nil)
+    }
+    override func orderOut(_ sender: Any?) {
+        super.orderOut(sender)
+        PopupPresentation.detach(self)
+    }
+    override func close() {
+        super.close()
+        PopupPresentation.detach(self)
+    }
     override func makeKeyAndOrderFront(_ sender: Any?) {
-        appearance = ApplicationAppearance.appearance; super.makeKeyAndOrderFront(sender)
+        if parent == nil { PopupPresentation.prepare(self, over: PopupPresentation.owner(excluding: self)) }
+        super.makeKeyAndOrderFront(sender)
     }
     var onFind: (() -> Void)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -26,7 +101,9 @@ final class PopupAlert: NSAlert {
         cancel?.keyEquivalent = "\u{1b}"
         cancel?.keyEquivalentModifierMask = []
         let modalWindow = window
-        modalWindow.appearance = ApplicationAppearance.appearance
+        let owner = PopupPresentation.owner(excluding: modalWindow)
+        layout()
+        PopupPresentation.prepare(modalWindow, over: owner)
         let token = PopupKeyboard.register(window: modalWindow) { [weak cancel] in
             if let cancel { cancel.performClick(nil) }
             else { NSApp.abortModal() } // Never activate a sole affirmative button.
@@ -34,6 +111,7 @@ final class PopupAlert: NSAlert {
         defer {
             PopupKeyboard.unregister(window: modalWindow, token: token)
             modalWindow.orderOut(nil)
+            PopupPresentation.detach(modalWindow)
         }
         return super.runModal()
     }
@@ -74,7 +152,7 @@ enum PopupKeyboard {
     @discardableResult static func dismiss(window: NSWindow) -> Bool {
         guard trackingMenus.isEmpty, window.attachedSheet == nil else { return false }
         // The shared color panel can be key while an alert remains modal.
-        if let panel = window as? NSColorPanel { panel.orderOut(nil); return true }
+        if let panel = window as? NSColorPanel { panel.orderOut(nil); PopupPresentation.detach(panel); return true }
         if let modal = NSApp.modalWindow, modal !== window { return false }
         if let cancellation = alerts[ObjectIdentifier(window)]?.1 { cancellation(); return true }
         if let panel = window as? NSSavePanel { panel.cancel(nil); return true }

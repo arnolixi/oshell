@@ -5,7 +5,9 @@ import AppKit
 import OShellCore
 
 final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
-    lazy var appUpdater = AppUpdater(workspace: self)
+    weak var windowCoordinator: WorkspaceWindows?
+    private lazy var standaloneUpdater = AppUpdater(workspace: self)
+    var appUpdater: AppUpdater { windowCoordinator?.updater ?? standaloneUpdater }
     let store: ConfigurationStore
     var configuration: Configuration
     private(set) var configurationRevision = 0
@@ -93,6 +95,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         let window = WorkspaceWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "OShell"; window.minSize = NSSize(width: 760, height: 460)
+        window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false; window.titlebarAppearsTransparent = true
         super.init(window: window)
         PasswordVault.shared.configureLocalStorage(directory: store.url.deletingLastPathComponent())
@@ -114,7 +117,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         if let quickSendVisibilityObserver { NotificationCenter.default.removeObserver(quickSendVisibilityObserver) }
         if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
     }
+    func windowDidBecomeMain(_ notification: Notification) { windowCoordinator?.activate(self) }
     func windowDidBecomeKey(_ notification: Notification) { markSelectedOutputRead() }
+    func windowWillClose(_ notification: Notification) {
+        shutdown(); window?.contentView = nil; windowCoordinator?.remove(self)
+    }
     func windowDidDeminiaturize(_ notification: Notification) { markSelectedOutputRead() }
     var isObservingSelectedTab: Bool { NSApp.isActive && window?.isKeyWindow == true && window?.isVisible == true && window?.isMiniaturized == false }
     func markSelectedOutputRead() {
@@ -288,7 +295,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
             try store.save(normalized); configuration = normalized; configurationRevision += 1
             if let migrated, let master = PasswordVault.shared.cachedMaster { PasswordVault.shared.acceptRotation(migrated, master: master) }
             PasswordVault.shared.configureProtection(configuration); refreshMasterWarning()
-            rebuildQuickLinks(); rebuildCommandMenu(); applyHighlightConfiguration(); sessionManager?.reload(); refreshQuickSendBar(); ShortcutRuntime.install(configuration.preferences.keyboardShortcuts); return true
+            rebuildQuickLinks(); rebuildCommandMenu(); applyHighlightConfiguration(); sessionManager?.reload(); refreshQuickSendBar(); ShortcutRuntime.install(configuration.preferences.keyboardShortcuts)
+            windowCoordinator?.publish(configuration, from: self)
+            return true
         } catch { Dialogs.message("保存配置失败：\(error.localizedDescription)"); return false }
     }
     private func persist() { _ = saveConfiguration(configuration) }
@@ -396,6 +405,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         let knownHosts = store.url.deletingLastPathComponent().appendingPathComponent("known_hosts")
         try? FileManager.default.createDirectory(at: knownHosts.deletingLastPathComponent(), withIntermediateDirectories: true)
         let pane = TerminalPane(profile: profile, preferences: configuration.preferences, knownHostsFile: knownHosts, oneTimePassword: oneTimePassword, terminalType: terminalType, connectionGroup: connectionGroup, reuseConnection: reuseConnection, blank: blank)
+        bindPane(pane)
+        return pane
+    }
+    private func bindPane(_ pane: TerminalPane) {
+        let profile = pane.profile
         var wasSaved = configuration.profiles.contains { $0.id == profile.id }
         pane.credentialsForConnection = { [weak self] in
             var candidate = profile
@@ -430,10 +444,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         }
         pane.onUserInput = { [weak self] pane, bytes in self?.routeKeyboard(pane, bytes: bytes) ?? false }
         pane.onPaste = { [weak self] pane, text in self?.pasteText(text, from: pane) }
-        pane.onFilesDropped = { [weak self] pane, urls in self?.openFiles(for: pane.profile, directory: pane.remoteDirectory, uploading: urls) }
+        pane.onFilesDropped = { [weak self] pane, urls in self?.openFiles(from: pane, uploading: urls) }
         pane.applyHighlights(configuration.highlightSets.first { $0.id == configuration.preferences.highlightSetID })
         pane.onError = { message in Dialogs.message(message) }
-        return pane
     }
     func open(_ profile: SessionProfile) {
         guard isSecurityUnlocked else { return }
@@ -569,7 +582,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     }
     @objc func closeTab() { if let tab = selectedTab { close(tab) } }
     @objc func closePane() {
-        guard let tab = selectedTab else { window?.close(); return }
+        guard let tab = selectedTab else { window?.performClose(nil); return }
         guard tab.layout.panes.count > 1 else { close(tab); return }
         let pane = tab.activePane
         if pane.hasActiveProcess, !Dialogs.confirm("关闭当前分屏？", text: "当前连接、本机工具与传输会结束。", action: "关闭") { return }
@@ -711,7 +724,45 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         if [#selector(nextTab), #selector(previousTab), #selector(lastUsedTab)].contains(menuItem.action) { return tabs.count > 1 && window?.attachedSheet == nil && NSApp.modalWindow == nil }
         return true
     }
-    func windowShouldClose(_ sender: NSWindow) -> Bool { canQuit() }
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        let running = activeProcessCount, files = activeFileOperationCount
+        guard running == 0 && files == 0 || Dialogs.confirm("关闭此窗口？", text: "此窗口的 \(running) 个终端连接和 \(files) 个文件操作会结束；其他窗口保持运行。", action: "关闭窗口") else { return false }
+        return true
+    }
+    var activeProcessCount: Int { tabs.flatMap { $0.layout.panes }.filter(\.hasActiveProcess).count }
+    var activeFileOperationCount: Int { fileWindows.filter(\.hasActiveOperation).count }
+    @objc func newWindow() { windowCoordinator?.newWindow() }
+    @objc func moveTabToNewWindow(_ sender: NSMenuItem) {
+        guard window?.attachedSheet == nil, NSApp.modalWindow == nil,
+              let id = sender.representedObject as? UUID, let tab = tabs.first(where: { $0.id == id }),
+              let destination = windowCoordinator?.newWindow() else { return }
+        move(tab, to: destination)
+    }
+    func move(_ tab: TerminalTab, to destination: WorkspaceController) {
+        guard destination !== self, let index = tabs.firstIndex(where: { $0 === tab }),
+              destination.isSecurityUnlocked, window?.attachedSheet == nil else { return }
+        let ids = Set(tab.layout.panes.map(\.id))
+        syncTargets.subtract(ids); composerTargets.subtract(ids); quickSendSelected.subtract(ids)
+        tab.layout.view.removeFromSuperview(); tabs.remove(at: index); tabHistory.removeAll { $0 == tab.id }
+        if selectedTab === tab { selectedTab = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)] }
+        rebuildWorkspace(); refreshOperatorState()
+        destination.tabs.append(tab); destination.selectedTab = tab
+        tab.layout.panes.forEach { destination.bindPane($0) }
+        destination.rebuildWorkspace(); destination.select(tab); destination.refreshOperatorState()
+    }
+    func receiveConfiguration(_ value: Configuration) {
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        let preferencesChanged = (try? encoder.encode(configuration.preferences)) != (try? encoder.encode(value.preferences))
+        configuration = value; configurationRevision += 1
+        refreshMasterWarning(); rebuildQuickLinks(); rebuildCommandMenu(); applyHighlightConfiguration()
+        sessionManager?.reload(); commandManager?.reload(); highlightManager?.reload()
+        if preferencesChanged {
+            tabs.flatMap { $0.layout.panes }.forEach { $0.apply(value.preferences) }
+            quickSendBar.isHidden = !value.preferences.quickSendBarVisible
+            quickSendHeight.constant = quickSendBar.isHidden ? 0 : 36
+        }
+        refreshQuickSendBar(); refreshSelection()
+    }
     func canQuit(forUpdate: Bool = false) -> Bool {
         let running = tabs.flatMap { $0.layout.panes }.filter(\.hasActiveProcess).count
         let fileOperations = fileWindows.filter(\.hasActiveOperation).count
@@ -721,7 +772,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         }
         shutdown(); return true
     }
-    func shutdown() { customTabLayout = nil; groupStrips.removeAll(); terminalHost.clearPreview(); idleMemoryReclaimer.cancel(); fileWindows.forEach { $0.close() }; fileWindows = []; syncTargets = []; tabs.flatMap { $0.layout.panes }.forEach { $0.shutdown() }; tabs = []; selectedTab = nil }
+    func shutdown() { sessionManager?.close(); sessionManager = nil; commandManager?.close(); commandManager = nil; highlightManager?.close(); highlightManager = nil; customTabLayout = nil; groupStrips.removeAll(); terminalHost.clearPreview(); idleMemoryReclaimer.cancel(); fileWindows.forEach { $0.close() }; fileWindows = []; syncTargets = []; tabs.flatMap { $0.layout.panes }.forEach { $0.shutdown() }; tabs = []; selectedTab = nil }
     var diagnosticSnapshot: [String: Any] {
         let panes = tabs.flatMap { $0.layout.panes }
         return ["tabs": tabs.count, "panes": panes.count, "composerCreated": loadedComposer != nil, "arrangement": arrangement.title,

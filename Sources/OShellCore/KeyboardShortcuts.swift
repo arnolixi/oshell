@@ -29,7 +29,7 @@ public struct ShortcutKey {
     }()
 }
 public enum ShortcutAction: String, Codable, CaseIterable {
-    case settings, sessionManager, connectSelected, newSession, newBlank, local, currentProperties, liveProperties, defaults, importSessions, exportSessions
+    case newWindow, settings, sessionManager, connectSelected, newSession, newBlank, local, currentProperties, liveProperties, defaults, importSessions, exportSessions
     case reconnect, closePane, closeTab, copy, paste, selectAll, find, findNext, findPrevious
     case splitVertical, splitHorizontal, logging, nextTab, previousTab, recentTab
     case tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tabNumber
@@ -38,6 +38,7 @@ public enum ShortcutAction: String, Codable, CaseIterable {
     public var title: String {
         if let number { return "跳到当前分组标签 \(number)" }
         switch self {
+        case .newWindow: return "新建窗口"
         case .settings: return "App 设置"
         case .sessionManager: return "会话管理"
         case .connectSelected: return "连接会话管理中的选中会话"
@@ -92,6 +93,7 @@ public enum ShortcutAction: String, Codable, CaseIterable {
         let cmd = KeyboardShortcut.command, shift = KeyboardShortcut.shift, ctrl = KeyboardShortcut.control
         if let number, let key = ShortcutKey.all.first(where: { $0.label == String(number) }) { return [.init(key.code, cmd)] }
         switch self {
+        case .newWindow: return [.init(45,cmd|shift)]
         case .settings: return [.init(43,cmd)]
         case .sessionManager: return [.init(31,cmd|shift)]
         case .connectSelected: return [.init(36,cmd)]

@@ -34,9 +34,9 @@ enum FileTabsIntegrationTest {
             var ftp = SessionProfile(name: "FTP B", group: "", kind: .ftp, host: "127.0.0.1", port: fixture["ftpPort"] as! Int, username: sftp.username)
             ftp.initialDirectory = "/"
             ftp.encryptedPassword = try SessionCipher.encrypt(password, master: master, profile: ftp, identity: SSHIdentity(host: ftp.host, user: ftp.username, port: ftp.port))
+            PasswordVault.shared.unlockForTesting(master)
             checks["unifiedCatalogSaved"] = controller.saveConfiguration(Configuration(profiles: [sftp, ftp]))
             try Data(contentsOf: root.appendingPathComponent("known_hosts")).write(to: controller.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"))
-            PasswordVault.shared.unlockForTesting(master)
             controller.open(sftp)
             guard let files = controller.fileWindows.first else { throw ModelError.invalid("文件窗口未创建") }
             manager = files; let first = files.selectedSession!

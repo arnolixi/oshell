@@ -17,7 +17,7 @@ final class UpdateSettingsView: NSView {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
         let current = NSTextField(labelWithString: "当前版本：\(version) · 更新版本：\(UpdateFlavor.current.rawValue)")
         current.textColor = .secondaryLabelColor
-        let help = NSTextField(wrappingLabelWithString: "填写公开 GitHub 仓库，使用其最新正式 Release 中的更新文件。程序读取 Release 中的签名更新信息，直接下载适合本机的 DMG，无需额外 XML 或更新 ZIP。尚未创建仓库时可留空，程序不会检查网络。\n\n更新包含下载进度和签名校验。安装前会确认关闭活动会话，再退出并重新启动。会话配置与保存密码保留。")
+        let help = NSTextField(wrappingLabelWithString: "使用公开 GitHub 仓库的最新正式版本；留空则不检查更新。\n\n下载后会验证更新文件。安装前确认关闭活动会话，完成后自动重启。会话配置与已保存的密码会保留。")
         let stack = NSStackView(views: [title, current, NSTextField(labelWithString: "更新仓库"), repository, automatic, help])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false; addSubview(stack)

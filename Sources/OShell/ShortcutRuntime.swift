@@ -21,6 +21,7 @@ extension ShortcutAction {
     var selector: Selector {
         if number != nil { return #selector(WorkspaceController.selectNumberedTab(_:)) }
         switch self {
+        case .newWindow: return #selector(WorkspaceController.newWindow)
         case .settings: return #selector(WorkspaceController.showPreferences)
         case .sessionManager: return #selector(WorkspaceController.showSessionManager)
         case .connectSelected: return #selector(WorkspaceController.connectSelected)

@@ -27,6 +27,8 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
     private var scp: SCPTransfer?
     private var sshProfile: SessionProfile?
     private var launchPassword: String?
+    private var sharedLease: SSHConnectionLease?
+    var connectionGroup: SSHConnectionGroup? { sharedLease?.group }
     private var displayIP: String?
     private var identityID = UUID()
     private var entries = [RemoteFileEntry](), visibleEntries = [RemoteFileEntry]()
@@ -80,9 +82,12 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         [top, tools, scroll, hint, bottom].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; content.addSubview($0) }
         NSLayoutConstraint.activate([top.topAnchor.constraint(equalTo: content.topAnchor, constant: 12), top.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12), top.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12), tools.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10), tools.leadingAnchor.constraint(equalTo: top.leadingAnchor), tools.trailingAnchor.constraint(equalTo: top.trailingAnchor), scroll.topAnchor.constraint(equalTo: tools.bottomAnchor, constant: 10), scroll.leadingAnchor.constraint(equalTo: top.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: top.trailingAnchor), scroll.bottomAnchor.constraint(equalTo: hint.topAnchor, constant: -8), hint.leadingAnchor.constraint(equalTo: top.leadingAnchor), hint.trailingAnchor.constraint(lessThanOrEqualTo: top.trailingAnchor), hint.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -8), bottom.leadingAnchor.constraint(equalTo: top.leadingAnchor), bottom.trailingAnchor.constraint(equalTo: top.trailingAnchor), bottom.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12)])
     }
-    func connect(_ profile: SessionProfile, directory: String? = nil, uploading: [URL] = [], password: String? = nil) {
+    func connect(_ profile: SessionProfile, directory: String? = nil, uploading: [URL] = [], password: String? = nil, connectionGroup: SSHConnectionGroup? = nil) {
         guard let workspace, !busy, !closed, profile.kind != .local else { return }
-        self.profile = profile; pendingUploads = uploading; launchPassword = password
+        let lease: SSHConnectionLease?
+        do { lease = try connectionGroup.map { try SSHConnectionLease(group: $0, profile: profile) } }
+        catch { reportError(error); return }
+        self.profile = profile; pendingUploads = uploading; launchPassword = connectionGroup == nil ? password : nil
         identityID = UUID(); let identity = identityID
         displayIP = FileSessionAddress.literal(profile.host)
         if displayIP == nil {
@@ -97,13 +102,13 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         let destination = directory ?? profile.initialDirectory
         onStateChanged?()
         do {
-            backend?.cancel(); backend = nil; connected = false
+            backend?.cancel(); backend = nil; connected = false; sharedLease = lease
             sshProfile = profile.kind.usesSSH ? profile : nil
             transferMode.removeAllItems(); transferMode.addItems(withTitles: profile.kind == .ftp ? ["FTP 传输"] : ["SFTP 传输", "SCP 兼容传输"])
             transferMode.isEnabled = profile.kind.usesSSH
             if let backendFactory { backend = try backendFactory(profile); connectBackend(destination); return }
             if profile.kind.usesSSH {
-                backend = try SFTPBackend(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: password)
+                backend = try SFTPBackend(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: launchPassword, connectionGroup: connectionGroup)
                 connectBackend(destination)
             } else {
                 let token = UUID(); operationID = token; busy = true; status.stringValue = "等待 FTP 认证…"; onStateChanged?()
@@ -135,7 +140,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         status.stringValue = error.localizedDescription; onStateChanged?()
         if window != nil && !closed { Dialogs.message((profile?.name ?? "文件会话") + "：" + error.localizedDescription) }
     }
-    @objc private func reconnect() { guard let profile else { chooseConnection(); return }; connect(profile, directory: directory, password: launchPassword) }
+    @objc private func reconnect() { guard let profile else { chooseConnection(); return }; connect(profile, directory: directory, password: launchPassword, connectionGroup: connectionGroup) }
     var transientPassword: String? { launchPassword }
     private func connectBackend(_ destination: String) {
         connected = false; guard backend != nil else { return }
@@ -217,7 +222,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
     @objc private func chooseUpload() {
         guard connected, !busy else { return }
         let panel = NSOpenPanel(); panel.title = "上传到 \(directory)"; panel.canChooseDirectories = true; panel.allowsMultipleSelection = true
-        if panel.runModal() == .OK { upload(panel.urls, to: directory) }
+        if panel.runPopupModal() == .OK { upload(panel.urls, to: directory) }
     }
     func upload(_ urls: [URL], to destination: String) {
         guard connected, !busy, !urls.isEmpty else { return }
@@ -225,7 +230,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         let input = NSTextField(string: destination); input.frame = NSRect(x: 0, y: 0, width: 500, height: 26); alert.accessoryView = input; alert.addButton(withTitle: "上传"); alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let target = input.stringValue, useSCP = sshProfile != nil && transferMode.indexOfSelectedItem == 1
-        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: launchPassword) } } catch { Dialogs.message(error.localizedDescription); return }
+        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: launchPassword, connectionGroup: connectionGroup) } } catch { Dialogs.message(error.localizedDescription); return }
         let scp = self.scp, token = UUID()
         perform("正在上传…", id: token) { [weak self] backend in
             var names = Set(try backend.list(target).map(\.name))
@@ -242,9 +247,9 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
     @objc private func downloadSelected() {
         guard connected, !busy, !selected.isEmpty else { return }; let files = selected, parent = directory
         let panel = NSOpenPanel(); panel.title = "从 \(profile?.name ?? "") 下载保存到…"; panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        guard panel.runPopupModal() == .OK, let destination = panel.url else { return }
         let useSCP = sshProfile != nil && transferMode.indexOfSelectedItem == 1
-        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: launchPassword) } } catch { Dialogs.message(error.localizedDescription); return }
+        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: launchPassword, connectionGroup: connectionGroup) } } catch { Dialogs.message(error.localizedDescription); return }
         let scp = self.scp, token = UUID()
         perform("正在下载…", id: token) { [weak self] backend in
             var names = Set(try FileManager.default.contentsOfDirectory(atPath: destination.path))
@@ -287,7 +292,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         cancelButton.isEnabled = false; progress.stopAnimation(nil); status.stringValue = "已取消并断开文件连接，部分文件可能保留；可点击“重连”恢复。"; onStateChanged?()
     }
     func shutdown() {
-        guard !closed else { return }; closed = true; launchPassword = nil; identityID = UUID(); cancelFileOperation(); onStateChanged = nil; onChooseConnection = nil
+        guard !closed else { return }; closed = true; launchPassword = nil; identityID = UUID(); cancelFileOperation(); sharedLease = nil; onStateChanged = nil; onChooseConnection = nil
     }
     @objc private func chooseConnection() { onChooseConnection?() }
     @objc private func standaloneSCP() {
@@ -298,10 +303,10 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         let response = alert.runModal(); guard response == .alertFirstButtonReturn || response == .alertSecondButtonReturn else { return }
         let uploading = response == .alertFirstButtonReturn
         let panel = NSOpenPanel(); panel.canChooseFiles = uploading; panel.canChooseDirectories = true; panel.canCreateDirectories = !uploading
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runPopupModal() == .OK, let url = panel.url else { return }
         do {
             try RemotePath.validate(remote.stringValue)
-            let task = try SCPTransfer(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: launchPassword); scp = task
+            let task = try SCPTransfer(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: launchPassword, connectionGroup: connectionGroup); scp = task
             let remotePath = remote.stringValue, token = UUID(); operationID = token; busy = true; cancelButton.isEnabled = true; progress.isIndeterminate = true; progress.startAnimation(nil); status.stringValue = "SCP 传输中…"; onStateChanged?()
             worker.async { [weak self] in
                 let result = Result {

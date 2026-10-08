@@ -2,6 +2,7 @@
 // Copyright (c) 2026 OShell contributors
 
 import AppKit
+import Darwin
 import OShellCore
 
 enum ShellIntegrationTest {
@@ -15,6 +16,25 @@ enum ShellIntegrationTest {
         let automatic = TerminalPane(profile: legacyProfile, preferences: prefs, knownHostsFile: controller.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"))
         checks["explicitOptInAllowsLegacyProbe"] = automatic.allowsActiveHostProbe
         func frame(_ payload: String) -> String { "\u{1b}]777;OShellHost=1;" + payload + "\u{7}" }
+        var name = [CChar](repeating: 0, count: 256); _ = gethostname(&name, name.count)
+        let runtimeHost = String(cString: name), localHost = LocalHostIdentity.current().hostname
+        let local = TerminalPane(profile: .local, preferences: prefs)
+        checks["localStartsWithConfiguredHostname"] = local.title == localHost
+        local.terminal.feed(text: "\u{1b}]2;fixture@\(runtimeHost):~\u{7}")
+        checks["localOSCTitleDoesNotReplaceConfiguredName"] = local.title == localHost
+        local.terminal.feed(text: "\u{1b}]7;file://\(runtimeHost)/tmp\u{7}")
+        checks["localOSC7KeepsConfiguredName"] = local.title == localHost
+        local.terminal.feed(text: frame("\(runtimeHost)|192.0.2.99|"))
+        checks["localIntegrationNormalizesRuntimeAlias"] = local.title == localHost
+        local.terminal.feed(text: frame("remote.tail000000.ts.net|192.0.2.98|"))
+        checks["nestedRemoteDomainStillRecognized"] = local.title == "remote.tail000000.ts.net"
+        local.terminal.feed(text: frame("\(runtimeHost)|192.0.2.99|"))
+        checks["returnToLocalRestoresConfiguredName"] = local.title == localHost
+        local.shutdown()
+        let remote = TerminalPane(profile: profile, preferences: prefs)
+        remote.terminal.feed(text: frame("\(runtimeHost)|192.0.2.99|"))
+        checks["remoteSSHIdentityNotRewrittenAsLocal"] = remote.title == runtimeHost
+        remote.shutdown()
         var passiveProfile = profile; passiveProfile.titleMode = .passive
         let passive = TerminalPane(profile: passiveProfile, preferences: prefs)
         passive.terminal.feed(text: frame("ignored-integration|10.99.0.1|"))

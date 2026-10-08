@@ -17,6 +17,7 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
     var canCheck: Bool { pendingInstall != nil || standard?.updater.sessionInProgress != true }
     var isBusy: Bool { standard?.updater.sessionInProgress == true || pendingInstall != nil }
     init(workspace: WorkspaceController) { self.workspace = workspace; super.init() }
+    func useWorkspace(_ workspace: WorkspaceController?) { self.workspace = workspace }
     private var configuredRepository: String {
         let value = workspace?.configuration.preferences.updateRepository ?? ""
         return value.isEmpty ? (Bundle.main.object(forInfoDictionaryKey: "OShellUpdateRepository") as? String ?? "") : value
@@ -69,7 +70,7 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
         guard NSApp.modalWindow == nil, workspace.window?.attachedSheet == nil else {
             Dialogs.message("更新已准备好。请先关闭当前对话框，再选择“安装已下载的更新…”。"); return
         }
-        guard workspace.canQuit(forUpdate: true) else { return }
+        guard (workspace.windowCoordinator?.canQuit(forUpdate: true) ?? workspace.canQuit(forUpdate: true)) else { return }
         pendingInstall = nil; handler()
     }
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) { pendingInstall = nil }

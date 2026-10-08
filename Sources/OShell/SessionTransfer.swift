@@ -31,7 +31,7 @@ enum SessionTransfer {
             let data = try archive.encoded()
             let panel = NSSavePanel(); panel.title = "导出 OShell 会话"; panel.oshellJSONFilesOnly()
             panel.nameFieldStringValue = "OShell-sessions.oshell.json"; panel.canCreateDirectories = true
-            guard panel.runModal() == .OK, let url = panel.url else { return }
+            guard panel.runPopupModal() == .OK, let url = panel.url else { return }
             try PrivateFile.write(data, to: url)
             Dialogs.message("已导出 \(archive.profiles.count) 个会话。" + (archive.passwordCount > 0 ? (hasLocal ? "导入时使用刚设置的导出文件密码；本机密钥没有导出。" : "导入加密密码时请使用此次导出时的主密码。") : "文件未包含已保存密码。"))
         } catch { Dialogs.message("导出失败：\(error.localizedDescription)") }
@@ -49,13 +49,13 @@ enum SessionTransfer {
         if kinds.indexOfSelectedItem == 0 {
             panel.title = "导入 OShell 会话"; panel.oshellJSONFilesOnly()
             panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
-            guard panel.runModal() == .OK, let url = panel.url else { return }
+            guard panel.runPopupModal() == .OK, let url = panel.url else { return }
             importArchive(at: url, workspace: workspace, directory: directory)
         } else {
             let format: ThirdPartySessionFormat = kinds.indexOfSelectedItem == 1 ? .secureCRT : .xshell
             panel.title = "导入 " + format.title + " 会话"; panel.allowedFileTypes = format.extensions
             panel.canChooseDirectories = true; panel.canChooseFiles = true; panel.allowsMultipleSelection = true; panel.resolvesAliases = false
-            guard panel.runModal() == .OK else { return }
+            guard panel.runPopupModal() == .OK else { return }
             importExternal(at: panel.urls, format: format, workspace: workspace, directory: directory)
         }
     }

@@ -124,9 +124,11 @@ enum FileSSH {
         let args = try copy.sshArguments(knownHostsFile: knownHosts, proxyHelper: ZmodemTransfer.helperDirectory.appendingPathComponent("OShellProxy"))
         return Array(args.dropLast(2)).filter { $0 != "-tt" } + ["-o", "ClearAllForwardings=yes", "-o", "RemoteCommand=none"]
     }
-    static func environment(_ broker: AuthBroker) -> [String: String] {
+    static func environment(_ broker: AuthBroker?) -> [String: String] {
         var environment = SSHEnvironment.remoteClient(ProcessInfo.processInfo.environment)
-        environment.merge(broker.environment) { _, new in new }; return environment
+        if let broker { environment.merge(broker.environment) { _, new in new } }
+        else { for key in ["SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "OSHELL_AUTH_SOCKET", "OSHELL_AUTH_TOKEN"] { environment.removeValue(forKey: key) } }
+        return environment
     }
 }
 struct SFTPStatus: LocalizedError {
@@ -163,22 +165,32 @@ struct SFTPPacket {
 final class SFTPBackend: RemoteFileBackend {
     let description: String
     private let process: FileProcess
-    private let broker: AuthBroker
+    private let broker: AuthBroker?
+    private let lease: SSHConnectionLease?
     private var requestID: UInt32 = 0
     private var connected = false
-    init(profile: SessionProfile, knownHosts: URL, oneTimePassword: String? = nil) throws {
+    init(profile: SessionProfile, knownHosts: URL, oneTimePassword: String? = nil, connectionGroup: SSHConnectionGroup? = nil) throws {
         description = "SFTP · \(profile.name) · \(profile.host)"
         try FileManager.default.createDirectory(at: knownHosts.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        broker = try AuthBroker(profile: profile, oneTimePassword: oneTimePassword)
-        let args = try FileSSH.arguments(profile, knownHosts: knownHosts) + ["-T", "-s", "--", profile.host, "sftp"]
+        lease = try connectionGroup.map { try SSHConnectionLease(group: $0, profile: profile) }
+        broker = connectionGroup == nil ? try AuthBroker(profile: profile, oneTimePassword: oneTimePassword) : nil
+        let shared = try connectionGroup?.arguments(for: profile, clone: true) ?? []
+        let args = shared + (try FileSSH.arguments(profile, knownHosts: knownHosts)) + ["-T", "-s", "--", profile.host, "sftp"]
         process = FileProcess(executable: "/usr/bin/ssh", arguments: args, environment: FileSSH.environment(broker))
     }
     func connect() throws {
-        guard !connected else { return }; try process.start()
-        var packet = SFTPPacket(); packet.data.append(1); packet.u32(3); try send(packet)
-        var response = try receive(timeout: 300)
-        guard try response.take(1).first == 2, try response.read32() == 3 else { throw ModelError.invalid("服务器不支持 SFTP v3。") }
-        connected = true
+        guard !connected else { return }
+        do {
+            try process.start()
+            var packet = SFTPPacket(); packet.data.append(1); packet.u32(3); try send(packet)
+            var response = try receive(timeout: 300)
+            guard try response.take(1).first == 2, try response.read32() == 3 else { throw ModelError.invalid("服务器不支持 SFTP v3。") }
+            connected = true
+        } catch {
+            process.cancel()
+            if lease != nil { throw ModelError.invalid("无法通过现有 SSH 连接打开 SFTP。请确认服务器允许 SFTP 子系统，且 SSH 连接仍有效。\n" + error.localizedDescription) }
+            throw error
+        }
     }
     private func send(_ packet: SFTPPacket) throws { var framed = SFTPPacket(); framed.bytes(packet.data); try process.write(framed.data) }
     private func receive(timeout: TimeInterval = 60) throws -> SFTPPacket {
@@ -283,6 +295,6 @@ final class SFTPBackend: RemoteFileBackend {
         try close(handle); closed = true
         try file.oshellClose(); complete = true
     }
-    func cancel() { process.cancel(); DispatchQueue.main.async { [broker] in broker.stop() } }
-    deinit { process.cancel(); let broker = broker; DispatchQueue.main.async { broker.stop() } }
+    func cancel() { process.cancel(); lease?.release(); DispatchQueue.main.async { [broker] in broker?.stop() } }
+    deinit { process.cancel(); lease?.release(); let broker = broker; DispatchQueue.main.async { broker?.stop() } }
 }

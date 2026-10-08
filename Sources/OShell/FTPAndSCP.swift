@@ -128,20 +128,26 @@ final class SCPTransfer {
     private let profile: SessionProfile
     private var broker: AuthBroker?
     private let oneTimePassword: String?
+    private let lease: SSHConnectionLease?
     private let knownHosts: URL
     private let lock = NSLock()
     private var process: FileProcess?
     private var cancelled = false
-    init(profile: SessionProfile, knownHosts: URL, oneTimePassword: String? = nil) throws {
-        self.oneTimePassword = oneTimePassword; self.profile = profile; self.knownHosts = knownHosts }
+    init(profile: SessionProfile, knownHosts: URL, oneTimePassword: String? = nil, connectionGroup: SSHConnectionGroup? = nil) throws {
+        lease = try connectionGroup.map { try SSHConnectionLease(group: $0, profile: profile) }
+        self.oneTimePassword = connectionGroup == nil ? oneTimePassword : nil; self.profile = profile; self.knownHosts = knownHosts
+    }
     func run(local: URL, remote: String, upload: Bool) throws {
         try RemotePath.validate(remote)
         lock.lock(); let wasCancelled = cancelled; lock.unlock()
         guard !wasCancelled else { throw ModelError.invalid("操作已取消。") }
-        let broker = try Thread.isMainThread ? AuthBroker(profile: profile, oneTimePassword: oneTimePassword) : DispatchQueue.main.sync { try AuthBroker(profile: profile, oneTimePassword: oneTimePassword) }
+        let broker: AuthBroker?
+        if lease != nil { broker = nil }
+        else { broker = try Thread.isMainThread ? AuthBroker(profile: profile, oneTimePassword: oneTimePassword) : DispatchQueue.main.sync { try AuthBroker(profile: profile, oneTimePassword: oneTimePassword) } }
         lock.lock(); self.broker = broker; lock.unlock()
-        defer { DispatchQueue.main.async { broker.stop() } }
-        var sourceArgs = try FileSSH.arguments(profile, knownHosts: knownHosts), args = (OpenSSHCapabilities.current.needsSCPLegacyFlag ? ["-O"] : []) + ["-r"]
+        defer { DispatchQueue.main.async { broker?.stop() } }
+        let shared = try lease?.group.arguments(for: profile, clone: true) ?? []
+        var sourceArgs = shared + (try FileSSH.arguments(profile, knownHosts: knownHosts)), args = (OpenSSHCapabilities.current.needsSCPLegacyFlag ? ["-O"] : []) + ["-r"]
         while !sourceArgs.isEmpty {
             let option = sourceArgs.removeFirst()
             if option == "-p" { args += ["-P", sourceArgs.removeFirst()] }
@@ -159,6 +165,6 @@ final class SCPTransfer {
         process = task; lock.unlock()
         try task.start(); task.closeInput(); _ = try task.outputToEnd()
     }
-    func cancel() { lock.lock(); cancelled = true; let task = process, auth = broker; lock.unlock(); task?.cancel(); DispatchQueue.main.async { auth?.stop() } }
-    deinit { process?.cancel(); let broker = broker; DispatchQueue.main.async { broker?.stop() } }
+    func cancel() { lock.lock(); cancelled = true; let task = process, auth = broker; lock.unlock(); task?.cancel(); lease?.release(); DispatchQueue.main.async { auth?.stop() } }
+    deinit { process?.cancel(); lease?.release(); let broker = broker; DispatchQueue.main.async { broker?.stop() } }
 }

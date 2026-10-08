@@ -84,6 +84,9 @@ extension WorkspaceController {
             item.target = self; item.representedObject = id; item.isEnabled = enabled; item.toolTip = hint
         }
         menu.addItem(.separator())
+        let moveWindow = menu.addItem(withTitle: "移动到新窗口", action: #selector(moveTabToNewWindow(_:)), keyEquivalent: "")
+        moveWindow.target = self; moveWindow.representedObject = id
+        moveWindow.isEnabled = tab != nil && windowCoordinator != nil && window?.attachedSheet == nil
         let moveGroup = menu.addItem(withTitle: "移动到标签组", action: nil, keyEquivalent: "")
         moveGroup.submenu = tabMoveGroupMenu(id)
         if let group = customTabLayout?.group(containing: id) {

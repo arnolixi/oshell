@@ -7,9 +7,30 @@ import SystemConfiguration
 
 /// The local shell uses the same host/IP model as remote shells, without DNS.
 public enum LocalHostIdentity {
-    public static func current() -> RemoteHostIdentity {
+    private static func names() -> (configured: String?, runtime: String) {
         var name = [CChar](repeating: 0, count: 256)
-        let hostname = gethostname(&name, name.count) == 0 ? String(cString: name) : ProcessInfo.processInfo.hostName
+        let runtime = gethostname(&name, name.count) == 0 ? String(cString: name) : ProcessInfo.processInfo.hostName
+        return (SCDynamicStoreCopyLocalHostName(nil) as String?, runtime)
+    }
+    public static func preferredHostname(configured: String?, runtime: String) -> String {
+        if let configured, TerminalHostname.valid(configured) { return configured }
+        return runtime
+    }
+    /// Normalize only this Mac's known aliases; never strip arbitrary remote domains.
+    public static func canonicalHostname(_ hint: String, configured: String?, runtime: String) -> String {
+        let preferred = preferredHostname(configured: configured, runtime: runtime)
+        let aliases = [preferred, preferred + ".local", runtime].map { $0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+        return aliases.contains(hint.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))) ? preferred : hint
+    }
+    public static func canonicalHostname(_ hint: String) -> String {
+        let values = names(); return canonicalHostname(hint, configured: values.configured, runtime: values.runtime)
+    }
+    public static func hostnameSnapshot() -> (hostname: String, aliases: Set<String>) {
+        let values = names(), preferred = preferredHostname(configured: values.configured, runtime: values.runtime)
+        return (preferred, Set([preferred, preferred + ".local", values.runtime].map { $0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) }))
+    }
+    public static func current() -> RemoteHostIdentity {
+        let values = names(), hostname = preferredHostname(configured: values.configured, runtime: values.runtime)
         var primary = Set<String>()
         for family in ["IPv4", "IPv6"] {
             if let state = SCDynamicStoreCopyValue(nil, "State:/Network/Global/\(family)" as CFString) as? [String: Any],

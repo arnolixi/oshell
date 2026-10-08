@@ -154,7 +154,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     var onUserInput: ((TerminalPane, [UInt8]) -> Bool)?
     var onPaste: ((TerminalPane, String) -> Void)?
     var credentialsForConnection: (() -> SessionProfile)?
-    var onSaveAuthenticatedPassword: ((SessionProfile, String, SSHIdentity) -> Void)?
+    var onSaveAuthenticatedPassword: ((SessionProfile, String, SSHIdentity) -> Void)? { didSet { authBroker?.onSavePassword = onSaveAuthenticatedPassword } }
     var onFilesDropped: ((TerminalPane, [URL]) -> Void)?
     private(set) var remoteDirectory = "."
     var copyOnSelect: Bool { preferences.copyOnSelect }
@@ -191,6 +191,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     private var remoteHostname: String?
     private(set) var remoteAddress: String?
     private var hostAliases = Set<String>()
+    private var knownLocalHostnames = Set<String>()
     private var currentHostHint: String?
     private var hostEpoch = 0
     private var attemptedHostEpoch: Int?
@@ -258,7 +259,10 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         hostProbeWork?.cancel(); hostProbeWork = nil; hostProbeTimeout?.cancel(); hostProbeTimeout = nil
         hostProbeToken = nil; hostProbeEcho = nil; promptScan?.cancel(); promptScan = nil
     }
-    private func useLocalHostIdentity() { resetHostIdentity(); applyHostIdentity(LocalHostIdentity.current()) }
+    private func useLocalHostIdentity() {
+        knownLocalHostnames.formUnion(LocalHostIdentity.hostnameSnapshot().aliases)
+        resetHostIdentity(); applyHostIdentity(LocalHostIdentity.current())
+    }
     private func identityOutput(_ bytes: Data) -> Data {
         guard var echo = hostProbeEcho else { return bytes }
         let visible = echo.consume(bytes); hostProbeEcho = echo.finished ? nil : echo
@@ -665,18 +669,28 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         }
     }
     private func applyHostIdentity(_ identity: RemoteHostIdentity) {
+        let hostname = displayHostname(identity.hostname)
         if profile.kind == .ssh, !ended, canBindInitialHost { initialRemoteHostname = identity.hostname }
-        hostAliases = Set([currentHostHint, identity.hostname].compactMap { $0 })
-        remoteHostname = identity.hostname; remoteAddress = identity.address; attemptedHostEpoch = hostEpoch
+        hostAliases = Set([currentHostHint, identity.hostname, hostname].compactMap { $0 })
+        remoteHostname = hostname; remoteAddress = identity.address; attemptedHostEpoch = hostEpoch
         noteActivity(); startIdleTimer()
         applyHighlights(highlightSet); refreshHeader(); onState?()
     }
     private func matchesCurrentHost(_ host: String) -> Bool {
         hostAliases.contains { RemoteHostIdentity.sameHost($0, host) }
     }
-    private func updateHostname(_ host: String) {
+    private func displayHostname(_ hint: String) -> String {
+        guard profile.kind == .local || (ended && interactiveTool == nil) else { return hint }
+        let names = LocalHostIdentity.hostnameSnapshot()
+        // Shell variables may retain an earlier runtime name after VPN changes.
+        knownLocalHostnames.formUnion(names.aliases)
+        let key = hint.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        return knownLocalHostnames.contains(key) ? names.hostname : hint
+    }
+    private func updateHostname(_ hint: String) {
         guard observesHostIdentity else { return }
         guard !integratedPromptPending else { return }
+        let host = displayHostname(hint)
         lastPromptText = terminal.getTerminal().getCursorLineText()
         currentHostHint = host
         guard !matchesCurrentHost(host) else { return }

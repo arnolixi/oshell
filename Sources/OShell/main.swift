@@ -13,6 +13,7 @@ private let backgroundTransferTest = ProcessInfo.processInfo.environment["OSHELL
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: WorkspaceController!
+    var windows: WorkspaceWindows!
     private var launchServer: ExternalLaunchServer?
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Load the bundled brand explicitly instead of a stale LaunchServices icon.
@@ -28,12 +29,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Terminal use remains available if a duplicate instance owns the endpoint.
         }
         guard controller.unlockAtStartup() else { NSApp.terminate(nil); return }
+        windows = WorkspaceWindows(initial: controller)
+        windows.onActiveChanged = { [weak self] in self?.controller = $0 }
+        launchServer?.workspaceProvider = { [weak self] in self?.windows?.externalWorkspace() }
         buildMenu()
+        windows.activate(controller)
         if !CommandLine.arguments.contains(where: { $0.hasSuffix("-test") }) { do { try controller.appUpdater.configure() } catch { Dialogs.message(error.localizedDescription) } }
         if !backgroundTransferTest { controller.show(); NSApp.activate(ignoringOtherApps: true) }
+        if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_SFTP_REUSE_TEST_ROOT"] != nil { SFTPReuseTest.run(controller) }
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_ZOC_CLONE_TEST_ROOT"] != nil { SSHCloneTest.run(controller) }
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_ZOC_TEST_ROOT"] != nil { ZOCLaunchTest.run(controller) }
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
+        if CommandLine.arguments.contains("--multi-window-test") { MultiWindowTest.run(controller) }
         if CommandLine.arguments.contains("--named-tab-groups-test") { NamedTabGroupsTest.run(controller) }
         if CommandLine.arguments.contains("--links-catalog-test") { LinksCatalogTest.run(controller) }
         if CommandLine.arguments.contains("--tab-number-test") { TabNumberTest.run(controller) }
@@ -72,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--file-feature-test") { FileFeatureTest.run(controller) }
         if CommandLine.arguments.contains("--operator-input-test") { OperatorInputTest.run(controller) }
         if CommandLine.arguments.contains("--operator-ui-test") { OperatorUITest.run(controller) }
+        if CommandLine.arguments.contains("--session-fullscreen-test") { SessionFullscreenTest.run(controller) }
         if CommandLine.arguments.contains("--popup-keyboard-test") { PopupKeyboardTest.run(controller) }
         if CommandLine.arguments.contains("--memory-profile") { MemoryProfile.run(controller) }
         if CommandLine.arguments.contains("--memory-cycles") { MemoryCycleProfile.run(controller) }
@@ -90,12 +98,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--layout-test") { LayoutTest.run(controller) }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard controller.canQuit() else { return .terminateCancel }
-        controller.completeStartupUnlock(false); launchServer?.stop(); return .terminateNow
+        guard windows?.canQuit() ?? true else { return .terminateCancel }
+        controller?.completeStartupUnlock(false); launchServer?.stop(); return .terminateNow
     }
     func applicationWillTerminate(_ notification: Notification) { launchServer?.stop(); SSHConnectionGroup.finishCleanup() }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !backgroundTransferTest }
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { controller.show(); return true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { windows?.externalWorkspace()?.show(); return true }
+    @objc func newWindow() { windows?.newWindow() }
     private func buildMenu() {
         let root = NSMenu()
         func menu(_ title: String) -> NSMenu {
@@ -107,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.keyEquivalentModifierMask = modifiers; item.target = target ?? controller
         }
         let app = menu("OShell")
-        add(app, "关于 OShell", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), target: NSApp)
+        add(app, "关于 OShell", #selector(WorkspaceController.showAbout))
         add(app, "开源许可…", #selector(WorkspaceController.showOpenSourceLicenses))
         add(app, "检查更新…", #selector(WorkspaceController.checkForUpdates))
         add(app, "更新设置…", #selector(WorkspaceController.showUpdatePreferences))
@@ -119,6 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         app.addItem(.separator()); add(app, "隐藏 OShell", #selector(NSApplication.hide(_:)), "h", target: NSApp)
         add(app, "退出 OShell", #selector(NSApplication.terminate(_:)), "q", target: NSApp)
         let file = menu("会话")
+        add(file, "新建窗口", #selector(WorkspaceController.newWindow), "n", [.command, .shift], target: self)
         add(file, "会话管理…", #selector(WorkspaceController.showSessionManager), "o", [.command, .shift])
         add(file, "导入会话…", #selector(WorkspaceController.importSessions))
         add(file, "导出全部会话…", #selector(WorkspaceController.exportSessions))
@@ -133,7 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         file.addItem(.separator()); add(file, "重新连接", #selector(WorkspaceController.reconnect), "r", [.command, .shift])
         add(file, "关闭当前分屏", #selector(WorkspaceController.closePane), "w")
         add(file, "关闭当前标签", #selector(WorkspaceController.closeTab), "w", [.command, .shift])
-        controller.quickMenu = menu("快捷连接")
+        windows.quickMenu = menu("快捷连接")
         let edit = menu("编辑")
         add(edit, "复制", #selector(NSText.copy(_:)), "c", target: nil)
         edit.items.last?.target = nil
@@ -176,8 +186,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(tools, "停止同步输入", #selector(WorkspaceController.stopSyncInput))
         add(tools, "文件管理（SFTP / FTP）…", #selector(WorkspaceController.showFiles))
         add(tools, "突出显示集…", #selector(WorkspaceController.showHighlights))
-        controller.commandMenu = menu("快速命令")
+        windows.commandMenu = menu("快速命令")
         let window = menu("窗口"); NSApp.windowsMenu = window
+        add(window, "新建窗口", #selector(WorkspaceController.newWindow), target: self)
         add(window, "最小化", #selector(NSWindow.performMiniaturize(_:)), "m", target: nil); window.items.last?.target = nil
         NSApp.mainMenu = root
         ShortcutRuntime.install(controller.configuration.preferences.keyboardShortcuts, menu: root)
