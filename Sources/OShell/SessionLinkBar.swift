@@ -12,9 +12,15 @@ final class SessionLinkBar: NSView {
     struct Entry { let target: Target; let title: String; let detail: String }
     final class LinkButton: NSButton, NSDraggingSource {
         weak var bar: SessionLinkBar?
+        var generation = UUID()
         var destination: Target!
         var clicked: (() -> Void)?, makeMenu: (() -> NSMenu?)?
         override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
+        fileprivate func closeMenu() {
+            guard var menu = enclosingMenuItem?.menu else { return }
+            while let parent = menu.supermenu { menu = parent }
+            menu.cancelTrackingWithoutAnimation()
+        }
         @objc func activate() { clicked?() }
         override func mouseDown(with event: NSEvent) {
             guard !event.modifierFlags.contains(.control), let window, let destination else { super.mouseDown(with: event); return }
@@ -22,16 +28,17 @@ final class SessionLinkBar: NSView {
             while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
                 if next.type == .leftMouseUp { clicked?(); return }
                 if hypot(next.locationInWindow.x - start.x, next.locationInWindow.y - start.y) < 5 { continue }
-                let item = NSPasteboardItem(); item.setString(destination.key, forType: SessionLinkBar.pasteboardType)
-                let drag = NSDraggingItem(pasteboardWriter: item)
-                let image = NSImage(size: bounds.size); image.lockFocus()
-                NSColor.windowBackgroundColor.setFill(); NSBezierPath(rect: NSRect(origin: .zero, size: bounds.size)).fill()
-                (title as NSString).draw(at: NSPoint(x: 6, y: 6), withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor]); image.unlockFocus()
-                drag.setDraggingFrame(bounds, contents: image); beginDraggingSession(with: [drag], event: next, source: self); return
+                bar?.beginLinkDrag(self, event: next); return
             }
         }
         func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { context == .withinApplication ? .move : [] }
-        func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { bar?.clearDropIndicator() }
+        func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { bar?.endLinkDrag() }
+        override func draw(_ dirtyRect: NSRect) {
+            guard let item = enclosingMenuItem else { super.draw(dirtyRect); return }
+            if item.isHighlighted { NSColor.selectedMenuItemColor.setFill(); bounds.fill() }
+            let color: NSColor = item.isHighlighted ? .selectedMenuItemTextColor : .labelColor
+            (title as NSString).draw(in: bounds.insetBy(dx: 10, dy: 5), withAttributes: [.font: font ?? NSFont.menuFont(ofSize: 0), .foregroundColor: color])
+        }
     }
     private final class Canvas: NSView {
         weak var bar: SessionLinkBar?
@@ -66,6 +73,8 @@ final class SessionLinkBar: NSView {
     private let hint = NSTextField(labelWithString: "点击左侧 + 添加当前会话，或在会话管理 /Links 中管理")
     private(set) var buttons = [LinkButton]()
     private let indicator = DropIndicator()
+    private var generation = UUID()
+    private var activeDragSource: LinkButton?
     var canDrop: ((Target, DropPosition) -> Bool)?
     var onDrop: ((Target, DropPosition) -> Bool)?
     var onAdd: (() -> Void)?
@@ -88,6 +97,43 @@ final class SessionLinkBar: NSView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func menu(for event: NSEvent) -> NSMenu? { makeContextMenu?(nil) }
+    func invalidateDragSources() { generation = UUID(); clearDropIndicator() }
+    /// Native menu rows keep keyboard selection, while this view supplies mouse dragging.
+    func makeMenuLinkButton(_ target: Target, title: String, detail: String, open: @escaping () -> Void) -> LinkButton {
+        let button = LinkButton(frame: NSRect(x: 0, y: 0, width: min(420, max(180, (title as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 0)]).width + 24)), height: 28))
+        button.bar = self; button.generation = generation; button.destination = target
+        button.title = title; button.font = .menuFont(ofSize: 0); button.isBordered = false
+        button.autoresizingMask = [.width]; button.toolTip = detail + "\n按住拖动到链接栏可移动快捷引用"
+        button.setAccessibilityLabel(title); button.target = button; button.action = #selector(LinkButton.activate)
+        button.clicked = { [weak button] in
+            button?.closeMenu(); open()
+        }
+        button.makeMenu = { [weak self] in self?.makeContextMenu?(target) }
+        return button
+    }
+    private func beginLinkDrag(_ source: LinkButton, event: NSEvent) {
+        guard source.generation == generation, let window, let sourceWindow = source.window, let target = source.destination else { return }
+        let item = NSPasteboardItem(); item.setString(target.key, forType: Self.pasteboardType)
+        let drag = NSDraggingItem(pasteboardWriter: item)
+        let size = source.bounds.size, image = NSImage(size: size)
+        image.lockFocus(); NSColor.windowBackgroundColor.setFill(); NSRect(origin: .zero, size: size).fill()
+        (source.title as NSString).draw(at: NSPoint(x: 6, y: 6), withAttributes: [.font: source.font ?? NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor]); image.unlockFocus()
+        let screenRect = sourceWindow.convertToScreen(source.convert(source.bounds, to: nil))
+        drag.setDraggingFrame(convert(window.convertFromScreen(screenRect), from: nil), contents: image)
+        let location = window.convertPoint(fromScreen: sourceWindow.convertPoint(toScreen: event.locationInWindow))
+        guard let translated = NSEvent.mouseEvent(with: .leftMouseDragged, location: location, modifierFlags: event.modifierFlags, timestamp: event.timestamp, windowNumber: window.windowNumber, context: nil, eventNumber: event.eventNumber, clickCount: event.clickCount, pressure: event.pressure) else { return }
+        // Anchor the drag to the permanent toolbar, not the temporary menu window.
+        // Retain its row until completion even after the menu has closed.
+        activeDragSource = source
+        let fromMenu = source.enclosingMenuItem != nil
+        source.closeMenu()
+        let begin = { [weak self] in
+            guard let self, self.activeDragSource === source, source.generation == self.generation else { self?.endLinkDrag(); return }
+            self.beginDraggingSession(with: [drag], event: translated, source: source)
+        }
+        if fromMenu { DispatchQueue.main.async(execute: begin) } else { begin() }
+    }
+    private func endLinkDrag() { clearDropIndicator(); activeDragSource = nil }
     @objc private func addCurrentSession() { guard addButton.isEnabled else { return }; onAdd?() }
     func updateAddButton(sessionName: String?) {
         addButton.isEnabled = sessionName != nil
@@ -110,7 +156,7 @@ final class SessionLinkBar: NSView {
     func update(_ entries: [Entry], menu: NSMenu) {
         buttons.forEach { $0.removeFromSuperview() }; buttons = []
         for entry in entries {
-            let button = LinkButton(); button.bar = self; button.destination = entry.target; button.title = entry.title
+            let button = LinkButton(); button.bar = self; button.generation = generation; button.destination = entry.target; button.title = entry.title
             button.isBordered = false; button.font = .systemFont(ofSize: 12); button.lineBreakMode = .byTruncatingTail
             let folder: Bool; if case .folder = entry.target { folder = true } else { folder = false }
             button.image = NSImage(oshellSymbolName: folder ? "folder" : "terminal", accessibilityDescription: nil)
@@ -128,7 +174,7 @@ final class SessionLinkBar: NSView {
     private func resolvedDrop(_ info: NSDraggingInfo) -> (Target, DropPosition, NSRect)? {
         guard info.draggingSourceOperationMask.contains(.move),
               let source = info.draggingSource as? LinkButton, source.bar === self,
-              let target = source.destination, buttons.contains(where: { $0.destination == target }),
+              source.generation == generation, let target = source.destination,
               info.draggingPasteboard.string(forType: Self.pasteboardType) == target.key else { return nil }
         let point = canvas.convert(info.draggingLocation, from: nil)
         guard canvas.visibleRect.contains(point) else { return nil }

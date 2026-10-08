@@ -131,6 +131,38 @@ enum SessionDirectoryTest {
         }
         _ = NSApp.sendAction(move.action!, to: move.target, from: move)
         checks["multiContextMoveUsesTree"] = workspace.configuration.profiles.prefix(2).allSatisfy { $0.group == "目标目录" }
+        // Delete through the real context menu, including cancellation and disk state.
+        var disposable = SessionProfile.local; disposable.name = "待删本地配置"; disposable.group = "删除测试/含会话/下级"
+        var removal = workspace.configuration; removal.profiles.append(disposable)
+        removal.directories += ["删除测试/空目录", "删除测试/含会话/空子目录", "删除测试/含会话保留"]
+        removal.sessionLinks.add(profileID: disposable.id, name: "引用待删会话", folder: "删除测试引用")
+        _ = workspace.saveConfiguration(removal)
+        workspace.open(disposable); let live = workspace.selectedTab!, livePane = live.activePane
+        manager.revealDirectory("删除测试")
+        func removeRow(_ title: String) {
+            let item = manager.contextMenu(for: row(title)).items.first { $0.title == "删除…" }!
+            _ = NSApp.sendAction(item.action!, to: item.target, from: item)
+        }
+        let emptyRevision = workspace.configurationRevision
+        removeRow("空目录")
+        checks["emptyDirectoryDeletesWithoutConfirmation"] = workspace.configurationRevision == emptyRevision + 1 && !SessionDirectory.all(workspace.configuration).contains("删除测试/空目录") && NSApp.modalWindow == nil
+        let beforeCancel = workspace.configurationRevision
+        nextModal { root in
+            let text = descendants(root).compactMap { $0 as? NSTextField }.map(\.stringValue).joined(separator: " ")
+            checks["nonemptyDirectoryShowsRecursiveCounts"] = text.contains("2 个子目录") && text.contains("1 个会话配置") && text.contains("1 个快捷引用")
+            if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) }
+        }
+        removeRow("含会话")
+        checks["cancelRecursiveDeletionChangesNothing"] = workspace.configurationRevision == beforeCancel && workspace.configuration.profiles.contains { $0.id == disposable.id }
+        nextModal { root in press(root, "递归删除") }
+        removeRow("含会话")
+        checks["confirmedDirectoryDeletionIsRecursive"] = !SessionDirectory.all(workspace.configuration).contains { SessionDirectory.contains($0, in: "删除测试/含会话") } && !workspace.configuration.profiles.contains { $0.id == disposable.id }
+        checks["directoryDeletionKeepsSimilarNamedSibling"] = SessionDirectory.all(workspace.configuration).contains("删除测试/含会话保留")
+        checks["directoryDeletionRemovesDanglingLinks"] = !workspace.configuration.sessionLinks.entries.contains { $0.profileID == disposable.id }
+        checks["directoryDeletionDoesNotCloseLiveTab"] = workspace.tabs.contains { $0 === live } && live.activePane === livePane && !livePane.isShutdown
+        checks["directoryDeletionPersistsAfterReload"] = (try? workspace.store.load().profiles.contains { $0.id == disposable.id }) == false && (try? workspace.store.load().directories.contains("删除测试/含会话/空子目录")) == false
+        manager.revealDirectory("")
+        checks["linksRootDeleteDisabled"] = manager.contextMenu(for: row("Links")).items.first { $0.title == "删除…" }?.isEnabled == false
         let report: [String: Any] = ["passed": checks.values.allSatisfy { $0 }, "checks": checks]
         if let path = ProcessInfo.processInfo.environment["OSHELL_DIRECTORY_OUTPUT"] { try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: path)) }
         print("Directory checks: \(checks.count), failed: \(checks.filter { !$0.value }.keys.sorted())")

@@ -350,6 +350,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         if !prefs.metal || terminal.window != nil { try? terminal.setUseMetal(prefs.metal) }
     }
     private static func font(_ prefs: Preferences) -> NSFont {
+        if prefs.fontName.hasPrefix("DejaVuSansMono") { BundledTerminalFonts.register() }
         if !prefs.fontName.isEmpty, let font = NSFont(name: prefs.fontName, size: prefs.fontSize) { return font }
         return .oshellMonospacedSystemFont(ofSize: prefs.fontSize, weight: .regular)
     }

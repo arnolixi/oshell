@@ -12,6 +12,10 @@ on:
         description: '可留空：按所选分支的 Info.plist 版本创建标签；填写时必须匹配源码版本'
         required: false
         type: string
+      publish:
+        description: '发布 GitHub Release（需配置更新签名 Secret）；关闭则仅编译四种 DMG'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -36,6 +40,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       build: ${{ steps.meta.outputs.build }}
       commit: ${{ steps.meta.outputs.commit }}
+      publish: ${{ steps.meta.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -52,9 +57,13 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
           PUSH_TAG: ${{ github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
+          PUBLISH_RELEASE: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+          echo "publish=$PUBLISH_RELEASE" >> "$GITHUB_OUTPUT"
+          if [ "$PUBLISH_RELEASE" != true ]; then
+            python3 scripts/ci-release.py metadata --tag "$RELEASE_TAG" --build-only --github-output "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = workflow_dispatch ]; then
             python3 scripts/ci-release.py prepare --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
           else
             python3 scripts/ci-release.py metadata --tag "$PUSH_TAG" --github-output "$GITHUB_OUTPUT"
@@ -83,6 +92,7 @@ jobs:
       RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
       RELEASE_COMMIT: ${{ needs.metadata.outputs.commit }}
       FLAVOR: ${{ matrix.flavor }}
+      PUBLISH_RELEASE: ${{ needs.metadata.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -100,7 +110,29 @@ jobs:
       - name: Verify DMG payload, architectures and deployment targets
         run: python3 scripts/verify-installers.py --flavor "$FLAVOR" --format dmg
       - name: Stage the verified artifact
-        run: python3 scripts/ci-release.py stage --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --flavor "$FLAVOR" --output work/ci-output
+        run: |
+          options=()
+          if [ "$PUBLISH_RELEASE" != true ]; then options+=(--build-only); fi
+          python3 scripts/ci-release.py stage --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --flavor "$FLAVOR" --output work/ci-output "${options[@]}"
+      - name: Prepare signed in-app updates
+        if: needs.metadata.outputs.publish == 'true' && (matrix.flavor == 'arm64' || matrix.flavor == 'legacy')
+        env:
+          OSHELL_UPDATE_SIGNING_KEY: ${{ secrets.OSHELL_UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$OSHELL_UPDATE_SIGNING_KEY" ]; then
+            echo '::error::Configure the existing OSHELL_UPDATE_SIGNING_KEY secret before publishing. A DMG-only Release breaks in-app update checks.'
+            exit 1
+          fi
+          python3 -m venv work/update-signing
+          work/update-signing/bin/python -m pip install -r scripts/requirements-release.txt
+          work/update-signing/bin/python scripts/sign-ci-updates.py --flavor "$FLAVOR" --tag "$RELEASE_TAG"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: needs.metadata.outputs.publish == 'true' && (matrix.flavor == 'arm64' || matrix.flavor == 'legacy')
+        with:
+          name: updates-${{ matrix.flavor }}
+          path: work/ci-updates/
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dmg-${{ matrix.flavor }}
@@ -121,6 +153,7 @@ jobs:
 
   release:
     needs: [metadata, build]
+    if: needs.metadata.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -142,10 +175,16 @@ jobs:
           merge-multiple: false
       - name: Export corresponding audited source
         run: python3 scripts/export-public-source.py --ref "$RELEASE_COMMIT" --output "dist/source/OShell-${RELEASE_VERSION}-source.tar.gz"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: updates-*
+          path: work/update-input
+          merge-multiple: false
       - name: Require four matching DMGs and prepare checksums
         run: |
           python3 scripts/ci-release.py collect --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
-            --artifacts work/release-input --source "dist/source/OShell-${RELEASE_VERSION}-source.tar.gz" --output dist/github-release
+            --artifacts work/release-input --updates-artifacts work/update-input --repository "$GITHUB_REPOSITORY" \
+            --source "dist/source/OShell-${RELEASE_VERSION}-source.tar.gz" --output dist/github-release
       - name: Upload as draft, verify all assets, then publish Release
         env:
           GH_TOKEN: ${{ github.token }}

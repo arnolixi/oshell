@@ -90,6 +90,7 @@ def assemble(flavor, arches, minimum, binaries, helpers):
     (bridge/'Contents/Info.plist').write_bytes(plistlib.dumps(bridge_info))
     for source,name in [(ROOT/'LICENSE','OShell-LICENSE.txt'),(ROOT/'THIRD_PARTY_NOTICES.txt','THIRD_PARTY_NOTICES.txt'),(ROOT/'Vendor/SwiftTerm/LICENSE','SwiftTerm-LICENSE.txt'),(helpers[arches[0]].parent/'COPYING','lrzsz-COPYING.txt'),(ROOT/'Vendor/lrzsz-0.12.20.tar.gz','lrzsz-0.12.20.tar.gz')]: shutil.copy2(source,resources/name)
     shutil.copytree(ROOT/'Vendor/NerdFonts',resources/'NerdFonts')
+    shutil.copytree(ROOT/'Vendor/DejaVuFonts',resources/'DejaVuFonts')
     if flavor=='legacy': shutil.copy2(ROOT/'Vendor/CryptoSwift/LICENSE',resources/'CryptoSwift-LICENSE.txt')
     shutil.copy2(ROOT/'shell-integration/oshell-integration.sh',resources/'oshell-integration.sh')
     shutil.copy2(ROOT/'Vendor/ColorSchemes/LICENSE',resources/'ColorSchemes-LICENSE.txt')

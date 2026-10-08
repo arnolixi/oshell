@@ -31,9 +31,16 @@ extension WorkspaceController {
             switch position {
             case .before(let target):
                 var value = configuration
+                if case .link(let id) = source,
+                   let link = value.sessionLinks.entries.first(where: { $0.id == id }), !link.folder.isEmpty {
+                    guard let moved = try SessionDirectory.moving(value, profileIDs: [], directories: [], linkIDs: [id], to: SessionLinks.rootDirectory) else { return nil }
+                    value = moved
+                    _ = try value.sessionLinks.reorderRoot(source, before: target)
+                    return value
+                }
                 return try value.sessionLinks.reorderRoot(source, before: target) ? value : nil
             case .folder(let folder):
-                guard case .link(let id) = source, configuration.sessionLinks.entries.contains(where: { $0.id == id && $0.folder.isEmpty }) else { return nil }
+                guard case .link(let id) = source, configuration.sessionLinks.entries.contains(where: { $0.id == id }) else { return nil }
                 return try SessionDirectory.moving(configuration, profileIDs: [], directories: [], linkIDs: [id], to: SessionLinks.directory(for: folder))
             }
         } catch { return nil }
@@ -44,6 +51,7 @@ extension WorkspaceController {
         sessionLinkBar.updateAddButton(sessionName: available ? pane?.profile.name : nil)
     }
     func rebuildSessionLinkBar() {
+        sessionLinkBar.invalidateDragSources()
         let links = configuration.sessionLinks
         let entries: [SessionLinkBar.Entry] = links.orderedRootItems.compactMap { item in
             switch item {
@@ -207,6 +215,7 @@ extension WorkspaceController {
                 guard let link = links.entries.first(where: { $0.id == id }) else { continue }
                 let item = menu.addItem(withTitle: link.name, action: #selector(connectSessionLink(_:)), keyEquivalent: "")
                 item.target = self; item.representedObject = link.id; item.toolTip = linkDetail(link)
+                item.view = sessionLinkBar.makeMenuLinkButton(.link(id), title: link.name, detail: linkDetail(link)) { [weak self] in self?.openSessionLink(id) }
             }
         }
         if menu.items.isEmpty { let item = menu.addItem(withTitle: "暂无快捷链接", action: nil, keyEquivalent: ""); item.isEnabled = false }

@@ -165,7 +165,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         recordButton.imagePosition = .imageLeading; recordButton.bezelStyle = .texturedRounded
         let settings = iconButton("", "gearshape", #selector(showPreferences)); settings.toolTip = "设置"
         configurePropertyButtons()
-        let toolbar = WorkspaceToolbar(views: [connect, quickButton, new, local, currentPropertiesButton, defaultPropertiesButton, tools, syncIndicator, stopSyncButton, NSView(), tabGroupButton, splitButton, arrangementButton, find, recordButton, settings])
+        let toolbar = WorkspaceToolbar(views: [connect, quickButton, new, local, currentPropertiesButton, defaultPropertiesButton, tools, tabGroupButton, splitButton, arrangementButton, syncIndicator, stopSyncButton, NSView(), find, recordButton, settings])
         toolbar.identifier = .init("workspace.toolbar")
         toolbar.compactButtons = [new, local, find, recordButton]
         for (button, label) in [(new, "新建会话"), (local, "本地终端"), (find, "搜索终端"), (recordButton, "记录终端日志")] {

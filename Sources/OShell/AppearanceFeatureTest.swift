@@ -58,6 +58,12 @@ enum AppearanceFeatureTest {
         checks["cancelDoesNotSave"] = controller.configurationRevision == previousRevision
         modal { root in
             let view = descendants(root).compactMap { $0 as? AppearanceSettingsView }.first!
+            let settingsTabs = descendants(root).compactMap { $0 as? NSTabView }.first
+            settingsTabs?.selectTabViewItem(at: 0)
+            let fonts = descendants(root).compactMap { $0 as? NSPopUpButton }.first { $0.itemArray.contains { ($0.representedObject as? String) == "DejaVuSansMono" } }
+            checks["dejavuInFontPicker"] = fonts != nil
+            if let fonts, let item = fonts.itemArray.first(where: { ($0.representedObject as? String) == "DejaVuSansMono" }) { fonts.select(item) }
+            settingsTabs?.selectTabViewItem(at: 1)
             view.schemes.selectItem(at: 6); view.schemeChanged()
             view.theme.selectItem(at: 2); view.themeChanged()
             func submit() { descendants(root).compactMap { $0 as? NSButton }.first { $0.title == "应用" }?.performClick(nil) }
@@ -73,6 +79,8 @@ enum AppearanceFeatureTest {
         }
         controller.showAppearancePreferences()
         checks["settingsSavePaletteAndTheme"] = controller.configuration.preferences.colorSchemeID == "nord" && controller.configuration.preferences.interfaceTheme == .dark
+        checks["dejavuSavedAcrossReload"] = (try? controller.store.load().preferences.fontName) == "DejaVuSansMono"
+        checks["dejavuAppliesAllOpenTerminals"] = panes.allSatisfy { $0.terminal.font.fontName == "DejaVuSansMono" }
         checks["savedAcrossReload"] = (try? controller.store.load().preferences.colorSchemeID) == "nord"
         checks["appliesAllOpenTerminals"] = panes.allSatisfy { $0.terminal.nativeBackgroundColor.rgbHex == "#2E3440" }
         checks["doesNotRecreateConnections"] = panes.map { $0.terminal.process.shellPid } == pids

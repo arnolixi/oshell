@@ -64,6 +64,15 @@ class ReleaseTests(unittest.TestCase):
         git('add', '.'); git('commit', '-m', 'Release fixture')
         return repo, git
 
+    def test_build_only_accepts_untagged_source_without_mutation(self):
+        repo, git = self.source_repository(); before = git('rev-parse', 'HEAD')
+        with patch.object(CI, 'ROOT', repo), patch.object(CI, 'gh') as network:
+            result = CI.metadata('', commit=before, allow_missing_tag=True)
+            network.assert_not_called()
+        self.assertEqual(result['tag'], 'v1.2.3')
+        self.assertEqual(result['commit'], before)
+        self.assertEqual(git('tag'), '')
+
     def test_manual_first_release_infers_version_and_creates_tag(self):
         repo, git = self.source_repository(); head = git('rev-parse', 'HEAD'); calls = []
         def network(*args, check=True):
@@ -190,6 +199,53 @@ class ReleaseTests(unittest.TestCase):
         staged = json.loads((self.root/'staged/manifest.json').read_text())
         self.assertEqual(staged['commit'], META['commit'])
         self.assertEqual(staged['sha256'], record['sha256'])
+
+    def update_artifacts(self):
+        import xml.etree.ElementTree as ET
+        root = self.root/'updates'; root.mkdir()
+        namespace = '{http://www.andymatuschak.org/xml-namespaces/sparkle}'
+        for flavor in ['arm64', 'legacy']:
+            folder = root/('updates-' + flavor); folder.mkdir(); target = TARGETS[flavor]
+            archive = folder/f"OShell-{META['version']}-{target.suffix}-update.zip"; archive.write_bytes(b'offline archive fixture')
+            feed = folder/f'OShell-{target.suffix}.xml'
+            rss = ET.Element('rss'); channel = ET.SubElement(rss, 'channel'); item = ET.SubElement(channel, 'item')
+            for key, value in [('version', META['build']), ('shortVersionString', META['version']), ('minimumSystemVersion', target.minimum)]: ET.SubElement(item, namespace+key).text = value
+            ET.SubElement(item, 'enclosure', {'url': f"https://github.com/owner/repo/releases/download/{META['tag']}/{archive.name}", 'length': str(archive.stat().st_size), namespace+'edSignature': 'offline structural fixture'})
+            ET.ElementTree(rss).write(feed)
+            (folder/'release-assets.json').write_text(json.dumps(dict(version=META['version'],build=META['build'],tag=META['tag'],repository='owner/repo',assets=[archive.name,feed.name])))
+            (folder/'SHA256SUMS.txt').write_text(''.join(f'{CI.sha256(p)}  {p.name}\n' for p in [archive,feed]))
+        return root
+
+    def test_signed_update_artifacts_included_in_release(self):
+        updates = self.update_artifacts()
+        result = CI.collect(META, self.incoming, self.source, self.output, updates, 'owner/repo')
+        self.assertEqual({r['file'] for r in result['updateAssets']}, CI.update_asset_names(META['version']))
+        calls = []
+        with patch.object(CI, 'gh', self.fake_gh(calls)): CI.publish(META, 'owner/repo', self.output)
+        upload = next(call for call in calls if call[:2] == ('release', 'upload'))
+        for name in CI.update_asset_names(META['version']): self.assertIn(str(self.output/name), upload)
+
+    def test_missing_update_architecture_prevents_release(self):
+        import shutil
+        updates = self.update_artifacts(); shutil.rmtree(updates/'updates-legacy')
+        with self.assertRaises(ValueError): CI.collect(META, self.incoming, self.source, self.output, updates, 'owner/repo')
+        self.assertFalse(self.output.exists())
+
+    def test_changed_update_archive_rejected(self):
+        updates = self.update_artifacts(); next((updates/'updates-arm64').glob('*.zip')).write_bytes(b'changed')
+        with self.assertRaises(ValueError): CI.collect(META, self.incoming, self.source, self.output, updates, 'owner/repo')
+        self.assertFalse(self.output.exists())
+
+    def test_wrong_update_repository_rejected(self):
+        updates = self.update_artifacts()
+        with self.assertRaises(ValueError): CI.collect(META, self.incoming, self.source, self.output, updates, 'another/repo')
+
+    def test_ci_signing_requires_secret(self):
+        import os, sys
+        env = dict(os.environ, OSHELL_UPDATE_SIGNING_KEY='')
+        result = subprocess.run([sys.executable, str(SCRIPTS/'sign-ci-updates.py'), '--flavor', 'arm64', '--tag', 'v1.2.3'], env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('OSHELL_UPDATE_SIGNING_KEY', result.stderr)
 
     def test_empty_checksum_list_prevents_publish(self):
         self.collect(); (self.output/'SHA256SUMS.txt').write_text('')

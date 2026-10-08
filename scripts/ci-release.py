@@ -11,6 +11,7 @@ import plistlib
 import re
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 from release_targets import TARGETS, RELEASE_FLAVORS
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -87,7 +88,43 @@ def stage(meta, flavor, output):
     manifest = dict(meta, flavor=flavor, file=name, sha256=sha256(dmg), size=dmg.stat().st_size, verification=entry)
     (output/'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
-def collect(meta, artifacts, source, output):
+def update_asset_names(version):
+    return {name for flavor in ['arm64', 'legacy'] for name in [
+        f'OShell-{version}-{TARGETS[flavor].suffix}-update.zip', f'OShell-{TARGETS[flavor].suffix}.xml']}
+
+def collect_updates(meta, artifacts, repository):
+    if {path.name for path in artifacts.iterdir()} != {'updates-arm64', 'updates-legacy'}:
+        raise ValueError('Both signed update architectures are required')
+    assets = []
+    sparkle = '{http://www.andymatuschak.org/xml-namespaces/sparkle}'
+    for flavor in ['arm64', 'legacy']:
+        folder = artifacts/('updates-' + flavor)
+        suffix = TARGETS[flavor].suffix
+        names = {f"OShell-{meta['version']}-{suffix}-update.zip", f'OShell-{suffix}.xml'}
+        manifest = json.loads((folder/'release-assets.json').read_text())
+        if any(manifest.get(key) != value for key, value in dict(version=meta['version'], build=meta['build'], tag=meta['tag'], repository=repository).items()) or set(manifest.get('assets', [])) != names:
+            raise ValueError('Update assets do not match this release')
+        if {p.name for p in folder.iterdir()} != names | {'release-assets.json', 'SHA256SUMS.txt'}:
+            raise ValueError('Unexpected update artifact files')
+        checksums = {}
+        for line in (folder/'SHA256SUMS.txt').read_text().splitlines():
+            digest, name = line.split('  ', 1)
+            if name not in names or name in checksums: raise ValueError('Invalid update checksum list')
+            checksums[name] = digest
+        if set(checksums) != names: raise ValueError('Missing update checksums')
+        for name in sorted(names):
+            path = folder/name
+            if path.is_symlink() or sha256(path) != checksums[name]: raise ValueError('Update artifact integrity check failed')
+            assets.append(path)
+        item = ET.parse(folder/f'OShell-{suffix}.xml').find('./channel/item')
+        if item is None or item.findtext(sparkle+'version') != meta['build'] or item.findtext(sparkle+'shortVersionString') != meta['version'] or item.findtext(sparkle+'minimumSystemVersion') != TARGETS[flavor].minimum:
+            raise ValueError('Update feed version or deployment target mismatch')
+        enclosure = item.find('enclosure'); archive = folder/f"OShell-{meta['version']}-{suffix}-update.zip"
+        if enclosure is None or enclosure.get('url') != f"https://github.com/{repository}/releases/download/{meta['tag']}/{archive.name}" or enclosure.get('length') != str(archive.stat().st_size) or not enclosure.get(sparkle+'edSignature'):
+            raise ValueError('Update feed has no valid matching signed enclosure')
+    return assets
+
+def collect(meta, artifacts, source, output, updates_artifacts=None, repository=""):
     expected_dirs = {'dmg-' + flavor for flavor in RELEASE_FLAVORS}
     if {path.name for path in artifacts.iterdir()} != expected_dirs:
         raise ValueError('Exactly four build artifacts are required; missing or unexpected artifacts found')
@@ -112,6 +149,7 @@ def collect(meta, artifacts, source, output):
         records.append(record)
     if source.name != f"OShell-{meta['version']}-source.tar.gz" or not source.is_file() or source.is_symlink():
         raise ValueError('Expected the audited source archive for this version')
+    updates = collect_updates(meta, updates_artifacts, repository) if updates_artifacts else []
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise ValueError('Release output must be empty')
@@ -120,6 +158,8 @@ def collect(meta, artifacts, source, output):
     shutil.copy2(source, output/source.name)
     release_manifest = dict(meta, signing='ad-hoc', notarized=False, installers=records,
                             source=dict(file=source.name, sha256=sha256(source)))
+    for path in updates: shutil.copy2(path, output/path.name)
+    if updates: release_manifest['updateAssets'] = [dict(file=p.name, sha256=sha256(p)) for p in updates]
     (output/'release-manifest.json').write_text(json.dumps(release_manifest, indent=2) + '\n')
     assets = sorted(output.iterdir())
     (output/'SHA256SUMS.txt').write_text(''.join(f'{sha256(path)}  {path.name}\n' for path in assets))
@@ -135,7 +175,7 @@ OShell {meta['version']}（build {meta['build']}）
 下载适合本机的一种 DMG，将 OShell.app 拖入 Applications。SHA256SUMS.txt 提供校验值，对应源码包随附。
 
 这些安装包使用 ad-hoc 签名，未进行 Developer ID 签名或 Apple 公证。流水线校验架构、部署目标、载荷和签名完整性，并运行构建机原生架构的核心测试；不代表已在 macOS 10.13/11 的真实系统上完成验证。
-本次流水线仅发布手动安装包，不生成 Sparkle 签名更新清单。
+{'包含两个架构的签名 ZIP 与 XML 清单，可用于 OShell 内置更新。' if updates else '本次仅发布手动安装包，不包含内置更新文件。'}
 
 对应提交：`{meta['commit']}`
 """
@@ -160,6 +200,11 @@ def publish(meta, repository, output):
         raise ValueError('Repository must be owner/repo')
     files = sorted(path for path in output.iterdir() if path.name != 'RELEASE_NOTES.md')
     expected = {artifact_name(meta['version'], flavor) for flavor in RELEASE_FLAVORS} | {f"OShell-{meta['version']}-source.tar.gz", 'release-manifest.json', 'SHA256SUMS.txt'}
+    manifest = json.loads((output/'release-manifest.json').read_text())
+    if manifest.get('updateAssets'):
+        names = {record['file'] for record in manifest['updateAssets']}
+        if names != update_asset_names(meta['version']): raise ValueError('Both update flavors must be published together')
+        expected |= names
     if {path.name for path in files} != expected:
         raise ValueError('Release asset set is incomplete')
     checked = set()
@@ -196,14 +241,17 @@ def main():
     parser.add_argument('command', choices=['prepare', 'metadata', 'stage', 'collect', 'publish'])
     parser.add_argument('--tag', required=True)
     parser.add_argument('--commit')
+    parser.add_argument('--build-only', action='store_true', help='Validate untagged source for metadata/stage without creating a release')
     parser.add_argument('--github-output', type=Path)
     parser.add_argument('--flavor', choices=RELEASE_FLAVORS)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--artifacts', type=Path)
+    parser.add_argument('--updates-artifacts', type=Path)
     parser.add_argument('--source', type=Path)
     parser.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY', ''))
     args = parser.parse_args()
-    meta = prepare(args.tag, args.repository) if args.command == 'prepare' else metadata(args.tag, args.commit)
+    if args.build_only and args.command not in ['metadata', 'stage']: parser.error('--build-only is only valid for metadata/stage')
+    meta = prepare(args.tag, args.repository) if args.command == 'prepare' else metadata(args.tag, args.commit, allow_missing_tag=args.build_only)
     if args.command in ['prepare', 'metadata']:
         if args.github_output:
             with args.github_output.open('a') as stream:
@@ -214,7 +262,7 @@ def main():
         stage(meta, args.flavor, args.output)
     elif args.command == 'collect':
         if not args.artifacts or not args.source or not args.output: parser.error('collect needs --artifacts, --source and --output')
-        collect(meta, args.artifacts, args.source, args.output)
+        collect(meta, args.artifacts, args.source, args.output, args.updates_artifacts, args.repository)
     else:
         if not args.output or not args.repository: parser.error('publish needs --output and --repository')
         publish(meta, args.repository, args.output)

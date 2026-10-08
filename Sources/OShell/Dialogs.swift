@@ -12,9 +12,10 @@ enum Dialogs {
         let alert = PopupAlert(); alert.messageText = "OShell 设置"
         alert.informativeText = "设置应用于所有已打开的终端，无需重连。界面主题与终端配色可独立选择；较长历史记录会增加内存占用。"
         alert.addButton(withTitle: "应用"); alert.addButton(withTitle: "取消")
+        BundledTerminalFonts.register()
         let font = NSPopUpButton(); font.addItem(withTitle: "系统等宽")
         font.lastItem?.representedObject = ""
-        for (name, label) in [("Menlo-Regular", "Menlo"), ("Monaco", "Monaco"), ("SFMono-Regular", "SF Mono"),
+        for (name, label) in [("DejaVuSansMono", "DejaVu Sans Mono（内置）"), ("Menlo-Regular", "Menlo"), ("Monaco", "Monaco"), ("SFMono-Regular", "SF Mono"),
                               ("JetBrainsMono-Regular", "JetBrains Mono"), ("FiraCode-Regular", "Fira Code"),
                               ("CascadiaCode", "Cascadia Code"), ("CourierNewPSMT", "Courier New")] {
             if NSFont(name: name, size: 13) != nil { font.addItem(withTitle: label); font.lastItem?.representedObject = name }

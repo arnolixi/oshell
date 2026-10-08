@@ -568,17 +568,17 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         case .link(let link, _):
             var config = workspace.configuration; config.sessionLinks.entries.removeAll { $0.id == link.id }; _ = workspace.saveConfiguration(config); reload()
         case .directory(let directory):
-            guard directory != SessionLinks.rootDirectory else { return }
-            var config = workspace.configuration
-            if let folder = SessionLinks.folder(for: directory) {
-                guard !config.profiles.contains(where: { SessionDirectory.contains($0.group, in: directory) }) else { Dialogs.message("目录内仍有原始会话，请先移动这些会话。"); return }
-                guard Dialogs.confirm("删除快捷链接目录“\(directory)”？", text: "将删除该目录及所有子目录中的快捷引用；原会话、密码和连接配置保留。", action: "删除") else { return }
-                config.sessionLinks.removeFolder(folder); _ = workspace.saveConfiguration(config); reload(); return
-            }
-            guard !config.profiles.contains(where: { SessionDirectory.contains($0.group, in: directory) }), !config.sessionLinks.entries.contains(where: { SessionDirectory.contains(SessionLinks.directory(for: $0.folder), in: directory) }), !SessionDirectory.all(config).contains(where: { $0.hasPrefix(directory + "/") }) else { Dialogs.message("目录非空，请先移动或删除其中的会话和子目录。"); return }
-            guard Dialogs.confirm("删除空目录“\(directory)”？", text: "此操作不会关闭任何已打开的连接。", action: "删除") else { return }
-            if let folder = SessionLinks.folder(for: directory) { config.sessionLinks.removeFolder(folder) }
-            config.directories.removeAll { $0 == directory }; _ = workspace.saveConfiguration(config); reload()
+            guard workspace.isSecurityUnlocked, directory != SessionLinks.rootDirectory else { return }
+            do {
+                let revision = workspace.configurationRevision
+                let deletion = try SessionDirectory.deleting(workspace.configuration, directory: directory)
+                if deletion.requiresConfirmation {
+                    let detail = "将递归删除此目录及其内容：\n\(deletion.subdirectoryCount) 个子目录\n\(deletion.sessionCount) 个会话配置（含已保存密码）\n\(deletion.linkCount) 个快捷引用（含其他目录中指向被删会话的引用）\n\n快捷引用指向的目录外原会话会保留。已打开的连接继续运行；不会删除服务器上的文件。此操作无法撤销。"
+                    guard Dialogs.confirm("删除目录“\(SessionDirectory.display(directory))”？", text: detail, action: "递归删除") else { return }
+                }
+                guard workspace.configurationRevision == revision else { throw ModelError.invalid("确认期间会话配置已变化，请重新选择目录并确认删除。") }
+                if workspace.saveConfiguration(deletion.configuration) { reload() }
+            } catch { Dialogs.message(error.localizedDescription) }
         }
     }
 }

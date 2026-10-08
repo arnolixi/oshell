@@ -13,14 +13,16 @@
 
 现代版本以 macOS 13 为最低运行目标，可以用于更新系统；并非限制只能在 macOS 13 使用。四种包共用源码，最低系统和名称统一定义在 `scripts/release_targets.py`。macOS 11 的目标同时设置在项目和 SwiftTerm 的编译配置中，并非只改 Info.plist。
 
+仅需编译时，在 **Run workflow** 中关闭 **publish**。流程不创建版本标签、不发布 Release，也不读取签名私钥；四种 DMG 保存在本次运行的 `dmg-*` Artifacts，可分别下载。
+
 发布步骤：
 
 1. 更新 `scripts/Info.plist` 的 `CFBundleShortVersionString`，递增 `CFBundleVersion`，提交所有源码和流水线文件。
 2. 将提交推送到 GitHub。手动发布时进入 **Actions → Build and publish macOS DMGs → Run workflow**，选择要发布的分支（通常为 `main`），**tag 留空**。流程读取该提交的 Info.plist，例如版本 `0.2.59` 会创建 `v0.2.59`；也可明确填写匹配版本。已有同名标签必须指向所选提交，流程不会移动或覆盖它。若需重试旧版本，请选择原标签作为运行来源。标签与源码版本不匹配时，会在创建标签和编译前报错。也可以自行创建并推送匹配的 `vX.Y.Z` 标签来触发发布。
 3. 标签确定后，Actions 会运行四个独立构建任务。四个任务全部完成核心测试、DMG 挂载检查、全部 Mach-O 的架构/最低系统检查和签名完整性检查后，才进入发布阶段。
-4. Release 先以草稿创建，上传四个 DMG、对应源码包、`SHA256SUMS.txt` 和 `release-manifest.json`。确认远端附件完整后才公开发布并设为 Latest。
+4. Release 先以草稿创建，上传四个 DMG、两个架构的签名更新 ZIP 和 XML 清单、对应源码包、`SHA256SUMS.txt` 和 `release-manifest.json`。确认远端附件完整后才公开发布并设为 Latest。
 
-只使用 GitHub 自动提供的 `GITHUB_TOKEN`，无需额外 PAT。仓库需允许 Actions 运行；构建阶段仅有 `contents: read`，准备标签和发布 job 申请 `contents: write`。如果组织策略禁止写权限，需要仓库管理员允许该工作流发布 Release。工作流不读取本机 `.release-private`，也不设置默认更新仓库。
+GitHub API 只使用自动提供的 `GITHUB_TOKEN`，无需额外 PAT。发布前还需在仓库 **Settings → Secrets and variables → Actions** 配置 `OSHELL_UPDATE_SIGNING_KEY`，内容为现有 Sparkle Ed25519 私钥文件中的 Base64 种子。该密钥必须与应用的 `SUPublicEDKey` 匹配，不能重新生成替代。密钥仅在签名步骤写入临时 0600 文件，完成后清理；不写入源码、日志或发布附件。缺少密钥时停止发布，避免生成会导致检查更新失败的不完整 Release。仓库需允许 Actions 运行；构建阶段仅有 `contents: read`，准备标签和发布 job 申请 `contents: write`。如果组织策略禁止写权限，需要仓库管理员允许该工作流发布 Release。工作流不读取开发者本机 `.release-private`，由维护者配置加密 Secret，也不设置默认更新仓库。
 
 准备阶段创建的标签在后续构建失败时会保留，以便重试相同源码；若要改动源码，应使用新版本，不能将原标签移动到新提交。旧失败记录的 **Re-run jobs** 仍使用当时的工作流；升级流程后应从 `main` 新建一次 **Run workflow**。
 
@@ -28,7 +30,7 @@
 
 构建机使用 GitHub 托管的 `macos-15`（arm64）与 `macos-15-intel`，固定选择 Xcode 16.4，避免 `macos-latest` 标签更换架构或默认工具链变动影响旧系统构建。第三方 Actions 已固定到官方版本提交。若 GitHub 将来移除该 Xcode，需要更新固定工具链并重新验证旧目标；构建机版本不等于安装包的最低运行版本。
 
-当前沿用 ad-hoc 签名，**没有 Developer ID 签名和 Apple 公证**，Release 说明会明确标注。部署目标校验不等于真实 macOS 10.13/11 的运行验收。本流程只发布手动安装 DMG；Sparkle 签名更新 ZIP/XML 仍采用下方的独立发布步骤，不会自动读取或更换发布密钥。
+当前沿用 ad-hoc 签名，**没有 Developer ID 签名和 Apple 公证**，Release 说明会明确标注。部署目标校验不等于真实 macOS 10.13/11 的运行验收。流水线同时发布手动安装 DMG 和 Sparkle 签名更新 ZIP/XML；也可按下方步骤在本机签名。不会自动创建或更换发布密钥。
 
 参考：[GitHub 托管 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)、[macOS 15 工具链清单](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md)、[GitHub CLI Release 命令](https://cli.github.com/manual/gh_release_create)。
 
@@ -50,7 +52,7 @@ python3 scripts/verify-installers.py --flavor arm64 --flavor legacy
 
 更新引擎固定为 Sparkle 2.9.6，以保留 macOS 10.13 支持。清单通过 GitHub 的 `releases/latest/download/<文件名>` 读取。更新源需要公开仓库和可下载的正式 Release；自动检查默认关闭。
 
-两种架构必须同时附上对应 XML：
+仅有 DMG 不足以供内置更新使用。缺少 XML 时，`releases/latest/download` 会返回 404，Sparkle 将提示获取更新信息失败。两种架构必须同时附上对应 XML 和清单引用的签名 ZIP：
 
 - `OShell-macOS13-arm64.xml`
 - `OShell-macOS10.13-Intel.xml`
@@ -97,3 +99,5 @@ python3 scripts/export-public-source.py --ref HEAD --output dist/source/OShell-s
 源码包只导出审核过的 Git 提交，不包含工作目录、私钥或构建缓存。`Vendor/` 包含 SwiftTerm 与 CryptoSwift 源码，以及 lrzsz 和 Sparkle 的上游源码归档。第三方调整记录见 `THIRD_PARTY_NOTICES.txt`。应用内“开源许可…”可查看 GPL-3.0 与第三方声明。
 
 参考：[GPL-3.0 原文](../LICENSE)、[Sparkle 文档](https://sparkle-project.org/documentation/)、[GitHub Release 下载链接](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)。
+
+修复历史 Release 缺失的更新文件时，应从该 Release 的 DMG 提取原始应用，按 `<目录>/arm64/OShell.app` 和 `<目录>/legacy/OShell.app` 保存，并将该目录传给 `publish-updates.py --apps-root <目录>`。先校验发布校验值、应用签名及版本，再签名并添加缺失附件；不要用含未发布改动的本地应用冒充旧版本更新。

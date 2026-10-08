@@ -861,6 +861,43 @@ final class CoreTests {
         XCTAssertThrowsError(try duplicateLink.validate())
         archive.links[0].profileID = UUID(); XCTAssertThrowsError(try archive.validate())
     }
+    func testRecursiveSessionDirectoryDeletion() throws {
+        let a = SessionProfile(name: "SSH", group: "生产/待删", host: "ssh.example.test")
+        let b = SessionProfile(name: "FTP", group: "生产/待删/下级", kind: .ftp, host: "ftp.example.test", port: 21)
+        let c = SessionProfile(name: "相近名称", group: "生产/待删保留", host: "keep.example.test")
+        var config = Configuration(profiles: [a, b, c])
+        config.directories = ["生产/待删/空子目录", "空目录"]
+        config.sessionLinks.add(profileID: a.id, name: "删除目标引用", folder: "常用")
+        config.sessionLinks.add(profileID: c.id, name: "保留引用", folder: "常用")
+        let plan = try SessionDirectory.deleting(config, directory: "生产/待删")
+        XCTAssertTrue(plan.requiresConfirmation)
+        XCTAssertEqual(plan.sessionCount, 2); XCTAssertEqual(plan.subdirectoryCount, 2); XCTAssertEqual(plan.linkCount, 1)
+        XCTAssertEqual(plan.configuration.profiles, [c])
+        XCTAssertEqual(plan.configuration.sessionLinks.entries.map(\.profileID), [c.id])
+        XCTAssertTrue(!SessionDirectory.all(plan.configuration).contains { SessionDirectory.contains($0, in: "生产/待删") })
+        XCTAssertTrue(SessionDirectory.all(plan.configuration).contains("生产"))
+        XCTAssertEqual(config.profiles, [a,b,c]) // Planning/cancel must not mutate the source.
+        let empty = try SessionDirectory.deleting(config, directory: "空目录")
+        XCTAssertTrue(!empty.requiresConfirmation); XCTAssertEqual(empty.configuration.profiles, config.profiles)
+        let restored = try JSONDecoder().decode(Configuration.self, from: JSONEncoder().encode(plan.configuration))
+        XCTAssertTrue(!SessionDirectory.all(restored).contains("生产/待删"))
+        let linksOnly = try SessionDirectory.deleting(config, directory: "Links/常用")
+        XCTAssertEqual(linksOnly.sessionCount, 0); XCTAssertEqual(linksOnly.linkCount, 2)
+        XCTAssertEqual(linksOnly.configuration.profiles, config.profiles)
+        XCTAssertTrue(linksOnly.configuration.sessionLinks.entries.isEmpty)
+        XCTAssertTrue(!SessionDirectory.all(linksOnly.configuration).contains("Links/常用"))
+        var mixed = config
+        var inside = a; inside.id = UUID(); inside.group = "Links/常用/原会话"; mixed.profiles.append(inside)
+        let mixedDelete = try SessionDirectory.deleting(mixed, directory: "Links/常用")
+        XCTAssertEqual(mixedDelete.sessionCount, 1); XCTAssertEqual(mixedDelete.configuration.profiles, config.profiles)
+        for path in ["", "Links", "不存在", "生产/待删/不存在"] { XCTAssertThrowsError(try SessionDirectory.deleting(config, directory: path)) }
+        var only = Configuration(profiles: []); only.directories = ["父/空子目录"]
+        let child = try SessionDirectory.deleting(only, directory: "父/空子目录")
+        XCTAssertTrue(SessionDirectory.all(child.configuration).contains("父"))
+        let parent = try SessionDirectory.deleting(only, directory: "父")
+        XCTAssertTrue(parent.requiresConfirmation); XCTAssertEqual(parent.subdirectoryCount, 1)
+    }
+
     func testSessionDirectoryMoves() throws {
         XCTAssertEqual(try SessionDirectory.childPath(named: " 数据库 ", in: "生产"), "生产/数据库")
         XCTAssertEqual(try SessionDirectory.childPath(named: ".隐藏", in: ""), ".隐藏")
@@ -1460,6 +1497,7 @@ extension CoreTests {
         try tests.testConnectionOptionsAndMigration()
         try tests.testProxyArgumentsAndCredentialIsolation()
         try tests.testKeepAliveEscapesAndDirectories()
+        try tests.testRecursiveSessionDirectoryDeletion()
         try tests.testSessionDirectoryMoves()
         try tests.testLinksDirectoryCatalog()
         tests.testZFINMissingOOWithKnownShellPrompt()
@@ -1473,7 +1511,7 @@ extension CoreTests {
         tests.testInvalidZmodemHeadersRemainOrdinaryOutput()
         try tests.testLoggerFlushesEveryAcceptedChunk()
         tests.testCancellationDropsInFlightBytesAcrossEveryBoundary()
-        if failures.isEmpty { print("PASS: 57 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
+        if failures.isEmpty { print("PASS: 58 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
         else { failures.forEach { print("FAIL: \($0)") }; exit(1) }
     }
 }

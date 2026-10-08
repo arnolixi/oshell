@@ -97,6 +97,44 @@ enum SessionLinksTest {
         checks["staleDragRejectedAfterMove"] = !bar.performDrop(intoFolder)
         checks["dragDoesNotOpenOrSelectSessions"] = controller.tabs.count == tabCountBeforeDrag && controller.selectedTab === selected
         checks["folderMovePersists"] = (try? controller.store.load().sessionLinks.entries) == controller.configuration.sessionLinks.entries
+        func menuDrag(_ sourceID: UUID, folder: String, onto target: SessionLinkBar.Target?, fraction: CGFloat = 0.1) -> SessionLinkDragFixture {
+            controller.window?.contentView?.layoutSubtreeIfNeeded(); bar.layoutSubtreeIfNeeded()
+            let menu = controller.sessionLinkMenu(folder: folder)
+            let button = menu.items.first { ($0.representedObject as? UUID) == sourceID }!.view as! SessionLinkBar.LinkButton
+            let info = SessionLinkDragFixture(); info.draggingDestinationWindow = controller.window
+            info.draggingSource = button; info.draggingPasteboard.setString(SessionLinkItem.link(sourceID).key, forType: SessionLinkBar.pasteboardType)
+            if let target, let destination = bar.buttons.first(where: { $0.destination == target }) {
+                info.draggingLocation = destination.convert(NSPoint(x: destination.bounds.width * fraction, y: destination.bounds.midY), to: nil)
+            } else if let last = bar.buttons.last {
+                info.draggingLocation = last.convert(NSPoint(x: last.bounds.maxX + 12, y: last.bounds.midY), to: nil)
+            }
+            return info
+        }
+        let nestedID = controller.configuration.sessionLinks.entries.first { $0.folder == "运维/内网" }!.id
+        let nestedMenu = controller.sessionLinkMenu(folder: "运维/内网")
+        checks["nestedMenuLinkIsDraggable"] = nestedMenu.items.first?.view is SessionLinkBar.LinkButton
+        let outOfFolder = menuDrag(id, folder: "空文件夹", onto: .folder("运维"))
+        checks["menuLinkCanMoveOutBeforeRootFolder"] = bar.updateDrop(outOfFolder) == .move && bar.performDrop(outOfFolder)
+        checks["menuMovePreservesIdentityAndPosition"] = bar.buttons.first?.destination == .link(id) && controller.configuration.sessionLinks.entries.first { $0.id == id }?.folder == ""
+        checks["menuMoveKeepsOriginalProfileAndSessions"] = controller.configuration.profiles == beforeDrag.profiles && controller.tabs.count == tabCountBeforeDrag && controller.selectedTab === selected
+        checks["completedMenuDragCannotBeReplayed"] = !bar.performDrop(outOfFolder)
+        checks["menuMoveOrderPersists"] = (try? controller.store.load().sessionLinks.orderedRootItems) == controller.configuration.sessionLinks.orderedRootItems
+        let crossFolder = menuDrag(nestedID, folder: "运维/内网", onto: .folder("空文件夹"), fraction: 0.5)
+        checks["nestedMenuLinkCanMoveToAnotherFolder"] = bar.performDrop(crossFolder) && controller.configuration.sessionLinks.entries.first { $0.id == nestedID }?.folder == "空文件夹"
+        let duplicateRoot = menuDrag(nestedID, folder: "空文件夹", onto: nil)
+        let beforeRejectedRoot = controller.configurationRevision
+        checks["existingRootReferenceRejectsMoveAtomically"] = bar.updateDrop(duplicateRoot).isEmpty && !bar.performDrop(duplicateRoot) && controller.configurationRevision == beforeRejectedRoot
+        var noDuplicate = controller.configuration
+        noDuplicate.sessionLinks.entries.removeAll { $0.profileID == second.id && $0.folder.isEmpty }
+        _ = controller.saveConfiguration(noDuplicate)
+        let toEnd = menuDrag(nestedID, folder: "空文件夹", onto: nil)
+        checks["menuLinkCanMoveToEmptyTrailingSpace"] = bar.updateDrop(toEnd) == .move && bar.performDrop(toEnd) && bar.buttons.last?.destination == .link(nestedID)
+        checks["emptySourceFoldersRemain"] = controller.configuration.sessionLinks.allFolders.contains("空文件夹") && controller.configuration.sessionLinks.allFolders.contains("运维/内网")
+        let movedMenu = controller.sessionLinkMenu(folder: "")
+        let clickable = movedMenu.items.first { ($0.representedObject as? UUID) == nestedID }?.view as? SessionLinkBar.LinkButton
+        clickable?.performClick(nil)
+        checks["menuRowClickStillConnects"] = controller.tabs.count == tabCountBeforeDrag + 1 && controller.selectedTab?.activePane.profile.id == second.id
+        controller.closeTab(); controller.select(selected)
         var duplicateTarget = beforeDrag
         duplicateTarget.sessionLinks.add(profileID: first.id, name: "已有引用", folder: "空文件夹")
         _ = controller.saveConfiguration(duplicateTarget)

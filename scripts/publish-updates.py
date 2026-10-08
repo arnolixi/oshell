@@ -23,6 +23,7 @@ def main():
     parser.add_argument('--private-key',type=pathlib.Path,default=KEYS.PRIVATE)
     parser.add_argument('--flavor',action='append',choices=['arm64','legacy'])
     parser.add_argument('--output',type=pathlib.Path)
+    parser.add_argument('--apps-root',type=pathlib.Path,default=ROOT/'work/release',help='Directory containing verified <flavor>/OShell.app payloads; may be extracted from existing release DMGs')
     parser.add_argument('--notes',type=pathlib.Path)
     args=parser.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9_.-]+',args.tag) or args.tag in ['.','..']: parser.error('Use a plain tag such as v0.2.42')
@@ -33,7 +34,7 @@ def main():
     flavors=args.flavor or ['arm64','legacy'];artifacts=[]
     for flavor in flavors:
         suffix,minimum=('macOS13-arm64','13.0') if flavor=='arm64' else ('macOS10.13-Intel','10.13')
-        app=ROOT/'work/release'/flavor/'OShell.app';actual=plistlib.loads((app/'Contents/Info.plist').read_bytes())
+        app=args.apps_root/flavor/'OShell.app';actual=plistlib.loads((app/'Contents/Info.plist').read_bytes())
         for key in ['CFBundleShortVersionString','CFBundleVersion','SUPublicEDKey']: assert actual.get(key)==info[key],f'{flavor}: rebuild app; stale {key}'
         assert actual.get('LSMinimumSystemVersion')==minimum
         assert actual.get('OShellUpdateRepository','') in ['',args.repository]
