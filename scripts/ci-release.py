@@ -24,20 +24,44 @@ def sha256(path):
 
 def validate_tag(tag, version):
     if not re.fullmatch(r'v\d+\.\d+\.\d+', tag) or tag != 'v' + version:
-        raise ValueError('Use a stable vX.Y.Z tag matching scripts/Info.plist CFBundleShortVersionString')
+        raise ValueError(f'Release tag {tag!r} must match scripts/Info.plist: v{version}. For a manual run, leave tag empty to use this version.')
 
-def metadata(tag, commit=None):
+def metadata(tag, commit=None, allow_missing_tag=False):
     info = plistlib.loads((ROOT/'scripts/Info.plist').read_bytes())
     version, build = info['CFBundleShortVersionString'], str(info['CFBundleVersion'])
+    if allow_missing_tag and not tag: tag = 'v' + version
     validate_tag(tag, version)
     if not build.isdigit() or int(build) < 1:
         raise ValueError('CFBundleVersion must be a positive, increasing integer')
     def git(*args):
         return subprocess.check_output(['git', '-C', str(ROOT), *args], text=True).strip()
     head = git('rev-parse', 'HEAD')
-    if git('rev-parse', '--verify', 'refs/tags/' + tag + '^{commit}') != head or (commit and commit != head):
-        raise ValueError('Release tag, checked-out source and requested commit must match')
+    ref = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--verify', '--quiet', 'refs/tags/' + tag + '^{commit}'], capture_output=True, text=True)
+    if ref.returncode and not allow_missing_tag:
+        raise ValueError(f'Release tag {tag} does not exist. Run the workflow manually from the source branch to create it.')
+    if (not ref.returncode and ref.stdout.strip() != head) or (commit and commit != head):
+        raise ValueError('Release tag, selected branch/tag and requested commit must match; existing tags are never moved. Select the original tag to retry, or increment the version for a new release.')
     return dict(tag=tag, version=version, build=build, commit=head)
+
+def prepare(tag, repository):
+    """Manual runs pin the selected source commit, including first-time releases."""
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
+        raise ValueError('Repository must be owner/repo')
+    meta = metadata(tag, allow_missing_tag=True)
+    endpoint = f"repos/{repository}/git/ref/tags/{meta['tag']}"
+    existing = gh('api', endpoint, check=False)
+    if existing.returncode:
+        if 'HTTP 404' not in existing.stderr: raise RuntimeError(existing.stderr)
+        # POST only: never patch/force-update an existing ref, including races.
+        created = gh('api', f'repos/{repository}/git/refs', '--method', 'POST',
+                     '-f', 'ref=refs/tags/' + meta['tag'], '-f', 'sha=' + meta['commit'], check=False)
+        if created.returncode and 'HTTP 422' not in created.stderr: raise RuntimeError(created.stderr)
+    verify_remote_tag(repository, meta['tag'], meta['commit'])
+    # Downstream metadata validation also requires a local immutable tag.
+    ref = subprocess.run(['git', '-C', str(ROOT), 'show-ref', '--verify', '--quiet', 'refs/tags/' + meta['tag']])
+    if ref.returncode:
+        subprocess.run(['git', '-C', str(ROOT), 'tag', meta['tag'], meta['commit']], check=True)
+    return metadata(meta['tag'], meta['commit'])
 
 def artifact_name(version, flavor):
     return f'OShell-{version}-{TARGETS[flavor].suffix}.dmg'
@@ -169,7 +193,7 @@ def publish(meta, repository, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['metadata', 'stage', 'collect', 'publish'])
+    parser.add_argument('command', choices=['prepare', 'metadata', 'stage', 'collect', 'publish'])
     parser.add_argument('--tag', required=True)
     parser.add_argument('--commit')
     parser.add_argument('--github-output', type=Path)
@@ -179,8 +203,8 @@ def main():
     parser.add_argument('--source', type=Path)
     parser.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY', ''))
     args = parser.parse_args()
-    meta = metadata(args.tag, args.commit)
-    if args.command == 'metadata':
+    meta = prepare(args.tag, args.repository) if args.command == 'prepare' else metadata(args.tag, args.commit)
+    if args.command in ['prepare', 'metadata']:
         if args.github_output:
             with args.github_output.open('a') as stream:
                 stream.write(''.join(f'{key}={value}\n' for key, value in meta.items()))

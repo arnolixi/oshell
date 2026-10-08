@@ -4,6 +4,7 @@
 """Offline checks: no GitHub mutations and no macOS toolchain required."""
 import importlib.util
 import json
+import plistlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -53,6 +54,84 @@ class ReleaseTests(unittest.TestCase):
         CI.validate_tag('v1.2.3', '1.2.3')
         for tag in ['main', 'v1.2.4', 'v1.2.3-beta', 'v1.2.3\n', '../v1.2.3', 'v$(command)']:
             with self.assertRaises(ValueError): CI.validate_tag(tag, '1.2.3')
+
+    def source_repository(self):
+        repo = self.root/'repo'; repo.mkdir(); (repo/'scripts').mkdir()
+        (repo/'scripts/Info.plist').write_bytes(plistlib.dumps(dict(CFBundleShortVersionString='1.2.3', CFBundleVersion='45')))
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(repo), *args], stderr=subprocess.DEVNULL, text=True).strip()
+        git('init'); git('config', 'user.name', 'Release Test'); git('config', 'user.email', 'release@example.test')
+        git('add', '.'); git('commit', '-m', 'Release fixture')
+        return repo, git
+
+    def test_manual_first_release_infers_version_and_creates_tag(self):
+        repo, git = self.source_repository(); head = git('rev-parse', 'HEAD'); calls = []
+        def network(*args, check=True):
+            calls.append(args)
+            if len(calls) == 1: return subprocess.CompletedProcess(args, 1, '', 'HTTP 404')
+            return subprocess.CompletedProcess(args, 0, json.dumps({'object': {'type': 'commit', 'sha': head}}), '')
+        with patch.object(CI, 'ROOT', repo), patch.object(CI, 'gh', network):
+            result = CI.prepare('', 'owner/repo')
+        self.assertEqual(result['tag'], 'v1.2.3')
+        self.assertEqual(git('rev-parse', 'refs/tags/v1.2.3'), head)
+        self.assertIn('ref=refs/tags/v1.2.3', calls[1])
+        self.assertIn('sha=' + head, calls[1])
+
+    def test_manual_wrong_version_fails_before_network(self):
+        repo, git = self.source_repository()
+        with patch.object(CI, 'ROOT', repo), patch.object(CI, 'gh') as network:
+            with self.assertRaisesRegex(ValueError, 'v1.2.3'):
+                CI.prepare('v1.2.2', 'owner/repo')
+            network.assert_not_called()
+        self.assertEqual(git('tag'), '')
+
+    def test_missing_tag_in_push_mode_has_actionable_error(self):
+        repo, _ = self.source_repository()
+        with patch.object(CI, 'ROOT', repo), self.assertRaisesRegex(ValueError, 'manually'):
+            CI.metadata('v1.2.3')
+
+    def test_manual_existing_tag_cannot_move(self):
+        repo, git = self.source_repository(); git('tag', 'v1.2.3')
+        git('commit', '--allow-empty', '-m', 'Later source')
+        with patch.object(CI, 'ROOT', repo), patch.object(CI, 'gh') as network:
+            with self.assertRaisesRegex(ValueError, 'never moved'):
+                CI.prepare('', 'owner/repo')
+            network.assert_not_called()
+
+    def test_manual_existing_annotated_tag_is_reused(self):
+        repo, git = self.source_repository(); head = git('rev-parse', 'HEAD')
+        git('tag', '-a', 'v1.2.3', '-m', 'Release'); calls = []
+        def network(*args, check=True):
+            calls.append(args)
+            ref = dict(type='commit', sha=head) if '/git/tags/' in args[1] else dict(type='tag', sha=git('rev-parse', 'v1.2.3'))
+            return subprocess.CompletedProcess(args, 0, json.dumps(dict(object=ref)), '')
+        with patch.object(CI, 'ROOT', repo), patch.object(CI, 'gh', network):
+            self.assertEqual(CI.prepare('v1.2.3', 'owner/repo')['commit'], head)
+        self.assertTrue(all('--method' not in call for call in calls))
+
+    def test_manual_remote_tag_moved_or_api_denied_never_retargeted(self):
+        repo, git = self.source_repository()
+        for status, payload, error in [(0, json.dumps({'object': {'type': 'commit', 'sha': 'b' * 40}}), ''), (1, '', 'HTTP 403')]:
+            with self.subTest(status=status), patch.object(CI, 'ROOT', repo):
+                with patch.object(CI, 'gh', return_value=subprocess.CompletedProcess([], status, payload, error)) as network:
+                    with self.assertRaises((ValueError, RuntimeError)): CI.prepare('', 'owner/repo')
+                    self.assertTrue(all('--method' not in call.args for call in network.call_args_list))
+            self.assertEqual(git('tag'), '')
+
+    def test_manual_tag_creation_race_rechecks_remote_commit(self):
+        for matching in [True, False]:
+            with self.subTest(matching=matching):
+                repo, git = self.source_repository(); head = git('rev-parse', 'HEAD')
+                results = [subprocess.CompletedProcess([], 1, '', 'HTTP 404'),
+                           subprocess.CompletedProcess([], 1, '', 'HTTP 422'),
+                           subprocess.CompletedProcess([], 0, json.dumps({'object': {'type': 'commit', 'sha': head if matching else 'b' * 40}}), '')]
+                with patch.object(CI, 'ROOT', repo), patch.object(CI, 'gh', side_effect=results):
+                    if matching: self.assertEqual(CI.prepare('', 'owner/repo')['commit'], head)
+                    else:
+                        with self.assertRaises(ValueError): CI.prepare('', 'owner/repo')
+                        self.assertEqual(git('tag'), '')
+                import shutil
+                shutil.rmtree(repo)
 
     def test_collect_complete_set_and_checksums(self):
         result = self.collect()

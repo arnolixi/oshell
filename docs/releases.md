@@ -2,7 +2,7 @@
 
 ## GitHub Actions 自动发布
 
-流水线位于 [release.yml](../.github/workflows/release.yml)。将配置和源码提交到 GitHub 后，推送 `vX.Y.Z` 标签会自动构建并发布；也可在 Actions 手动运行，输入已存在的同名标签。
+流水线位于 [release.yml](../.github/workflows/release.yml)。将配置和源码提交到 GitHub 后，推送 `vX.Y.Z` 标签会自动构建并发布；也可在 Actions 手动运行，按所选分支的版本自动创建标签。
 
 | 构建目标 | 最低系统 | 架构 | DMG 文件后缀 |
 | --- | --- | --- | --- |
@@ -16,11 +16,13 @@
 发布步骤：
 
 1. 更新 `scripts/Info.plist` 的 `CFBundleShortVersionString`，递增 `CFBundleVersion`，提交所有源码和流水线文件。
-2. 将提交推送到 GitHub，并创建匹配的稳定版本标签。例如当前源码版本为 `0.2.59`，标签应为 `v0.2.59`。标签和 Info.plist 不匹配、使用预发布标签或中途移动标签都会被拒绝。
-3. 推送标签后，Actions 会运行四个独立构建任务。四个任务全部完成核心测试、DMG 挂载检查、全部 Mach-O 的架构/最低系统检查和签名完整性检查后，才进入发布阶段。
+2. 将提交推送到 GitHub。手动发布时进入 **Actions → Build and publish macOS DMGs → Run workflow**，选择要发布的分支（通常为 `main`），**tag 留空**。流程读取该提交的 Info.plist，例如版本 `0.2.59` 会创建 `v0.2.59`；也可明确填写匹配版本。已有同名标签必须指向所选提交，流程不会移动或覆盖它。若需重试旧版本，请选择原标签作为运行来源。标签与源码版本不匹配时，会在创建标签和编译前报错。也可以自行创建并推送匹配的 `vX.Y.Z` 标签来触发发布。
+3. 标签确定后，Actions 会运行四个独立构建任务。四个任务全部完成核心测试、DMG 挂载检查、全部 Mach-O 的架构/最低系统检查和签名完整性检查后，才进入发布阶段。
 4. Release 先以草稿创建，上传四个 DMG、对应源码包、`SHA256SUMS.txt` 和 `release-manifest.json`。确认远端附件完整后才公开发布并设为 Latest。
 
-只使用 GitHub 自动提供的 `GITHUB_TOKEN`，无需额外 PAT。仓库需允许 Actions 运行；构建阶段仅有 `contents: read`，发布 job 单独申请 `contents: write`。如果组织策略禁止写权限，需要仓库管理员允许该工作流发布 Release。工作流不读取本机 `.release-private`，也不设置默认更新仓库。
+只使用 GitHub 自动提供的 `GITHUB_TOKEN`，无需额外 PAT。仓库需允许 Actions 运行；构建阶段仅有 `contents: read`，准备标签和发布 job 申请 `contents: write`。如果组织策略禁止写权限，需要仓库管理员允许该工作流发布 Release。工作流不读取本机 `.release-private`，也不设置默认更新仓库。
+
+准备阶段创建的标签在后续构建失败时会保留，以便重试相同源码；若要改动源码，应使用新版本，不能将原标签移动到新提交。旧失败记录的 **Re-run jobs** 仍使用当时的工作流；升级流程后应从 `main` 新建一次 **Run workflow**。
 
 失败不会发布残缺 Release；日志保留为各构建任务的 `diagnostics-*` Artifact。同一 tag 的运行会串行排队。上传中断后可以重跑：只续传带有同一提交标记的自有草稿；已公开的 Release 和其他草稿不会被覆盖。发布成功后应递增版本并使用新标签，而不是覆盖旧附件。
 
