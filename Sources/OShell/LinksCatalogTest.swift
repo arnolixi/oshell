@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (c) 2026 OShell contributors
+
+import AppKit
+import OShellCore
+
+private final class LinksCatalogDragFixture: NSObject, NSDraggingInfo {
+    var draggingDestinationWindow: NSWindow?
+    var draggingSourceOperationMask: NSDragOperation { [.move, .link] }
+    var draggingLocation: NSPoint = .zero
+    var draggedImageLocation: NSPoint { draggingLocation }
+    var draggedImage: NSImage? { nil }
+    let draggingPasteboard = NSPasteboard(name: .init("OShell.LinksCatalogTest." + UUID().uuidString))
+    var draggingSource: Any?
+    var draggingSequenceNumber: Int { 1 }
+    var draggingFormation: NSDraggingFormation = .none
+    var animatesToDestination = false
+    var numberOfValidItemsForDrop = 1
+    var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+    func resetSpringLoading() {}
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+    override func namesOfPromisedFilesDropped(atDestination dropDestination: URL) -> [String]? { nil }
+    func enumerateDraggingItems(options enumOpts: NSDraggingItemEnumerationOptions, for view: NSView?, classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any], using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
+    deinit { draggingPasteboard.releaseGlobally() }
+}
+
+enum LinksCatalogTest {
+    static func run(_ workspace: WorkspaceController) {
+        var checks = [String: Bool]()
+        func descendants(_ view: NSView) -> [NSView] {
+            let children = (view as? NSTabView)?.tabViewItems.compactMap(\.view) ?? view.subviews
+            return [view] + children.flatMap(descendants)
+        }
+        func nextModal(_ body: @escaping (NSView) -> Void) {
+            let timer = Timer(timeInterval: 0.05, repeats: false) { _ in if let root = NSApp.modalWindow?.contentView { body(root) } }
+            RunLoop.main.add(timer, forMode: .common); RunLoop.main.add(timer, forMode: .init("NSModalPanelRunLoopMode"))
+        }
+        func press(_ root: NSView, _ title: String) { descendants(root).compactMap { $0 as? NSButton }.first { $0.title == title }?.performClick(nil) }
+        func invoke(_ item: NSMenuItem?) { if let item, let action = item.action { _ = NSApp.sendAction(action, to: item.target, from: item) } }
+        func input(_ root: NSView, _ id: String) -> NSTextField? { descendants(root).compactMap { $0 as? NSTextField }.first { $0.identifier?.rawValue == id } }
+        let a = SessionProfile(name: "生产主机", group: "生产/主机", host: "node.example.test", username: "ops")
+        let b = SessionProfile(name: "FTP站点", group: "生产/文件", kind: .ftp, host: "ftp.example.test", port: 21)
+        var local = SessionProfile.local; local.name = "本地工具"; local.group = ""
+        var config = workspace.configuration; config.profiles = [a, b, local]; config.directories = ["生产/空目录"]
+        config.sessionLinks.add(profileID: a.id, name: "开发快捷")
+        config.sessionLinks.add(profileID: b.id, name: "FTP快捷", folder: "运维/内网")
+        config.sessionLinks.folders = ["空目录"]
+        checks["fixtureSaved"] = workspace.saveConfiguration(config)
+        let aLink = workspace.configuration.sessionLinks.entries.first { $0.profileID == a.id }!.id
+        let bLink = workspace.configuration.sessionLinks.entries.first { $0.profileID == b.id }!.id
+        workspace.showSessionDirectory(SessionLinks.rootDirectory)
+        let manager = NSApp.windows.compactMap { $0.windowController as? SessionManager }.first!
+        let table = descendants(manager.window!.contentView!).compactMap { $0 as? NSTableView }.first!
+        func row(_ name: String) -> Int { (0..<table.numberOfRows).first { (manager.tableView(table, viewFor: table.tableColumns[0], row: $0) as? NSTableCellView)?.textField?.stringValue == name } ?? -1 }
+        func action(_ name: String, row index: Int) -> NSMenuItem? { manager.contextMenu(for: index).items.first { $0.title == name } }
+        func drag(_ indexes: [Int]) -> LinksCatalogDragFixture {
+            let info = LinksCatalogDragFixture(); info.draggingSource = table; info.draggingDestinationWindow = manager.window
+            info.draggingPasteboard.writeObjects(indexes.compactMap { manager.tableView(table, pasteboardWriterForRow: $0) }); return info
+        }
+        checks["linksRootListsAliasesAndFolders"] = row("开发快捷") >= 0 && row("运维") >= 0 && row("空目录") >= 0 && row("../") == 0
+        checks["oldProfilesRemainInOriginalDirectories"] = workspace.configuration.profiles == [a, b, local]
+        checks["toolbarShowsSameRoot"] = Set(workspace.sessionLinkBar.buttons.map(\.title)) == Set(["开发快捷", "运维", "空目录"])
+        manager.revealLink(aLink)
+        checks["aliasResolvesOriginalProfile"] = manager.selectedProfile == a && manager.selectedLink?.id == aLink
+        nextModal { root in
+            input(root, "session.link.name")?.stringValue = "开发快捷改名"
+            let picker = descendants(root).compactMap { $0 as? SessionDirectoryPicker }.first!
+            checks["linkPickerCannotLeaveLinks"] = !picker.selectDirectory("生产")
+            checks["linkPickerCanChooseChild"] = picker.selectDirectory("Links/空目录")
+            press(root, "保存")
+        }
+        invoke(action("链接属性…", row: table.selectedRow))
+        checks["managerEditUpdatesToolbar"] = workspace.sessionLinkMenu(folder: "空目录").items.contains { $0.title == "开发快捷改名" }
+        checks["linkEditDoesNotMutateSource"] = workspace.configuration.profiles.first { $0.id == a.id } == a
+        manager.revealLink(aLink)
+        nextModal { root in input(root, "session.name")?.stringValue = "生产主机改名"; press(root, "保存") }
+        invoke(action("源会话属性…", row: table.selectedRow))
+        checks["sourceEditKeepsLinkSelected"] = manager.selectedLink?.id == aLink && manager.currentDirectory == "Links/空目录"
+        checks["sourceEditKeepsAliasNameAndLocation"] = workspace.configuration.sessionLinks.entries.first { $0.id == aLink }?.name == "开发快捷改名" && workspace.configuration.profiles.first { $0.id == a.id }?.group == a.group
+        let aliasDrag = drag([table.selectedRow])
+        checks["aliasCanMoveToParent"] = manager.tableView(table, acceptDrop: aliasDrag, row: 0, dropOperation: .on)
+        checks["aliasMoveUpdatesToolbar"] = workspace.sessionLinkBar.buttons.contains { $0.destination == .link(aLink) && $0.title == "开发快捷改名" }
+        manager.revealLink(aLink)
+        let outside = drag([table.selectedRow])
+        checks["aliasCannotLeaveLinks"] = manager.tableView(table, validateDrop: outside, proposedRow: 0, proposedDropOperation: .on).isEmpty
+        let revision = workspace.configurationRevision
+        nextModal { _ in if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) } }
+        invoke(action("链接属性…", row: table.selectedRow))
+        checks["cancelLinkEditDoesNotSave"] = workspace.configurationRevision == revision
+        nextModal { root in
+            descendants(root).compactMap { $0 as? NSTextField }.first { $0.isEditable }?.stringValue = "运维新"
+            press(root, "确定")
+        }
+        invoke(action("重命名…", row: row("运维")))
+        checks["managerFolderRenameUpdatesNestedLinks"] = workspace.configuration.sessionLinks.entries.first { $0.id == bLink }?.folder == "运维新/内网" && workspace.sessionLinkBar.buttons.contains { $0.title == "运维新" }
+        checks["folderRenameKeepsSourceProfiles"] = workspace.configuration.profiles.first { $0.id == b.id } == b
+        nextModal { root in input(root, "session.directory.name")?.stringValue = "共享"; press(root, "确定") }
+        invoke(action("新建目录…", row: -1))
+        checks["managerNewFolderAppearsOnBar"] = workspace.sessionLinkBar.buttons.contains { $0.title == "共享" }
+        nextModal { root in descendants(root).compactMap { $0 as? NSTextField }.first { $0.isEditable }?.stringValue = "子目录"; press(root, "确定") }
+        invoke(workspace.sessionLinkContextMenu(.folder("共享")).items.first { $0.title == "新增文件夹" })
+        manager.revealDirectory("Links/共享")
+        checks["toolbarNewFolderAppearsInManager"] = row("子目录") >= 0
+        nextModal { root in press(root, "删除") }
+        invoke(workspace.sessionLinkContextMenu(.folder("共享/子目录")).items.first { $0.title == "删除快捷链接文件夹…" })
+        manager.reload()
+        checks["toolbarFolderDeleteDoesNotReappear"] = row("子目录") < 0 && !SessionDirectory.all(workspace.configuration).contains("Links/共享/子目录")
+        manager.revealDirectory("")
+        checks["linksRootIsReserved"] = action("重命名…", row: row("Links"))?.isEnabled == false && manager.tableView(table, pasteboardWriterForRow: row("Links")) == nil
+        let sourceDrag = drag([row(local.name)])
+        checks["dragIntoLinksShowsReferenceOperation"] = manager.tableView(table, validateDrop: sourceDrag, proposedRow: row("Links"), proposedDropOperation: .on) == .link
+        checks["dragIntoLinksAddsReference"] = manager.tableView(table, acceptDrop: sourceDrag, row: row("Links"), dropOperation: .on)
+        checks["dragIntoLinksPreservesSource"] = workspace.configuration.profiles.first { $0.id == local.id } == local
+        let localLink = workspace.configuration.sessionLinks.entries.first { $0.profileID == local.id }!.id
+        checks["duplicateDragDoesNotDuplicateReference"] = manager.tableView(table, validateDrop: sourceDrag, proposedRow: row("Links"), proposedDropOperation: .on).isEmpty
+        let count = workspace.tabs.count
+        workspace.sessionLinkBar.buttons.first { $0.destination == .link(localLink) }?.performClick(nil)
+        checks["barOpensReferencedConfiguration"] = workspace.tabs.count == count + 1 && workspace.selectedTab?.activePane.profile.id == local.id
+        let copyFolder = drag([row("生产")])
+        checks["directoryDragCreatesReferenceTree"] = manager.tableView(table, acceptDrop: copyFolder, row: row("Links"), dropOperation: .on)
+        checks["directoryDragKeepsSourceTreeAndEmptyFolders"] = SessionDirectory.all(workspace.configuration).contains("生产/空目录") && SessionDirectory.all(workspace.configuration).contains("Links/生产/空目录")
+        manager.revealLink(aLink)
+        invoke(action("删除快捷引用", row: table.selectedRow))
+        checks["deletingAliasKeepsSourceAndOtherAliases"] = workspace.configuration.profiles.contains { $0.id == a.id } && !workspace.configuration.sessionLinks.entries.contains { $0.id == aLink } && workspace.configuration.sessionLinks.entries.contains { $0.profileID == a.id }
+        manager.showFiles { profile in checks["fileAliasResolvesOriginalFTP"] = profile.id == b.id && profile.kind == .ftp }
+        manager.revealLink(bLink)
+        invoke(action("连接", row: table.selectedRow))
+        manager.show(); manager.revealDirectory("Links")
+        nextModal { root in press(root, "删除") }
+        invoke(action("删除…", row: row("生产")))
+        checks["managerDeletesReferenceSubtreeOnly"] = !SessionDirectory.all(workspace.configuration).contains("Links/生产") && workspace.configuration.profiles.count == 3 && SessionDirectory.all(workspace.configuration).contains("生产/空目录")
+        checks["persistedReferenceCatalog"] = (try? workspace.store.load().sessionLinks.entries) == workspace.configuration.sessionLinks.entries
+        checks["persistedFolderCatalog"] = (try? workspace.store.load().sessionLinks.allFolders) == workspace.configuration.sessionLinks.allFolders
+        if let path = ProcessInfo.processInfo.environment["OSHELL_LINKS_CATALOG_PREVIEW"], let view = manager.window?.contentView {
+            view.layoutSubtreeIfNeeded()
+            if let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) { view.cacheDisplay(in: view.bounds, to: bitmap); try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path)) }
+        }
+        let report: [String: Any] = ["passed": checks.values.allSatisfy { $0 }, "checks": checks]
+        if let path = ProcessInfo.processInfo.environment["OSHELL_LINKS_CATALOG_OUTPUT"] { try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: path)) }
+        print("Links catalog checks: \(checks.count), failed: \(checks.filter { !$0.value }.keys.sorted())")
+        manager.close(); workspace.shutdown(); NSApp.terminate(nil)
+    }
+}

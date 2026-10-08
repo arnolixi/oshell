@@ -14,9 +14,9 @@ final class CredentialCancellation {
 
 enum CredentialTask {
     /// Keep the UI responsive during PBKDF2 and never commit after Cancel/Esc.
-    static func run<T>(title: String, work: @escaping (CredentialCancellation) throws -> T) -> Result<T, Error>? {
+    static func run<T>(title: String, message: String = "正在处理加密凭据。完成后一次性保存；取消不会修改配置。", work: @escaping (CredentialCancellation) throws -> T) -> Result<T, Error>? {
         let alert = PopupAlert(); alert.messageText = title
-        alert.informativeText = "正在处理加密凭据。完成后一次性保存；取消不会修改配置。"
+        alert.informativeText = message
         alert.addButton(withTitle: "取消")
         let spinner = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 320, height: 20))
         spinner.style = .bar; spinner.isIndeterminate = true; spinner.startAnimation(nil); alert.accessoryView = spinner

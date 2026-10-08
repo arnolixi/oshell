@@ -4,9 +4,10 @@
 import PackageDescription
 import Foundation
 let legacy = ProcessInfo.processInfo.environment["OSHELL_LEGACY"] == "1"
+let minimum = legacy ? "10.13" : (ProcessInfo.processInfo.environment["OSHELL_MACOS_MINIMUM"] ?? "13.0")
 let compatibility: [SwiftSetting] = legacy ? [.define("OSHELL_LEGACY")] : []
 let package = Package(
-    name: "OShell", platforms: [.macOS(legacy ? .v10_13 : .v13)],
+    name: "OShell", platforms: [.macOS(minimum)],
     products: [.executable(name: "OShell", targets: ["OShell"]), .executable(name: "OShell-ZOC", targets: ["OShellZOC"]), .executable(name: "OShell-FileZilla", targets: ["OShellFileZilla"])],
     dependencies: [.package(path: "Vendor/SwiftTerm")] + (legacy ? [.package(path: "Vendor/CryptoSwift")] : []),
     targets: [

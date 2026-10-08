@@ -14,6 +14,23 @@ final class OShellTerminal: LocalProcessTerminalView {
     override func insertText(_ string: Any, replacementRange: NSRange) { userInputDepth += 1; defer { userInputDepth -= 1 }; super.insertText(string, replacementRange: replacementRange) }
     override func paste(_ sender: Any) { if let text = NSPasteboard.general.string(forType: .string), let owner { owner.onPaste?(owner, text) } }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func scrollWheel(with event: NSEvent) {
+        if let arrangement = enclosingScrollView as? TabArrangementView {
+            let model = getTerminal()
+            let horizontalGesture = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
+            let reportsMouse = allowMouseReporting && model.mouseMode != .off
+                && (!event.modifierFlags.contains(.shift) || model.mouseShiftCapture)
+            let canScrollHistory = canScroll && (event.scrollingDeltaY > 0 ? scrollPosition > 0 : scrollPosition < 1)
+            // Option explicitly scrolls the arrangement even over terminal
+            // history or a mouse-reporting TUI. Otherwise preserve vertical
+            // terminal scrolling until its history reaches the relevant edge.
+            if event.modifierFlags.contains(.option) || horizontalGesture
+                || (!reportsMouse && !model.isCurrentBufferAlternate && !canScrollHistory) {
+                if arrangement.scrollArrangement(with: event) { return }
+            }
+        }
+        super.scrollWheel(with: event)
+    }
     override func mouseDown(with event: NSEvent) {
         guard owner?.isShutdown == false, let window else { return }
         if window.firstResponder !== self { _ = window.makeFirstResponder(self) }
@@ -182,7 +199,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     private var hostProbeEcho: HostProbeEcho?
     private(set) var hasShellIntegration = false
     private var integratedPromptPending = false
-    var allowsActiveHostProbe: Bool { profile.activeHostProbe && !hasShellIntegration }
+    var allowsActiveHostProbe: Bool { profile.titleMode == .activeProbe && !hasShellIntegration }
     private var userEditingLine = false
     private var initialRemoteHostname: String?
     private var canBindInitialHost = true
@@ -192,7 +209,37 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     private var idleTimer: DispatchSourceTimer?
     private var lastActivity = ProcessInfo.processInfo.systemUptime
     private(set) var sessionReady = false
-    var title: String { if isBlank && !isRunningLocalTool { return "空白标签页" }; return (remoteHostname ?? "主机待识别") + " · " + (remoteAddress ?? "IP 待识别") }
+    var title: String { if isBlank && !isRunningLocalTool { return "空白标签页" }; return remoteHostname ?? "主机待识别" }
+    var connectionDetails: String {
+        func display(_ value: String) -> String {
+            String(value.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }.joined().prefix(256))
+        }
+        var lines = ["当前主机", "主机名：" + title, "主机 IP：" + (remoteAddress ?? "未获取"), "识别方式：" + profile.titleMode.title]
+        if profile.kind == .ssh {
+            lines += ["", ended ? "原 SSH 连接（已结束）" : "初始 SSH 连接", "会话：" + display(profile.name),
+                      "配置地址：" + display(profile.host), "端口：\(profile.port)", "用户名：" + (profile.username.isEmpty ? "使用 SSH 默认配置" : display(profile.username))]
+            if let peer = sshConnectionGroup?.transportPeer {
+                lines += ["实际连接 IP：" + peer.address, "实际连接端口：\(peer.port)"]
+            } else { lines.append("实际连接 IP：未获取") }
+            lines.append("实际连接指本机 TCP 对端；代理、跳板机及内层跳转可能与当前主机不同。")
+            if profile.proxy.kind != .none {
+                lines.append("代理：" + profile.proxy.kind.title + " · " + display(profile.proxy.host) + ":\(profile.proxy.port)")
+            } else if !profile.jumpHost.isEmpty { lines.append("跳板机：" + display(profile.jumpHost)) }
+            lines.append("状态：" + (ended ? "已结束，当前为本机工具模式" : (sessionReady ? "已连接" : "连接中")))
+        } else { lines += ["", "本地终端", "会话：" + display(profile.name)] }
+        return lines.joined(separator: "\n")
+    }
+    private func observeTransportPeer() {
+        let pid = terminal.process.shellPid
+        guard pid > 0, let group = sshConnectionGroup else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self, weak group] in
+            let peer = SSHTransportPeer.observe(process: pid)
+            DispatchQueue.main.async { [weak self, weak group] in
+                guard let self, !self.isShutdown, !self.ended, self.terminal.process.shellPid == pid, let group else { return }
+                group.transportPeer = peer; self.refreshHeader(); self.onState?()
+            }
+        }
+    }
     private var interactiveTool: LocalToolProcess? {
         guard let localTool, ["ssh", "telnet"].contains(localTool.command.name), !localTool.exited else { return nil }
         return localTool
@@ -266,19 +313,22 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         headerBar.detachesHiddenViews = true
         headerBar.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(focusHeader)))
         headerBar.orientation = .horizontal; headerBar.spacing = 8
-        [headerBar, searchPanel, transferProgress, terminal].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
+        [headerBar, searchPanel, terminal, transferProgress].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         NSLayoutConstraint.activate([
             headerBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
             headerBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
             headerBar.topAnchor.constraint(equalTo: view.topAnchor), headerBar.heightAnchor.constraint(equalToConstant: 22),
             searchPanel.topAnchor.constraint(equalTo: headerBar.bottomAnchor),
             searchPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor), searchPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            transferProgress.topAnchor.constraint(equalTo: searchPanel.bottomAnchor),
-            transferProgress.leadingAnchor.constraint(equalTo: view.leadingAnchor), transferProgress.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            terminal.topAnchor.constraint(equalTo: transferProgress.bottomAnchor), terminal.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            transferProgress.topAnchor.constraint(equalTo: terminal.topAnchor, constant: 8),
+            transferProgress.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            transferProgress.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 12),
+            terminal.topAnchor.constraint(equalTo: searchPanel.bottomAnchor), terminal.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             terminal.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
             terminal.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4)
         ])
+        let progressWidth = transferProgress.widthAnchor.constraint(equalToConstant: 360)
+        progressWidth.priority = .defaultHigh; progressWidth.isActive = true
         apply(preferences)
         if profile.kind == .local { useLocalHostIdentity() }
         if blank { ended = true; beginEndedInput() }
@@ -288,6 +338,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         guard !isShutdown else { return }
         preferences = prefs
         terminal.font = Self.font(prefs)
+        terminal.privateUseFallbackFont = TerminalSymbolFont.matching(terminal.font)
         terminal.changeScrollback(prefs.scrollback)
         searchPanel.bufferDidChange(resized: true)
         let scheme = prefs.colorScheme
@@ -340,7 +391,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
                 let broker = try AuthBroker(profile: profile, oneTimePassword: password); authBroker = broker
                 broker.onAuthenticated = { [weak self] in
                     self?.sshConnectionGroup?.authenticatedConnectionReady()
-                    self?.sessionReady = true; self?.onState?()
+                    self?.sessionReady = true; self?.observeTransportPeer(); self?.refreshHeader(); self?.onState?()
                     self?.schedulePromptScan()
                 }
                 environment.merge(broker.environment) { _, new in new }
@@ -593,8 +644,8 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         onFocus = nil; onUserInput = nil; onPaste = nil; onFilesDropped = nil; onError = nil; transferSelection = nil
     }
     private func refreshHeader() {
-        let endpoint = profile.kind == .local ? "本机" : "\(profile.username.isEmpty ? "" : profile.username + "@")\(profile.host):\(profile.port)"
-        header.stringValue = "\(title)   ·   \(isRunningLocalTool ? "本机工具：" + (localToolName ?? "") + "，Ctrl+C 中断" : endpoint)\(ended && !isRunningLocalTool ? (isBlank ? "   ·   尚未连接 · 本机工具模式" : "   ·   连接已结束 · 本机工具模式") : "")\(isLogging ? "   ● 记录中" : "")"
+        header.stringValue = title + (isRunningLocalTool ? " · 本机工具：" + (localToolName ?? "") : (ended ? " · 本机工具模式" : "")) + (isLogging ? " · 记录中" : "")
+        header.toolTip = connectionDetails
     }
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) { searchPanel.bufferDidChange(resized: true) }
     func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
@@ -705,7 +756,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         hostProbeTimeout = timeout; DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: timeout)
     }
     private func receiveShellIdentity(_ bytes: ArraySlice<UInt8>) {
-        guard observesHostIdentity, !terminal.getTerminal().isCurrentBufferAlternate,
+        guard profile.titleMode != .passive, observesHostIdentity, !terminal.getTerminal().isCurrentBufferAlternate,
               let identity = RemoteHostIdentity.integrationReport(bytes) else { return }
         hasShellIntegration = true; integratedPromptPending = true
         currentHostHint = nil

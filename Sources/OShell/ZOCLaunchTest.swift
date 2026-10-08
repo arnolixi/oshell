@@ -24,8 +24,8 @@ enum ZOCLaunchTest {
                 let checks: [String: Bool] = [
                     "threeLaunchesOneWorkspace": success && controller.tabs.count == 3,
                     "oneTimePasswordsAuthenticated": panes.count == 3 && panes.allSatisfy { $0.sessionReady && $0.remoteAddress != nil && String(decoding: $0.terminal.getTerminal().getBufferAsData(), as: UTF8.self).contains("USM_MOCK_READY") },
-                    "callerTitlesIgnored": panes.allSatisfy { $0.title == "asset-real · 10.20.0.9" },
-                    "unifiedIdentityTitle": panes.allSatisfy { $0.title.contains(" · ") && $0.remoteAddress != nil },
+                    "callerTitlesIgnored": panes.allSatisfy { $0.title == "asset-real" && $0.remoteAddress == "10.20.0.9" },
+                    "unifiedIdentityTitle": panes.allSatisfy { !$0.title.contains(" · ") && $0.remoteAddress != nil },
                     "noPersistentCredentials": panes.allSatisfy { $0.profile.encryptedPassword == nil } && (try? Data(contentsOf: controller.store.url)) == before,
                     "passwordNotInTerminal": panes.allSatisfy { !String(decoding: $0.terminal.getTerminal().getBufferAsData(), as: UTF8.self).contains(fixture["password"]!) }
                 ]

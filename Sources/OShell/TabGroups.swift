@@ -8,6 +8,8 @@ final class TabGroupNode {
     let id = UUID()
     var tabs: [UUID]
     var active: UUID?
+    var name: String?
+    var isHidden = false
     var first: TabGroupNode?, second: TabGroupNode?
     var vertical = true
     var fraction: CGFloat = 0.5
@@ -29,7 +31,16 @@ final class TabGroupNode {
         }
         tabs.removeAll { $0 == tab }
         if active == tab { active = tabs.first }
-        return tabs.isEmpty ? nil : self
+        return tabs.isEmpty && name == nil ? nil : self
+    }
+    func removingGroup(_ group: UUID) -> TabGroupNode? {
+        if id == group { return nil }
+        if let first, let second {
+            let a = first.removingGroup(group), b = second.removingGroup(group)
+            guard let a else { return b }; guard let b else { return a }
+            self.first = a; self.second = b
+        }
+        return self
     }
     func replacing(_ group: UUID, with node: TabGroupNode) -> TabGroupNode {
         if id == group { return node }
@@ -67,7 +78,15 @@ enum TabDropPosition: CaseIterable {
 
 final class TabDropHost: NSView {
     static let pasteboardType = NSPasteboard.PasteboardType("app.oshell.terminal-tab")
-    struct Target { let tab: UUID; let position: TabDropPosition; let rect: NSRect }
+    struct Target {
+        let tab: UUID?
+        let group: UUID?
+        let position: TabDropPosition
+        let rect: NSRect
+        init(tab: UUID? = nil, group: UUID? = nil, position: TabDropPosition, rect: NSRect) {
+            self.tab = tab; self.group = group; self.position = position; self.rect = rect
+        }
+    }
     var target: ((UUID, NSPoint) -> Target?)?
     var drop: ((UUID, Target) -> Bool)?
     private final class Preview: NSView {

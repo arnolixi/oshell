@@ -2,6 +2,7 @@
 // Copyright (c) 2026 OShell contributors
 
 import AppKit
+import OShellCore
 
 /// A bounded tab strip. The document owns its width instead of relying on the
 /// intrinsic size of a stack view inside an unconstrained clip view.
@@ -98,6 +99,9 @@ final class TabStripView: NSView {
     private let scroll = Scroll()
     private let document = Document()
     private let addButton = NSButton()
+    private let groupButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private var groupWidth: CGFloat = 0
+    var backgroundMenu: (() -> NSMenu?)?
     private let listButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private(set) var items = [Item]()
     private var selectedID: UUID?
@@ -117,24 +121,38 @@ final class TabStripView: NSView {
         scroll.horizontalScrollElasticity = .none; scroll.verticalScrollElasticity = .none
         scroll.documentView = document
         addButton.image = NSImage(oshellSymbolName: "plus", accessibilityDescription: "新建本地标签")
-        addButton.isBordered = false; addButton.toolTip = "新建本地标签（⌘T）"
+        addButton.isBordered = false; addButton.toolTip = "新建本地标签"
         addButton.target = self; addButton.action = #selector(addTab)
         listButton.isBordered = false; listButton.toolTip = "所有标签"
         listButton.setAccessibilityLabel("所有标签")
-        [scroll, addButton, listButton].forEach { addSubview($0) }
+        groupButton.isBordered = false; groupButton.font = .systemFont(ofSize: 11, weight: .semibold); groupButton.isHidden = true
+        [scroll, groupButton, addButton, listButton].forEach { addSubview($0) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func menu(for event: NSEvent) -> NSMenu? { backgroundMenu?() }
+    func setGroup(title: String, menu: NSMenu, active: Bool, unread: Bool) {
+        groupButton.isHidden = false
+        let caption = (unread ? "● " : "") + title
+        menu.insertItem(NSMenuItem(title: caption, action: nil, keyEquivalent: ""), at: 0)
+        groupButton.menu = menu; groupButton.toolTip = title + " · 标签组操作"
+        groupButton.setAccessibilityLabel("标签组 " + title)
+        groupButton.oshellContentTintColor = unread ? .systemOrange : (active ? .oshellAccentColor : .labelColor)
+        groupWidth = min(120, max(76, (caption as NSString).size(withAttributes: [.font: groupButton.font!]).width + 24))
+        needsLayout = true
+    }
     struct Entry {
         let id: UUID
         let title: String
         let detail: String
         var hasUnreadOutput = false
+        var number: Int? = nil
     }
     func setAddDescription(_ title: String) { addButton.toolTip = title; addButton.setAccessibilityLabel(title) }
-    func update(tabs: [TerminalTab], selected: TerminalTab?) {
+    func update(tabs: [TerminalTab], selected: TerminalTab?, numbers: [UUID: Int]? = nil) {
+        let numbers = numbers ?? Dictionary(uniqueKeysWithValues: tabs.enumerated().map { ($0.element.id, $0.offset + 1) })
         update(entries: tabs.map { tab in
             let title = tab.activePane.title
-            return Entry(id: tab.id, title: title, detail: "标签：\(title)\n会话：\(tab.activePane.profile.name) · \(tab.activePane.profile.host)\n\(tab.layout.panes.count) 个终端 · 双击新建相同会话", hasUnreadOutput: tab.hasUnreadOutput)
+            return Entry(id: tab.id, title: title, detail: tab.activePane.connectionDetails + "\n\n\(tab.layout.panes.count) 个终端 · 双击新建相同会话", hasUnreadOutput: tab.hasUnreadOutput, number: numbers[tab.id])
         }, selectedID: selected?.id)
     }
     func update(entries: [Entry], selectedID: UUID?) {
@@ -154,16 +172,20 @@ final class TabStripView: NSView {
         self.selectedID = selectedID
         let menu = NSMenu(); menu.addItem(NSMenuItem(title: "", action: nil, keyEquivalent: ""))
         for (index, entry) in entries.enumerated() {
-            let item = items[index], title = entry.title
+            let item = items[index], number = entry.number ?? index + 1
+            let title = entry.number.map { "\($0)  \(entry.title)" } ?? entry.title
             item.selectButton.title = title; item.hasUnreadOutput = entry.hasUnreadOutput
             item.selectButton.oshellContentTintColor = entry.hasUnreadOutput ? .systemOrange : .labelColor
             item.selectButton.font = .systemFont(ofSize: 12, weight: entry.hasUnreadOutput ? .bold : .medium)
             item.selected = entry.id == selectedID
+            item.selectButton.setAccessibilityLabel("标签 \(number)：\(entry.title)")
             item.selectButton.setAccessibilityValue((item.selected ? "已选中" : "未选中") + (entry.hasUnreadOutput ? "，有未读输出" : ""))
-            item.toolTip = "\(index + 1). \(title)\n" + (entry.hasUnreadOutput ? "有新输出，切换查看后清除提示\n" : "") + entry.detail
+            item.toolTip = "\(number). \(entry.title)\n" + (entry.hasUnreadOutput ? "有新输出，切换查看后清除提示\n" : "") + entry.detail
+            if let number = entry.number { item.toolTip = (item.toolTip ?? "") + (number <= 9 ? "\n" + ShortcutRuntime.hint(ShortcutAction(rawValue: "tab\(number)")!) + " 跳转" : "\n" + ShortcutRuntime.hint(.tabNumber) + " 输入编号跳转") }
+            item.selectButton.toolTip = item.toolTip
             item.closeButton.toolTip = "关闭“\(title)”"; item.closeButton.setAccessibilityLabel("关闭“\(title)”")
             item.preferredWidth = min(320, max(120, (title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .bold)]).width + 48))
-            let choice = NSMenuItem(title: (entry.hasUnreadOutput ? "● " : "") + "\(index + 1). \(title)" + (entry.hasUnreadOutput ? "（新输出）" : ""), action: #selector(selectFromList(_:)), keyEquivalent: "")
+            let choice = NSMenuItem(title: (entry.hasUnreadOutput ? "● " : "") + "\(number). \(entry.title)" + (entry.hasUnreadOutput ? "（新输出）" : ""), action: #selector(selectFromList(_:)), keyEquivalent: "")
             choice.representedObject = entry.id; choice.target = self; choice.state = item.selected ? .on : .off
             menu.addItem(choice)
         }
@@ -175,7 +197,9 @@ final class TabStripView: NSView {
     }
     override func layout() {
         super.layout()
-        scroll.frame = NSRect(x: 0, y: 0, width: max(0, bounds.width - 60), height: bounds.height)
+        let leading = groupButton.isHidden ? 0 : groupWidth + 4
+        groupButton.frame = NSRect(x: 2, y: 2, width: groupWidth, height: max(0, bounds.height - 4))
+        scroll.frame = NSRect(x: leading, y: 0, width: max(0, bounds.width - 60 - leading), height: bounds.height)
         let buttonHeight = min(24, bounds.height), buttonY = floor((bounds.height - buttonHeight) / 2)
         addButton.frame = NSRect(x: bounds.width - 56, y: buttonY, width: 24, height: buttonHeight)
         listButton.frame = NSRect(x: bounds.width - 28, y: buttonY, width: 24, height: buttonHeight)

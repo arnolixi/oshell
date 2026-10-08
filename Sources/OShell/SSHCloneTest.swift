@@ -53,7 +53,7 @@ enum SSHCloneTest {
                 controller.duplicateTab(sourceTab); let clonedTab = controller.selectedTab!, clone = clonedTab.activePane
                 wait("doubleClickCloneConnected", { clone !== source && clone.sessionReady && text(clone).contains("MUX_READY") && clone.remoteAddress != nil }) {
                     checks["cloneKeepsConnectionIdentityAndTitle"] = clone.sshConnectionGroup === group && clone.profile == source.profile && clone.externalTerminalType == source.externalTerminalType
-                    checks["clonedSessionUsesDetectedHost"] = source.title == "nested-real · 10.30.0.8" && clone.title == source.title
+                    checks["clonedSessionUsesDetectedHost"] = (source.title == "nested-real" && source.remoteAddress == "10.30.0.8") && clone.title == source.title
                     checks["independentLocalPTYs"] = clone.terminal.process.shellPid != source.terminal.process.shellPid
                     send(source, "SOURCE"); send(clone, "CLONE")
                     wait("bothChannelsReceiveOwnOutput", { text(source).contains("REPLY_SOURCE") && text(clone).contains("REPLY_CLONE") }) {

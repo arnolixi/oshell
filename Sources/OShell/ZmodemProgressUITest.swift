@@ -30,6 +30,10 @@ final class ZmodemProgressUITest {
             let ui = self.pane.transferProgress
             if !ui.isHidden, let snapshot = ui.snapshot, let fraction = snapshot.fraction, fraction > 0, fraction < 1, snapshot.bytesPerSecond > 0 {
                 self.observed.insert(self.phase)
+                self.controller.window?.contentView?.layoutSubtreeIfNeeded()
+                let track = ui.indicator
+                self.checks[self.phase + "ActualFill"] = (self.checks[self.phase + "ActualFill"] ?? true)
+                    && track.bounds.width > 0 && abs(track.fillRect.width / track.bounds.width - fraction) < 0.001
                 if self.phase == "download", fraction > 0.2, !self.checks.keys.contains("previewSaved") {
                     self.capture(ui)
                 }
@@ -44,7 +48,9 @@ final class ZmodemProgressUITest {
         controller.window?.contentView?.layoutSubtreeIfNeeded()
         checks["progressHasSpeedAndSize"] = ui.details.stringValue.contains("/s") && ui.details.stringValue.contains("%")
         checks["cancelVisible"] = !ui.cancelButton.isHidden
-        checks["progressHasHeight"] = ui.bounds.height == 60
+        checks["progressHasHeight"] = ui.bounds.height == 72
+        checks["compactTopRight"] = ui.frame.width <= 360 && abs(ui.frame.maxX - (pane.view.bounds.maxX - 12)) < 1 && abs(ui.frame.maxY - (pane.terminal.frame.maxY - 8)) < 1
+        checks["terminalUsesFullHeight"] = pane.terminal.frame.height > pane.view.bounds.height - 30
         let view = controller.window!.contentView!.superview!
         if let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
             view.cacheDisplay(in: view.bounds, to: bitmap)
@@ -59,10 +65,35 @@ final class ZmodemProgressUITest {
             try Data().write(to: root.appendingPathComponent("source/empty"))
             controller.configuration.preferences.metal = false
             controller.newLocal(); pane = controller.selectedTab!.activePane
+            progressAppearance()
             pane.transferSelection = { [self] direction in direction == .download ? ([], root.appendingPathComponent("download")) : ([root.appendingPathComponent("source/中文 空格.bin"), root.appendingPathComponent("source/empty")], nil) }
             send("export PS1='PROGRESS_TEST> '; exec /bin/bash --noprofile --norc -i")
             wait("shellReady", { self.text.contains("\nPROGRESS_TEST>") }) { self.download() }
         } catch { checks["fixture"] = false; finish() }
+    }
+    private func progressAppearance() {
+        let ui = pane.transferProgress
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        let terminalFrame = pane.terminal.frame
+        ui.begin("选择要上传的文件…")
+        checks["waitingHasNoInventedProgress"] = ui.indicator.fraction == nil && ui.indicator.fillRect.width == 0
+        for appearance in [NSAppearance.Name.aqua, .oshellDark] {
+            ui.appearance = NSAppearance(named: appearance)
+            for amount in [0, 42, 75, 100] {
+                var progress = ZmodemProgress(); progress.filename = "example-upload.dmg"
+                progress.bytes = Int64(amount) * 1_000_000; progress.total = 100_000_000; progress.bytesPerSecond = 1_200_000
+                ui.update(progress, direction: .upload)
+                controller.window?.contentView?.layoutSubtreeIfNeeded(); ui.layoutSubtreeIfNeeded()
+                checks["fill-\(appearance.rawValue)-\(amount)"] = abs(ui.indicator.fillRect.width - ui.indicator.bounds.width * Double(amount) / 100) < 0.001
+                if amount == 42, let bitmap = ui.bitmapImageRepForCachingDisplay(in: ui.bounds) {
+                    ui.cacheDisplay(in: ui.bounds, to: bitmap)
+                    if let png = bitmap.representation(using: .png, properties: [:]) { try? png.write(to: root.appendingPathComponent("progress-\(appearance.rawValue).png")) }
+                }
+            }
+        }
+        checks["overlayDoesNotResizeTerminal"] = pane.terminal.frame == terminalFrame
+        ui.hide(); controller.window?.contentView?.layoutSubtreeIfNeeded()
+        checks["hideDoesNotResizeTerminal"] = pane.terminal.frame == terminalFrame
     }
     private func download() {
         phase = "download"
@@ -70,7 +101,7 @@ final class ZmodemProgressUITest {
         wait("downloadComplete", { self.observed.contains("download") && !self.pane.isTransferring }) {
             self.checks["downloadBytes"] = (try? Data(contentsOf: self.root.appendingPathComponent("download/中文 空格.bin"))) == self.payload
             self.checks["downloadEmpty"] = (try? Data(contentsOf: self.root.appendingPathComponent("download/empty"))) == Data()
-            self.checks["downloadCompleteBar"] = self.pane.transferProgress.indicator.doubleValue == 1
+            self.checks["downloadCompleteBar"] = self.pane.transferProgress.indicator.fraction == 1
             self.upload()
         }
     }
@@ -89,10 +120,10 @@ final class ZmodemProgressUITest {
         wait("cancelHasProgress", { self.observed.contains("cancel") }) {
             self.pane.transferProgress.cancelButton.performClick(nil)
             self.wait("cancelRestoresTerminal", { !self.pane.isTransferring }) {
-                self.checks["cancelNotComplete"] = self.pane.transferProgress.indicator.doubleValue < 1 && self.pane.transferProgress.title.stringValue.contains("取消")
+                self.checks["cancelNotComplete"] = (self.pane.transferProgress.indicator.fraction ?? 0) < 1 && self.pane.transferProgress.title.stringValue.contains("取消")
                 self.wait("autoCollapse", { self.pane.transferProgress.isHidden }) {
                     self.controller.window?.contentView?.layoutSubtreeIfNeeded()
-                    self.checks["noIdleHeight"] = self.pane.transferProgress.bounds.height == 0
+                    self.checks["noIdleOverlay"] = self.pane.transferProgress.isHidden && self.pane.transferProgress.indicator.fraction == nil
                     self.send("printf '\\nPROGRESS_RECOVERED\\n'")
                     self.wait("shellRecovered", { self.text.contains("\nPROGRESS_RECOVERED\n") }) { self.failedUpload() }
                 }
@@ -103,7 +134,7 @@ final class ZmodemProgressUITest {
         pane.transferSelection = { [self] _ in ([root.appendingPathComponent("source/missing-file")], nil) }
         send("\(quote(ZmodemTransfer.helperDirectory.appendingPathComponent("lrz").path)) -b")
         wait("helperFailureReported", { !self.pane.isTransferring && self.pane.transferProgress.title.stringValue.contains("失败") }) {
-            self.checks["helperFailureNotComplete"] = self.pane.transferProgress.indicator.doubleValue < 1
+            self.checks["helperFailureNotComplete"] = (self.pane.transferProgress.indicator.fraction ?? 0) < 1
             self.failureUI()
         }
     }
@@ -112,10 +143,23 @@ final class ZmodemProgressUITest {
         ui.begin("准备传输")
         var value = ZmodemProgress(); value.filename = "test.bin"; value.bytes = 1; value.total = 4; value.bytesPerSecond = 100
         ui.update(value, direction: .upload); ui.status("传输已中断或失败（1）")
-        checks["failureNotComplete"] = ui.indicator.doubleValue == 0.25 && ui.cancelButton.isHidden
+        checks["failureNotComplete"] = ui.indicator.fraction == 0.25 && ui.cancelButton.isHidden
         controller.window?.setContentSize(NSSize(width: 760, height: 460)); controller.splitVertical()
         controller.window?.contentView?.layoutSubtreeIfNeeded(); ui.layoutSubtreeIfNeeded()
-        checks["splitProgressFits"] = [ui.title, ui.details, ui.indicator].allSatisfy { ui.bounds.contains($0.frame) }
+        checks["splitProgressFits"] = pane.view.bounds.contains(ui.frame) && [ui.title, ui.details, ui.indicator].allSatisfy { ui.bounds.contains($0.frame) }
+        ui.update(value, direction: .upload); ui.layoutSubtreeIfNeeded()
+        func cancelReceivesClick() -> Bool {
+            let point = ui.cancelButton.convert(NSPoint(x: ui.cancelButton.bounds.midX, y: ui.cancelButton.bounds.midY), to: pane.view.superview)
+            let hit = pane.view.hitTest(point)
+            return hit === ui.cancelButton || hit?.isDescendant(of: ui.cancelButton) == true
+        }
+        checks["overlayCancelReceivesClick"] = cancelReceivesClick()
+        #if !OSHELL_LEGACY
+        do {
+            try pane.terminal.setUseMetal(true); pane.terminal.drawMetalFrameNow()
+            checks["metalOverlayCancelReceivesClick"] = pane.terminal.isUsingMetalRenderer && cancelReceivesClick()
+        } catch { checks["metalOverlayCancelReceivesClick"] = false }
+        #endif
         finish()
     }
     private func finish() {

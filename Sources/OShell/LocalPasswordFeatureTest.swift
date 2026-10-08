@@ -98,7 +98,7 @@ enum LocalPasswordFeatureTest {
             PasswordVault.shared.configureLocalStorage(directory: controller.store.url.deletingLastPathComponent()); PasswordVault.shared.lock()
             let restored = try controller.store.load().profiles.first { $0.id == saved.id }!
             controller.open(restored); let pane = controller.selectedTab!.activePane
-            wait("realSSHAuthenticatesWithoutMaster", { pane.sessionReady && pane.title.hasPrefix("outer-real · ") }) {
+            wait("realSSHAuthenticatesWithoutMaster", { pane.sessionReady && pane.title == "outer-real" }) {
                 pane.sendManaged(Array("echo LOCAL_PASSWORD_AUTH_OK\r".utf8))
                 wait("authenticatedShellAcceptsCommands", { String(decoding: pane.terminal.getTerminal().getBufferAsData(), as: UTF8.self).contains("\nLOCAL_PASSWORD_AUTH_OK\n") }) { finish() }
             }

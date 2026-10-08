@@ -11,6 +11,7 @@ final class SSHConnectionGroup {
     private static let cleanup = DispatchGroup()
     let directory: URL
     let isExternal: Bool
+    var transportPeer: SSHTransportPeer?
     var controlPath: String { directory.appendingPathComponent("s").path }
     private let profileID: UUID, host: String, user: String, port: Int
     private let lock = NSLock()

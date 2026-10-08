@@ -173,6 +173,23 @@ private func resolvedFont(for character: Character, base: TTFont) -> TTFont {
 private var ctLineCache: [NSAttributedString: CTLine] = [:]
 
 extension TerminalView {
+    /// Private-use code points have no universal system fallback. Preserve a
+    /// user's patched font when it has the glyph; never replace ordinary text,
+    /// CJK or emoji. CoreText cascade lists alone do not reliably resolve PUA.
+    func privateUseFont(for character: Character, base: TTFont) -> TTFont? {
+        #if os(macOS)
+        guard let scalar = character.unicodeScalars.first,
+              scalar.properties.generalCategory == .privateUse,
+              let fallback = privateUseFallbackFont else { return nil }
+        let units = Array(String(scalar).utf16)
+        var glyphs = [CGGlyph](repeating: 0, count: units.count)
+        if CTFontGetGlyphsForCharacters(base as CTFont, units, &glyphs, units.count) { return nil }
+        return CTFontGetGlyphsForCharacters(fallback as CTFont, units, &glyphs, units.count) ? fallback : nil
+        #else
+        return nil
+        #endif
+    }
+
     /// Release optional process-wide drawing caches once the host has closed its
     /// last terminal. Rebuilt on demand; never changes terminal contents/fonts.
     public static func releaseSharedRenderCaches() {
@@ -1210,6 +1227,9 @@ extension TerminalView {
             let renderCodePoint = character.unicodeScalars.count == 1
                 ? character.unicodeScalars.first!.value : UInt32(ch.code)
 
+            let symbolFont = blinkHidden ? nil : privateUseFont(for: character,
+                base: (currentAttributes[.font] as? TTFont) ?? fontSet.normal)
+
             // Render Powerline separators independently of the font so their
             // joining edge shares the background's exact pixel boundary.
             if !blinkHidden && PowerlineRenderer.shouldRender(codePoint: renderCodePoint,
@@ -1265,7 +1285,9 @@ extension TerminalView {
                 builder?.append(text: " ", attributes: currentAttributes, cellUTF16Lengths: [1])
                 previousPlaceholder = placeholder
                 previousPlaceholderAttribute = attr
-            } else if !blinkHidden && bidiLayout != nil && TerminalBidi.needsCellIsolation(character) {
+            } else if !blinkHidden && (symbolFont != nil || (bidiLayout != nil && TerminalBidi.needsCellIsolation(character))) {
+                // A missing private-use symbol gets an explicit single-cell
+                // font run; CoreText otherwise ignores it in font cascades.
                 // In BiDi rows, Arabic-script cells and cells holding combining
                 // sequences or emoji are isolated into their own column-anchored
                 // segment so that font-side ligation or extra mark glyphs cannot
@@ -1280,7 +1302,7 @@ extension TerminalView {
                 // font cascade to discover the same Arabic-capable font.
                 var isolatedAttributes = currentAttributes
                 let baseFont = (currentAttributes[.font] as? TTFont) ?? fontSet.normal
-                isolatedAttributes[.font] = resolvedFont(for: character, base: baseFont)
+                isolatedAttributes[.font] = symbolFont ?? resolvedFont(for: character, base: baseFont)
                 builder?.append(text: String(character), attributes: isolatedAttributes,
                                 cellUTF16Lengths: [character.utf16.count])
                 if let finished = builder?.buildIfNeeded() {

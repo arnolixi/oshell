@@ -57,27 +57,28 @@ enum SessionDefaultsTest {
         let defaults = controller.configuration.sessionDefaults
         let editor = SessionEditor(nil, profiles: [], directories: [], initialDirectory: "生产", defaults: defaults)
         let root = editor.dialog.accessoryView!
-        checks["newEditorShowsAbsoluteDirectory"] = input(root, "session.directory")?.stringValue == "/生产"
-        let directoryChoices = descendants(root).compactMap { $0 as? NSComboBox }.first { $0.identifier?.rawValue == "session.directory" }
-        checks["directoryChoicesIncludeRoot"] = directoryChoices?.objectValues.first as? String == "/"
+        func directory(_ root: NSView) -> SessionDirectoryPicker? { descendants(root).compactMap { $0 as? SessionDirectoryPicker }.first }
+        checks["newEditorShowsAbsoluteDirectory"] = directory(root)?.selectedDirectory == "生产"
+        checks["directoryChoicesIncludeRoot"] = directory(root)?.selectDirectory("") == true
+        _ = directory(root)?.selectDirectory("生产")
         checks["newEditorUsesDefaultPort"] = input(root, "session.port")?.stringValue == "2222"
         checks["newEditorUsesDefaultKeepAlive"] = input(root, "session.keepAlive.interval")?.stringValue == "75"
         input(root, "session.host")?.stringValue = "192.0.2.99"
         pressNext("保存"); let created = editor.run()
         checks["newSessionSavesDefaults"] = created?.keepAlive.interval == 75 && created?.port == 2222
-        let existing = SessionEditor(source, profiles: [], directories: [], initialDirectory: "", defaults: defaults)
+        let existing = SessionEditor(source, profiles: [], directories: ["生产/华北/数据库"], initialDirectory: "", defaults: defaults)
         let oldRoot = existing.dialog.accessoryView!
-        checks["oldDirectoryDisplaysLinuxPath"] = input(oldRoot, "session.directory")?.stringValue == "/生产/华东"
-        input(oldRoot, "session.directory")?.stringValue = "../华北//数据库/./"
+        checks["oldDirectoryDisplaysLinuxPath"] = directory(oldRoot)?.selectedDirectory == "生产/华东"
+        _ = directory(oldRoot)?.selectDirectory("生产/华北/数据库")
         checks["editingKeepsOriginalValues"] = input(oldRoot, "session.keepAlive.interval")?.stringValue == "61"
         existing.useDefaultKeepAlive()
         checks["applyGlobalKeepAliveDoesNotChangePort"] = input(oldRoot, "session.keepAlive.interval")?.stringValue == "75" && input(oldRoot, "session.port")?.stringValue == "22"
         pressNext("保存"); let edited = existing.run()
         checks["appliedKeepAlivePersistsInEditor"] = edited?.keepAlive.interval == 75
-        checks["relativeDirectoryResolvesBeforeSave"] = edited?.group == "生产/华北/数据库"
+        checks["treeDirectorySelectionSaves"] = edited?.group == "生产/华北/数据库"
         checks["directoryEditPreservesConnectionAndRemotePath"] = edited?.id == source.id && edited?.host == source.host && edited?.initialDirectory == source.initialDirectory
         let rootEditor = SessionEditor(source, profiles: [], directories: ["生产", "生产/华东"], initialDirectory: "")
-        input(rootEditor.dialog.accessoryView!, "session.directory")?.stringValue = "/"
+        _ = directory(rootEditor.dialog.accessoryView!)?.selectDirectory("")
         pressNext("保存"); checks["rootPathSavesAsRoot"] = rootEditor.run()?.group == ""
 
         let switched = SessionEditor(nil, profiles: [], directories: [], initialDirectory: "", defaults: defaults)

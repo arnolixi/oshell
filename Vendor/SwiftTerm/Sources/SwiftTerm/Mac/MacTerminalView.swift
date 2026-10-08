@@ -348,6 +348,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// https://gist.github.com/lukaskubanek/9a61ac71dc0db8bb04db2028f2635779
     /// https://developer.apple.com/forums/thread/663256?answerId=646653022#646653022
     public var disableFullRedrawOnAnyChanges = false
+    /// App-provided symbol font, used only for private-use characters missing
+    /// from the selected text font. Shared by CoreGraphics and Metal rendering.
+    public var privateUseFallbackFont: NSFont? {
+        didSet { resetFont() }
+    }
     var fontSet: FontSet
 
     /// Options used to create the `Terminal` that backs this view; set by `init(frame:font:options:)`,
@@ -3200,7 +3205,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         didSet { scrollSensitivity = max(0.05, scrollSensitivity) }
     }
 
-    public override func scrollWheel(with event: NSEvent) {
+    open override func scrollWheel(with event: NSEvent) {
         // Preserves the previous `deltaY == 0` early exit, restated against the
         // delta this method now reads. Without it a zero delta would fall into
         // the non-precise branch below and be turned into a spurious -1 line.

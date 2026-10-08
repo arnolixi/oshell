@@ -136,7 +136,7 @@ public enum SessionDirectory {
     public static func parent(_ path: String) -> String { path.split(separator: "/").dropLast().joined(separator: "/") }
     public static func all(_ configuration: Configuration) -> [String] {
         var result = Set<String>()
-        for path in configuration.directories + configuration.profiles.map(\.group) {
+        for path in configuration.directories + configuration.profiles.map(\.group) + [SessionLinks.rootDirectory] + configuration.sessionLinks.allFolders.map({ SessionLinks.directory(for: $0) }) {
             var parts = [String]()
             for part in normalize(path).split(separator: "/") { parts.append(String(part)); result.insert(parts.joined(separator: "/")) }
         }

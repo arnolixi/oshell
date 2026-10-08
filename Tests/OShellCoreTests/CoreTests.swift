@@ -2,6 +2,7 @@
 // Copyright (c) 2026 OShell contributors
 
 import Foundation
+import CoreFoundation
 import OShellCore
 
 private var failures = [String]()
@@ -135,6 +136,160 @@ final class CoreTests {
         let stripped = SessionArchive(profiles: config.profiles, directories: [], includePasswords: false)
         XCTAssertEqual(stripped.passwordCount, 0); _ = try stripped.encoded()
     }
+    func testThirdPartySessionImports() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("oshell-import-fixture-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func write(_ path: String, _ text: String, encoding: String.Encoding = .utf8) throws -> URL {
+            let url = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try text.data(using: encoding)!.write(to: url); return url
+        }
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <VanDyke version="3.0"><key name="Global Options"><string name="Hostname">ignored.example</string></key><key name="Sessions"><key name="生产"><key name="数据库"><dword name="Is Session">1</dword><string name="Protocol Name">SSH2</string><string name="Hostname">192.0.2.10</string><dword name="[SSH2] Port">2222</dword><string name="Username">ops</string><string name="Password V2">PRIVATE_FIXTURE_PASSWORD</string><dword name="Send Protocol NO-OP">1</dword><dword name="NOP Interval">90</dword></key><key name="空目录"/><key name="旧协议"><dword name="Is Session">1</dword><string name="Protocol Name">Telnet</string><string name="Hostname">192.0.2.11</string></key></key></key></VanDyke>
+        """
+        let xmlURL = try write("sessions.xml", xml)
+        let parsed = try ThirdPartySessionImporter.read([xmlURL], format: .secureCRT)
+        XCTAssertEqual(parsed.profiles.count, 1); XCTAssertEqual(parsed.profiles[0].name, "数据库")
+        XCTAssertEqual(parsed.profiles[0].group, "SecureCRT/生产"); XCTAssertEqual(parsed.profiles[0].port, 2222)
+        XCTAssertEqual(parsed.profiles[0].username, "ops"); XCTAssertEqual(parsed.profiles[0].keepAlive.interval, 90)
+        XCTAssertEqual(parsed.skippedCount, 1); XCTAssertTrue(parsed.directories.contains("SecureCRT/生产/空目录"))
+        let safeArchive = try parsed.archive.encoded()
+        XCTAssertTrue(!String(decoding: safeArchive, as: UTF8.self).contains("PRIVATE_FIXTURE_PASSWORD"))
+        XCTAssertTrue(!parsed.notes.contains("PRIVATE_FIXTURE_PASSWORD"))
+        let utf16 = try write("utf16.xml", xml.replacingOccurrences(of: "UTF-8", with: "UTF-16"), encoding: .utf16)
+        XCTAssertEqual(try ThirdPartySessionImporter.read([utf16], format: .secureCRT).profiles.first?.port, 2222)
+        let cdata = try write("cdata.xml", xml.replacingOccurrences(of: "192.0.2.10", with: "<![CDATA[192.0.2.10]]>"))
+        XCTAssertEqual(try ThirdPartySessionImporter.read([cdata], format: .secureCRT).profiles.first?.host, "192.0.2.10")
+        let gb = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
+        let gbFile = try write("中文.xsh", "[CONNECTION]\nProtocol=SSH\nHost=gb.example\n[CONNECTION:AUTHENTICATION]\nUserName=运维\n", encoding: gb)
+        XCTAssertEqual(try ThirdPartySessionImporter.read([gbFile], format: .xshell).profiles.first?.username, "运维")
+        let ini = """
+        S:"Protocol Name"=SSH2
+        S:"Hostname"=192.0.2.20
+        S:"Username"=test
+        D:"[SSH2] Port"=000008ae
+        S:"Identity Filename V2"=C:\\keys\\identity
+        S:"Password"=DO_NOT_COPY
+        S:"Firewall Name"=jump-profile
+        """
+        _ = try write("crt/Sessions/运维/主机.ini", ini)
+        _ = try write("crt/Sessions/Default.ini", "S:\"Protocol Name\"=SSH2\nS:\"Hostname\"=\n")
+        _ = try write("crt/Global.ini", ini)
+        let crt = try ThirdPartySessionImporter.read([root.appendingPathComponent("crt")], format: .secureCRT)
+        XCTAssertEqual(crt.profiles.count, 1); XCTAssertEqual(crt.profiles[0].port, 2222)
+        XCTAssertEqual(crt.profiles[0].group, "SecureCRT/运维"); XCTAssertTrue(crt.profiles[0].identityFile.isEmpty)
+        XCTAssertTrue(crt.notes.contains("私钥路径") && crt.notes.contains("代理"))
+        for version in ["5.0", "6.0", "7.0", "8.0"] {
+            let xsh = """
+            [SessionInfo]
+            Version=\(version)
+            [CONNECTION]
+            Host=2001:db8::8
+            Port=2200
+            Protocol=SSH
+            [CONNECTION:AUTHENTICATION]
+            UserName=运维
+            Password=PRIVATE_FIXTURE_PASSWORD
+            UserKey=~/.ssh/import-fixture
+            UseExpectSend=1
+            [CONNECTION:KEEPALIVE]
+            KeepAlive=1
+            KeepAliveInterval=45
+            TCPKeepAlive=0
+            SendKeepAlive=1
+            KeepAliveString=DANGEROUS_COMMAND_FIXTURE
+            """
+            let url = try write("xsh-\(version).xsh", xsh, encoding: version == "8.0" ? .utf16 : .utf8)
+            let value = try ThirdPartySessionImporter.read([url], format: .xshell)
+            XCTAssertEqual(value.profiles.count, 1); XCTAssertEqual(value.profiles[0].host, "2001:db8::8")
+            XCTAssertEqual(value.profiles[0].username, "运维"); XCTAssertEqual(value.profiles[0].keepAlive.interval, 45)
+            XCTAssertTrue(!value.profiles[0].keepAlive.idleEnabled && !value.profiles[0].keepAlive.tcp)
+            XCTAssertEqual(value.profiles[0].identityFile, "~/.ssh/import-fixture")
+            let exported = String(decoding: try value.archive.encoded(), as: UTF8.self)
+            XCTAssertTrue(!exported.contains("PRIVATE_FIXTURE_PASSWORD") && !exported.contains("DANGEROUS_COMMAND_FIXTURE"))
+        }
+        let file = try write("files.xsh", "[CONNECTION]\nHost=files.example\nProtocol=SFTP\n[CONNECTION:AUTHENTICATION]\nUserName=ops\n")
+        XCTAssertEqual(try ThirdPartySessionImporter.read([file], format: .xshell).profiles[0].kind, .sftp)
+        let invalid = try write("invalid.xsh", "[CONNECTION]\nHost=good.example\nHost=other.example\nProtocol=SSH\n")
+        XCTAssertEqual(try ThirdPartySessionImporter.read([invalid], format: .xshell).skippedCount, 1)
+        let port = try write("port.xsh", "[CONNECTION]\nHost=good.example\nPort=70000\nProtocol=SSH\n")
+        let badPort = try ThirdPartySessionImporter.read([port], format: .xshell)
+        XCTAssertTrue(badPort.profiles.isEmpty)
+        let entity = try write("entity.xml", "<!DOCTYPE VanDyke [<!ENTITY x SYSTEM 'file:///nonexistent-import-fixture'>]><VanDyke><key name='Sessions'/></VanDyke>")
+        XCTAssertThrowsError(try ThirdPartySessionImporter.read([entity], format: .secureCRT))
+        let traversal = try write("path.xml", "<VanDyke><key name='Sessions'><key name='../outside'/></key></VanDyke>")
+        XCTAssertThrowsError(try ThirdPartySessionImporter.read([traversal], format: .secureCRT))
+        let link = root.appendingPathComponent("linked.xsh")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
+        XCTAssertEqual(try ThirdPartySessionImporter.read([link], format: .xshell).skippedCount, 1)
+        enum Cancel: Error { case cancelled }
+        XCTAssertThrowsError(try ThirdPartySessionImporter.read([xmlURL], format: .secureCRT, check: { throw Cancel.cancelled }))
+        let zipData = Data(base64Encoded: "UEsDBBQAAAgIAAAAIVDhgcGgkAAAAAABAAAdAAAAU2Vzc2lvbnMv5byA5Y+RL3ppcOS4u+acui54c2h9j8EKwkAMROcs+CulthcV9iBFWC9rodZL8SCiIKgtrd+vvo0ieJEhbDKTSbLPR6NKRw3grFY3rYgT2U5jjbRF67+a01SJUlMaFVorgCXZBl+s3q4ST6s7cSAu+CrgTfMwA5rTRDNlNi+xN/9MLunorSMD6d99cy1UU3nYYGwB83tNzb74i6C9rmSO+R1c1F5QSwMEFAAACAgAAAAhUAAAAAACAAAAAAAAABMAAABTZXNzaW9ucy/nqbrnm67lvZUvAwBQSwECFAMUAAAICAAAACFQ4YHBoJAAAAAAAQAAHQAAAAAAAAAAAAAAgAEAAAAAU2Vzc2lvbnMv5byA5Y+RL3ppcOS4u+acui54c2hQSwECFAMUAAAICAAAACFQAAAAAAIAAAAAAAAAEwAAAAAAAAAAAAAAgAHLAAAAU2Vzc2lvbnMv56m655uu5b2VL1BLBQYAAAAAAgACAIwAAAD+AAAAAAA=")!
+        let xts = root.appendingPathComponent("sessions.xts"); try zipData.write(to: xts)
+        let zipped = try ThirdPartySessionImporter.read([xts], format: .xshell)
+        XCTAssertEqual(zipped.profiles.count, 1); XCTAssertEqual(zipped.profiles[0].name, "zip主机")
+        XCTAssertEqual(zipped.profiles[0].group, "Xshell/开发"); XCTAssertEqual(zipped.profiles[0].port, 2200)
+        XCTAssertTrue(zipped.directories.contains("Xshell/空目录"))
+        let directory = zipData.range(of: Data([0x50, 0x4b, 0x01, 0x02]))!.lowerBound
+        var encrypted = zipData; encrypted[directory + 8] |= 1; try encrypted.write(to: xts)
+        XCTAssertThrowsError(try ThirdPartySessionImporter.read([xts], format: .xshell))
+        var symlink = zipData
+        symlink[directory + 40] = 0xff; symlink[directory + 41] = 0xa1
+        try symlink.write(to: xts)
+        XCTAssertThrowsError(try ThirdPartySessionImporter.read([xts], format: .xshell))
+        var oversized = zipData
+        for offset in 24...27 { oversized[directory + offset] = 0xff }
+        try oversized.write(to: xts)
+        XCTAssertThrowsError(try ThirdPartySessionImporter.read([xts], format: .xshell))
+        var brokenCRC = zipData; brokenCRC[directory + 16] ^= 0xff; try brokenCRC.write(to: xts)
+        XCTAssertThrowsError(try ThirdPartySessionImporter.read([xts], format: .xshell))
+        try Data(base64Encoded: "UEsDBBQAAAAIAAAAIVDUf814bAAAAH8AAAAOAAAALi4vb3V0c2lkZS54c2iLDk4tLs7Mz/PMS8uP5eUKSy0C8Wwt9Ax4uaKd/f38XJ1DPP39gFIBRfkl+cn5ObbBwR68XB75xSW2hpZGegZ6RnrGQMUB+UUltkZGBqj6rBxDQzxc/UI8nR2hxoQWpxb5Jeam2uYXFPNyAQBQSwECFAMUAAAACAAAACFQ1H/NeGwAAAB/AAAADgAAAAAAAAAAAAAAgAEAAAAALi4vb3V0c2lkZS54c2hQSwUGAAAAAAEAAQA8AAAAmAAAAAAA")!.write(to: xts)
+        XCTAssertThrowsError(try ThirdPartySessionImporter.read([xts], format: .xshell))
+        var old = parsed.profiles[0]; old.group = "迁移/" + old.group
+        let merged = try parsed.archive.merging(into: Configuration(profiles: [old]), directory: "迁移", includePasswords: false)
+        XCTAssertEqual(merged.profiles.count, 2); XCTAssertEqual(merged.profiles[0], old)
+        XCTAssertTrue(merged.profiles[1].name.contains("导入副本"))
+    }
+
+    func testKeyboardShortcuts() throws {
+        var settings = KeyboardShortcuts()
+        try settings.validate()
+        XCTAssertEqual(settings.action(for: .init(31, KeyboardShortcut.command | KeyboardShortcut.shift)), .sessionManager)
+        XCTAssertEqual(settings.action(for: .init(48, KeyboardShortcut.control)), .nextTab)
+        XCTAssertEqual(settings.action(for: .init(30, KeyboardShortcut.command | KeyboardShortcut.shift)), .nextTab)
+        let replacement = KeyboardShortcut(45, KeyboardShortcut.command | KeyboardShortcut.option)
+        settings.overrides[ShortcutAction.nextTab.rawValue] = .init(replacement)
+        XCTAssertEqual(settings.action(for: replacement), .nextTab)
+        XCTAssertNil(settings.action(for: .init(48, KeyboardShortcut.control)))
+        XCTAssertNil(settings.action(for: .init(30, KeyboardShortcut.command | KeyboardShortcut.shift)))
+        settings.overrides[ShortcutAction.find.rawValue] = .init(nil)
+        XCTAssertNil(settings.action(for: .init(3, KeyboardShortcut.command)))
+        var prefs = Preferences(); prefs.keyboardShortcuts = settings
+        let restored = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(prefs))
+        XCTAssertEqual(restored.keyboardShortcuts, settings)
+        XCTAssertEqual(restored.keyboardShortcuts.bindings(for: .find), [])
+        var old = try JSONSerialization.jsonObject(with: JSONEncoder().encode(prefs)) as! [String: Any]
+        old.removeValue(forKey: "keyboardShortcuts")
+        XCTAssertEqual(try JSONDecoder().decode(Preferences.self, from: JSONSerialization.data(withJSONObject: old)).keyboardShortcuts, KeyboardShortcuts())
+        settings.overrides[ShortcutAction.newBlank.rawValue] = .init(replacement)
+        XCTAssertEqual(settings.conflict(replacement, excluding: .newBlank), .nextTab)
+        XCTAssertNil(settings.action(for: replacement)); XCTAssertThrowsError(try settings.validate())
+        settings.overrides.removeValue(forKey: ShortcutAction.newBlank.rawValue)
+        settings.overrides[ShortcutAction.nextTab.rawValue] = .init(.init(0, 0))
+        XCTAssertThrowsError(try settings.validate())
+        XCTAssertTrue(!KeyboardShortcut(0, KeyboardShortcut.shift).isValid)
+        XCTAssertTrue(!KeyboardShortcut(53, 0).isValid)
+        XCTAssertTrue(!KeyboardShortcut(500, KeyboardShortcut.command).isValid)
+        XCTAssertTrue(!KeyboardShortcut(0, 32).isValid)
+        XCTAssertTrue(KeyboardShortcut(122, 0).isValid)
+        XCTAssertEqual(KeyboardShortcut(3, 13).display, "⌃⇧⌘F")
+        XCTAssertEqual(Set(ShortcutKey.all.map(\.code)).count, ShortcutKey.all.count)
+        for action in ShortcutAction.allCases {
+            for shortcut in action.defaults { XCTAssertTrue(shortcut.isValid) }
+        }
+    }
     func testQuickSendScopePreference() throws {
         for scope in QuickSendScope.allCases {
             var prefs = Preferences(); prefs.quickSendScope = scope
@@ -208,9 +363,28 @@ final class CoreTests {
         XCTAssertTrue(decoded.activeHostProbe)
         let copy = try SessionDuplication.copy(profile, among: [])
         XCTAssertTrue(copy.activeHostProbe)
-        var old = try JSONSerialization.jsonObject(with: data) as! [String: Any]; old.removeValue(forKey: "activeHostProbe"); old["shellIntegrationOnly"] = false
+        var old = try JSONSerialization.jsonObject(with: data) as! [String: Any]; old.removeValue(forKey: "titleMode"); old["shellIntegrationOnly"] = false
         let legacy = try JSONDecoder().decode(SessionProfile.self, from: JSONSerialization.data(withJSONObject: old))
         XCTAssertTrue(!legacy.activeHostProbe)
+        XCTAssertEqual(legacy.titleMode, .shellIntegration)
+        for flag in [true, false] {
+            old["activeHostProbe"] = flag
+            let migrated = try JSONDecoder().decode(SessionProfile.self, from: JSONSerialization.data(withJSONObject: old))
+            XCTAssertEqual(migrated.titleMode, flag ? .activeProbe : .shellIntegration)
+        }
+        for mode in HostTitleMode.allCases {
+            profile.titleMode = mode
+            let roundTrip = try JSONDecoder().decode(SessionProfile.self, from: JSONEncoder().encode(profile))
+            XCTAssertEqual(roundTrip.titleMode, mode)
+            XCTAssertEqual(try SessionDuplication.copy(profile, among: []).titleMode, mode)
+            let archive = SessionArchive(profiles: [profile], directories: [], includePasswords: false)
+            XCTAssertEqual(try JSONDecoder().decode(SessionArchive.self, from: JSONEncoder().encode(archive)).profiles[0].titleMode, mode)
+        }
+        old["titleMode"] = "passive"; old["activeHostProbe"] = true
+        XCTAssertEqual(try JSONDecoder().decode(SessionProfile.self, from: JSONSerialization.data(withJSONObject: old)).titleMode, .passive)
+        old["titleMode"] = "unknown"
+        XCTAssertThrowsError(try JSONDecoder().decode(SessionProfile.self, from: JSONSerialization.data(withJSONObject: old)))
+
     }
     func testSessionDefaults() throws {
         var defaults = SessionDefaults(); defaults.sshPort = 2222; defaults.sshUsername = "ops"; defaults.identityFile = "~/.ssh/custom"
@@ -269,6 +443,44 @@ final class CoreTests {
         }
         enum Cancelled: Error { case cancelled }
         XCTAssertThrowsError(try SessionDuplication.copy(source, among: [], master: master, checkCancellation: { throw Cancelled.cancelled }))
+    }
+    func testSessionLinkOrdering() throws {
+        let first = SessionProfile(name: "开发", group: "源目录", host: "192.0.2.1")
+        let second = SessionProfile(name: "运维", host: "192.0.2.2")
+        var config = Configuration(profiles: [first, second])
+        config.sessionLinks.add(profileID: first.id, name: first.name)
+        config.sessionLinks.add(profileID: second.id, name: second.name)
+        config.sessionLinks.folders = ["A/内网", "B"]
+        let a = SessionLinkItem.link(config.sessionLinks.entries[0].id), b = SessionLinkItem.link(config.sessionLinks.entries[1].id)
+        XCTAssertEqual(config.sessionLinks.orderedRootItems, [.folder("A"), .folder("B"), a, b])
+        let moved = try config.sessionLinks.reorderRoot(b, before: .folder("A"))
+        XCTAssertTrue(moved); XCTAssertEqual(config.sessionLinks.orderedRootItems, [b, .folder("A"), .folder("B"), a])
+        let noOp = try config.sessionLinks.reorderRoot(b, before: .folder("A"))
+        let selfDrop = try config.sessionLinks.reorderRoot(b, before: b)
+        XCTAssertTrue(!noOp && !selfDrop)
+        XCTAssertThrowsError(try config.sessionLinks.reorderRoot(.folder("A/内网"), before: a))
+        XCTAssertThrowsError(try config.sessionLinks.reorderRoot(a, before: .link(UUID())))
+        var restored = try JSONDecoder().decode(Configuration.self, from: JSONEncoder().encode(config))
+        XCTAssertEqual(restored.sessionLinks.orderedRootItems, config.sessionLinks.orderedRootItems)
+        try restored.sessionLinks.renameFolder("A", to: "C")
+        XCTAssertEqual(restored.sessionLinks.orderedRootItems, [b, .folder("C"), .folder("B"), a])
+        let appended = try restored.sessionLinks.reorderRoot(b, before: nil)
+        XCTAssertTrue(appended); XCTAssertEqual(restored.sessionLinks.orderedRootItems.last, b)
+        let id = config.sessionLinks.entries[0].id
+        let nested = try SessionDirectory.moving(config, profileIDs: [], directories: [], linkIDs: [id], to: "Links/A")!
+        XCTAssertEqual(nested.profiles, config.profiles)
+        XCTAssertEqual(nested.sessionLinks.orderedRootItems, [b, .folder("A"), .folder("B")])
+        XCTAssertEqual(nested.sessionLinks.entries[0].folder, "A")
+        var duplicate = nested; duplicate.sessionLinks.add(profileID: first.id, name: "同源引用")
+        XCTAssertThrowsError(try SessionDirectory.moving(duplicate, profileIDs: [], directories: [], linkIDs: [duplicate.sessionLinks.entries.last!.id], to: "Links/A"))
+        var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(config.sessionLinks)) as! [String: Any]
+        legacy.removeValue(forKey: "rootOrder")
+        let old = try JSONDecoder().decode(SessionLinks.self, from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertEqual(old.orderedRootItems, [.folder("A"), .folder("B"), a, b])
+        config.sessionLinks.rootOrder = ["folder:missing", a.key, a.key]
+        config.sessionLinks.normalize(profiles: config.profiles)
+        XCTAssertEqual(config.sessionLinks.orderedRootItems, [a, .folder("A"), .folder("B"), b])
+        XCTAssertEqual(config.sessionLinks.rootOrder.count, 4)
     }
     func testSessionLinksPersistence() throws {
         let first = SessionProfile(name: "开发", group: "服务器", host: "192.0.2.1", username: "ops")
@@ -570,7 +782,7 @@ final class CoreTests {
         keep.idleText = "\\n"; keep.idleInterval = 0; XCTAssertThrowsError(try keep.validate())
         var config = Configuration(profiles: [SessionProfile(group: "生产/机房/数据库", host: "db.test")])
         config.directories = ["空目录/子目录"]
-        XCTAssertEqual(SessionDirectory.all(config), ["生产", "生产/机房", "生产/机房/数据库", "空目录", "空目录/子目录"].sorted { $0.localizedStandardCompare($1) == .orderedAscending })
+        XCTAssertEqual(SessionDirectory.all(config), ["Links", "生产", "生产/机房", "生产/机房/数据库", "空目录", "空目录/子目录"].sorted { $0.localizedStandardCompare($1) == .orderedAscending })
         XCTAssertEqual(SessionDirectory.normalize(" /生产\\机房// "), "生产/机房")
         XCTAssertEqual(SessionDirectory.display(""), "/")
         XCTAssertEqual(SessionDirectory.display("生产/机房"), "/生产/机房")
@@ -589,6 +801,97 @@ final class CoreTests {
         var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(config)) as! [String: Any]; json.removeValue(forKey: "directories")
         let restored = try JSONDecoder().decode(Configuration.self, from: JSONSerialization.data(withJSONObject: json))
         XCTAssertTrue(restored.directories.contains("生产/机房"))
+    }
+    func testLinksDirectoryCatalog() throws {
+        var original = SessionProfile(name: "源会话", group: "生产/主机", host: "example.test", username: "ops")
+        original.encryptedPassword = try SessionCipher.encrypt("reference-secret", master: "fixture-master", profile: original, identity: SSHIdentity(host: original.host, user: original.username, port: original.port))
+        var config = Configuration(profiles: [original]); config.directories = ["生产/空目录", "Links/从会话管理创建"]
+        config.sessionLinks.add(profileID: original.id, name: "快捷引用", folder: "运维/内网")
+        config.sessionLinks.folders.append("空链接目录")
+        let linkID = config.sessionLinks.entries[0].id
+        let data = try JSONEncoder().encode(config)
+        var loaded = try JSONDecoder().decode(Configuration.self, from: data)
+        XCTAssertEqual(loaded.profiles, [original]); XCTAssertEqual(loaded.sessionLinks.entries[0].id, linkID)
+        XCTAssertTrue(SessionDirectory.all(loaded).contains("Links/运维/内网"))
+        XCTAssertTrue(loaded.sessionLinks.allFolders.contains("从会话管理创建"))
+        XCTAssertTrue(!loaded.directories.contains(where: SessionLinks.containsDirectory))
+        loaded.normalizeSessionLinkDirectories(); let normalized = try JSONEncoder().encode(loaded)
+        let reloaded = try JSONDecoder().decode(Configuration.self, from: normalized)
+        XCTAssertEqual(reloaded.sessionLinks.entries, loaded.sessionLinks.entries); XCTAssertEqual(reloaded.sessionLinks.folders, loaded.sessionLinks.folders)
+        loaded.sessionLinks.removeFolder("空链接目录"); loaded.normalizeSessionLinkDirectories()
+        XCTAssertTrue(!SessionDirectory.all(loaded).contains("Links/空链接目录"))
+        let referenced = try SessionDirectory.moving(loaded, profileIDs: [original.id], directories: [], to: "Links")!
+        XCTAssertEqual(referenced.profiles, [original]); XCTAssertEqual(referenced.sessionLinks.entries.count, 2)
+        XCTAssertNil(try SessionDirectory.moving(referenced, profileIDs: [original.id], directories: [], to: "Links"))
+        XCTAssertThrowsError(try SessionDirectory.moving(referenced, profileIDs: [], directories: [], linkIDs: [linkID], to: "Links"))
+        XCTAssertEqual(referenced.sessionLinks.entries.count, 2)
+        let folderCopy = try SessionDirectory.moving(loaded, profileIDs: [], directories: ["生产"], to: "Links")!
+        XCTAssertEqual(folderCopy.profiles, [original]); XCTAssertTrue(SessionDirectory.all(folderCopy).contains("生产/空目录"))
+        XCTAssertTrue(SessionDirectory.all(folderCopy).contains("Links/生产/空目录"))
+        XCTAssertTrue(folderCopy.sessionLinks.entries.contains { $0.profileID == original.id && $0.folder == "生产/主机" })
+        let movedReference = try SessionDirectory.moving(loaded, profileIDs: [], directories: [], linkIDs: [linkID], to: "Links/从会话管理创建")!
+        XCTAssertEqual(movedReference.profiles, [original]); XCTAssertEqual(movedReference.sessionLinks.entries[0].folder, "从会话管理创建")
+        XCTAssertThrowsError(try SessionDirectory.moving(loaded, profileIDs: [], directories: [], linkIDs: [linkID], to: "生产"))
+        XCTAssertThrowsError(try SessionDirectory.moving(loaded, profileIDs: [], directories: ["Links"], to: "生产"))
+        XCTAssertThrowsError(try SessionDirectory.moving(loaded, profileIDs: [], directories: ["Links/运维"], to: "生产"))
+        let movedFolder = try SessionDirectory.moving(loaded, profileIDs: [], directories: ["Links/运维"], to: "Links/从会话管理创建")!
+        XCTAssertEqual(movedFolder.sessionLinks.entries[0].folder, "从会话管理创建/运维/内网")
+        XCTAssertEqual(movedFolder.profiles, [original])
+        var archive = SessionArchive(profiles: loaded.profiles, directories: SessionDirectory.all(loaded), includePasswords: true, links: loaded.sessionLinks.entries)
+        XCTAssertEqual(archive.version, 3)
+        let decoded = try SessionArchive.decode(archive.encoded()); XCTAssertEqual(decoded.links, archive.links)
+        let imported = try decoded.merging(into: Configuration(profiles: []), directory: "导入", includePasswords: true, sourceMaster: "fixture-master", destinationMaster: "target-master-123")
+        XCTAssertEqual(imported.profiles[0].group, "导入/生产/主机")
+        XCTAssertEqual(imported.sessionLinks.entries[0].profileID, imported.profiles[0].id)
+        XCTAssertTrue(imported.profiles[0].id != original.id)
+        XCTAssertEqual(imported.sessionLinks.entries[0].folder, "运维/内网")
+        XCTAssertTrue(SessionDirectory.all(imported).contains("Links/从会话管理创建"))
+        XCTAssertEqual(try SessionCipher.decrypt(imported.profiles[0].encryptedPassword!, master: "target-master-123", profile: imported.profiles[0]), "reference-secret")
+        let linksImport = try decoded.merging(into: Configuration(profiles: []), directory: "Links/归档", includePasswords: false)
+        XCTAssertEqual(linksImport.sessionLinks.entries[0].folder, "归档/运维/内网")
+        XCTAssertEqual(linksImport.profiles[0].group, original.group)
+        let ordinaryArchive = SessionArchive(profiles: [original], directories: ["生产/空目录"], includePasswords: false)
+        let ordinaryImport = try ordinaryArchive.merging(into: Configuration(profiles: []), directory: "Links", includePasswords: false)
+        XCTAssertEqual(ordinaryImport.sessionLinks.entries[0].profileID, ordinaryImport.profiles[0].id)
+        XCTAssertTrue(SessionDirectory.all(ordinaryImport).contains("Links/生产/空目录"))
+        var hiddenDestination = Configuration(profiles: []); hiddenDestination.sessionLinks.visible = false
+        let hiddenImport = try decoded.merging(into: hiddenDestination, includePasswords: false)
+        XCTAssertTrue(!hiddenImport.sessionLinks.visible)
+        var duplicateLink = archive; duplicateLink.links.append(SessionLink(profileID: original.id, name: "重复引用", folder: archive.links[0].folder))
+        XCTAssertThrowsError(try duplicateLink.validate())
+        archive.links[0].profileID = UUID(); XCTAssertThrowsError(try archive.validate())
+    }
+    func testSessionDirectoryMoves() throws {
+        XCTAssertEqual(try SessionDirectory.childPath(named: " 数据库 ", in: "生产"), "生产/数据库")
+        XCTAssertEqual(try SessionDirectory.childPath(named: ".隐藏", in: ""), ".隐藏")
+        for name in ["", " ", ".", "..", "/生产", "a/b", "a\\b", "a\nb", String(repeating: "字", count: 86)] {
+            XCTAssertThrowsError(try SessionDirectory.childPath(named: name, in: "当前"))
+        }
+        var a = SessionProfile(name: "one", group: "生产/服务/内部", host: "example.test", username: "ops")
+        a.keepAlive.idleEnabled = true; a.keepAlive.idleInterval = 180
+        a.encryptedPassword = try SessionCipher.encrypt("move-fixture", master: "fixture-master", profile: a, identity: SSHIdentity(host: a.host, user: a.username, port: a.port))
+        let b = SessionProfile(name: "two", group: "生产", kind: .ftp, host: "ftp.example.test", port: 21)
+        var config = Configuration(profiles: [a, b]); config.directories = ["生产/服务/空目录", "归档", "其他/服务"]
+        let moved = try SessionDirectory.moving(config, profileIDs: [a.id, b.id], directories: ["生产/服务", "生产/服务/内部"], to: "归档")!
+        var expectedA = a; expectedA.group = "归档/服务/内部"
+        var expectedB = b; expectedB.group = "归档"
+        XCTAssertEqual(moved.profiles, [expectedA, expectedB])
+        XCTAssertTrue(moved.directories.contains("归档/服务/空目录"))
+        XCTAssertTrue(moved.directories.contains("生产"))
+        XCTAssertTrue(!moved.directories.contains("生产/服务"))
+        XCTAssertEqual(try SessionCipher.decrypt(moved.profiles[0].encryptedPassword!, master: "fixture-master", profile: moved.profiles[0]), "move-fixture")
+        XCTAssertEqual(config.profiles, [a, b])
+        let rooted = try SessionDirectory.moving(config, profileIDs: [a.id, b.id], directories: [], to: "")!
+        XCTAssertEqual(rooted.profiles.map(\.group), ["", ""])
+        XCTAssertNil(try SessionDirectory.moving(config, profileIDs: [b.id], directories: ["生产/服务"], to: "生产"))
+        XCTAssertThrowsError(try SessionDirectory.moving(config, profileIDs: [], directories: ["生产"], to: "生产/服务"))
+        XCTAssertThrowsError(try SessionDirectory.moving(config, profileIDs: [], directories: ["生产"], to: "生产"))
+        XCTAssertThrowsError(try SessionDirectory.moving(config, profileIDs: [], directories: ["生产/服务"], to: "其他"))
+        XCTAssertThrowsError(try SessionDirectory.moving(config, profileIDs: [], directories: ["生产/服务", "其他/服务"], to: "归档"))
+        XCTAssertThrowsError(try SessionDirectory.moving(config, profileIDs: [UUID()], directories: [], to: "归档"))
+        XCTAssertThrowsError(try SessionDirectory.moving(config, profileIDs: [a.id], directories: [], to: "不存在"))
+        XCTAssertThrowsError(try SessionDirectory.moving(config, profileIDs: [], directories: [""], to: "归档"))
+        XCTAssertThrowsError(try SessionDirectory.moving(config, profileIDs: [], directories: ["不存在"], to: "归档"))
     }
     func testEncryptedSessionPasswordAndEndpointBinding() throws {
         var profile = SessionProfile(name: "密码测试", host: "example.test", username: "alice")
@@ -908,7 +1211,7 @@ extension CoreTests {
     func testArchiveValidationLimits() throws {
         let config = Configuration()
         let archive = SessionArchive(profiles: config.profiles, directories: [], includePasswords: false)
-        var newer = archive; newer.version = 3; XCTAssertThrowsError(try newer.encoded())
+        var newer = archive; newer.version = 4; XCTAssertThrowsError(try newer.encoded())
         var duplicate = archive; duplicate.profiles += archive.profiles; XCTAssertThrowsError(try duplicate.encoded())
         var invalid = archive; invalid.directories = ["../escaped"]; XCTAssertThrowsError(try invalid.encoded())
         XCTAssertThrowsError(try SessionArchive.decode(Data("{}".utf8)))
@@ -1118,6 +1421,8 @@ extension CoreTests {
         try tests.testLocalCredentialKeyStorage()
         try tests.testMixedLocalPasswordsAndArchives()
         try tests.testQuickSendScopePreference()
+        try tests.testKeyboardShortcuts()
+        try tests.testThirdPartySessionImports()
         try tests.testColorSchemesAndMigration()
         try tests.testColorSchemeImport()
         try tests.testLiveIdleSettingsMerge()
@@ -1125,6 +1430,7 @@ extension CoreTests {
         try tests.testSessionDefaults()
         try tests.testSessionDuplication()
         try tests.testSessionLinksPersistence()
+        try tests.testSessionLinkOrdering()
         tests.testSessionMetadataSearch()
         try tests.testLegacyClientAndFileIO()
         tests.testZmodemProgressCounters()
@@ -1154,6 +1460,8 @@ extension CoreTests {
         try tests.testConnectionOptionsAndMigration()
         try tests.testProxyArgumentsAndCredentialIsolation()
         try tests.testKeepAliveEscapesAndDirectories()
+        try tests.testSessionDirectoryMoves()
+        try tests.testLinksDirectoryCatalog()
         tests.testZFINMissingOOWithKnownShellPrompt()
         tests.testZFINRetriesBeforeAcknowledgementAreBlocked()
         tests.testZFINTrailerKeepsPromptAndBlocksRetransmission()
@@ -1165,7 +1473,7 @@ extension CoreTests {
         tests.testInvalidZmodemHeadersRemainOrdinaryOutput()
         try tests.testLoggerFlushesEveryAcceptedChunk()
         tests.testCancellationDropsInFlightBytesAcrossEveryBoundary()
-        if failures.isEmpty { print("PASS: 52 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
+        if failures.isEmpty { print("PASS: 57 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
         else { failures.forEach { print("FAIL: \($0)") }; exit(1) }
     }
 }

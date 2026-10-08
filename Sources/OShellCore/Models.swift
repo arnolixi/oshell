@@ -24,7 +24,12 @@ public struct SessionProfile: Codable, Equatable, Identifiable {
     public var proxy = ProxySettings()
     public var keepAlive = KeepAliveSettings()
     public var legacySSH = false
-    public var activeHostProbe = false
+    public var titleMode: HostTitleMode = .shellIntegration
+    /// Compatibility for callers using the former opt-in switch.
+    public var activeHostProbe: Bool {
+        get { titleMode == .activeProbe }
+        set { titleMode = newValue ? .activeProbe : .shellIntegration }
+    }
     public var quickConnect = true
     public var initialDirectory = "."
     public init(id: UUID = UUID(), name: String = "新会话", group: String = "服务器", kind: SessionKind = .ssh,
@@ -33,7 +38,8 @@ public struct SessionProfile: Codable, Equatable, Identifiable {
         self.port = port; self.username = username; self.identityFile = identityFile; self.jumpHost = jumpHost
         self.encryptedPassword = nil
     }
-    private enum CodingKeys: String, CodingKey { case id, name, group, kind, host, port, username, identityFile, jumpHost, encryptedPassword, tunnels, proxy, keepAlive, legacySSH, activeHostProbe, quickConnect, initialDirectory }
+    private enum CodingKeys: String, CodingKey { case id, name, group, kind, host, port, username, identityFile, jumpHost, encryptedPassword, tunnels, proxy, keepAlive, legacySSH, titleMode, quickConnect, initialDirectory }
+    private enum LegacyCodingKeys: String, CodingKey { case activeHostProbe }
     public init(from decoder: Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
         self.init(id: try fields.decode(UUID.self, forKey: .id), name: try fields.decode(String.self, forKey: .name),
@@ -46,7 +52,9 @@ public struct SessionProfile: Codable, Equatable, Identifiable {
         proxy = try fields.decodeIfPresent(ProxySettings.self, forKey: .proxy) ?? ProxySettings()
         keepAlive = try fields.decodeIfPresent(KeepAliveSettings.self, forKey: .keepAlive) ?? KeepAliveSettings()
         legacySSH = try fields.decodeIfPresent(Bool.self, forKey: .legacySSH) ?? false
-        activeHostProbe = try fields.decodeIfPresent(Bool.self, forKey: .activeHostProbe) ?? false
+        let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+        titleMode = try fields.decodeIfPresent(HostTitleMode.self, forKey: .titleMode)
+            ?? ((try legacy.decodeIfPresent(Bool.self, forKey: .activeHostProbe) ?? false) ? .activeProbe : .shellIntegration)
         quickConnect = try fields.decodeIfPresent(Bool.self, forKey: .quickConnect) ?? true
         initialDirectory = try fields.decodeIfPresent(String.self, forKey: .initialDirectory) ?? (kind == .ftp ? "/" : ".")
     }
@@ -142,9 +150,10 @@ public struct Preferences: Codable {
     public var masterWarningAcknowledged = false
     public var quickSendBarVisible = true
     public var quickSendScope: QuickSendScope = .current
+    public var keyboardShortcuts = KeyboardShortcuts()
     public var highlightSetID: UUID? = HighlightSet.standardID
     public init() {}
-    private enum CodingKeys: String, CodingKey { case fontName, fontSize, scrollback, darkTheme, metal, autoZmodem, copyOnSelect, rightClickPaste, confirmMultilinePaste, updateRepository, automaticUpdateChecks, masterWarningAcknowledged, quickSendBarVisible, quickSendScope, highlightSetID, interfaceTheme, colorSchemeID, customColorSchemes }
+    private enum CodingKeys: String, CodingKey { case keyboardShortcuts, fontName, fontSize, scrollback, darkTheme, metal, autoZmodem, copyOnSelect, rightClickPaste, confirmMultilinePaste, updateRepository, automaticUpdateChecks, masterWarningAcknowledged, quickSendBarVisible, quickSendScope, highlightSetID, interfaceTheme, colorSchemeID, customColorSchemes }
     public init(from decoder: Decoder) throws {
         self.init()
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -166,10 +175,12 @@ public struct Preferences: Codable {
         masterWarningAcknowledged = try values.decodeIfPresent(Bool.self, forKey: .masterWarningAcknowledged) ?? false
         quickSendBarVisible = try values.decodeIfPresent(Bool.self, forKey: .quickSendBarVisible) ?? true
         quickSendScope = (try values.decodeIfPresent(Int.self, forKey: .quickSendScope)).flatMap(QuickSendScope.init(rawValue:)) ?? .current
+        keyboardShortcuts = try values.decodeIfPresent(KeyboardShortcuts.self, forKey: .keyboardShortcuts) ?? KeyboardShortcuts()
         highlightSetID = values.contains(.highlightSetID) ? try values.decodeIfPresent(UUID.self, forKey: .highlightSetID) : HighlightSet.standardID
     }
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(keyboardShortcuts, forKey: .keyboardShortcuts)
         try values.encode(fontName, forKey: .fontName); try values.encode(fontSize, forKey: .fontSize)
         try values.encode(scrollback, forKey: .scrollback); try values.encode(darkTheme, forKey: .darkTheme)
         try values.encode(metal, forKey: .metal); try values.encode(autoZmodem, forKey: .autoZmodem)
@@ -219,7 +230,7 @@ public struct Configuration: Codable {
         highlightSets = try values.decodeIfPresent([HighlightSet].self, forKey: .highlightSets) ?? [.standard]
         ftpProfiles = try values.decodeIfPresent([FTPProfile].self, forKey: .ftpProfiles) ?? []
         for index in profiles.indices { profiles[index].group = SessionDirectory.normalize(profiles[index].group) }
-        directories = SessionDirectory.all(self)
+        normalizeSessionLinkDirectories()
     }
     public mutating func migrateFileSessions() throws {
         // Preserve identity-bound encrypted passwords. A collision with different
@@ -231,7 +242,7 @@ public struct Configuration: Codable {
                 guard existing.kind == .ftp, existing.ftpProfile == ftp else { throw ModelError.invalid("旧 FTP 配置与会话 ID 冲突，已保留原配置。") }
             } else { migrated.append(session) }
         }
-        profiles = migrated; ftpProfiles = []; directories = SessionDirectory.all(self)
+        profiles = migrated; ftpProfiles = []; normalizeSessionLinkDirectories()
     }
 }
 public final class ConfigurationStore {

@@ -16,6 +16,28 @@ func textEditor(_ text: String, editable: Bool = true) -> (NSScrollView, NSTextV
 }
 
 enum InputDialogs {
+    static func groups(_ groups: [QuickSendGroup], selected: Set<UUID>) -> Set<UUID>? {
+        let alert = PopupAlert(); alert.messageText = "快速发送的目标分组"
+        alert.informativeText = "可选择一个或多个标签组，包括隐藏组。发送时包含组内所有可输入会话及分屏，后来加入的会话也会接收；已断开的标签仍可输入。分组选择仅在当前窗口有效，重启后需重新选择。"
+        alert.addButton(withTitle: "确定"); alert.addButton(withTitle: "取消")
+        let container = NSStackView(); container.orientation = .vertical; container.alignment = .leading; container.spacing = 10
+        let controls: [(UUID, NSButton)] = groups.map { group in
+            let ready = group.panes.filter(\.acceptsManagedInput).count
+            let button = NSButton(checkboxWithTitle: group.title + (group.hidden ? "（隐藏）" : "") + " · \(ready)/\(group.panes.count) 个会话可输入", target: nil, action: nil)
+            button.identifier = .init("quickSend.group." + group.id.uuidString)
+            button.state = selected.contains(group.id) ? .on : .off
+            button.toolTip = group.panes.isEmpty ? "空分组；后来加入的会话也会接收。" : group.panes.map { $0.title + " · " + $0.profile.name }.joined(separator: "\n")
+            button.lineBreakMode = .byTruncatingTail
+            container.addArrangedSubview(button); return (group.id, button)
+        }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 580, height: min(320, max(60, groups.count * 30))))
+        scroll.hasVerticalScroller = true
+        container.frame = NSRect(x: 0, y: 0, width: 560, height: max(60, groups.count * 30)); scroll.documentView = container
+        alert.accessoryView = scroll
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return Set(controls.filter { $0.1.state == .on }.map { $0.0 })
+    }
+
     static func targets(_ panes: [TerminalPane], selected: Set<UUID>, title: String) -> Set<UUID>? {
         let alert = PopupAlert(); alert.messageText = title; alert.informativeText = "只发送到勾选的终端标签。已断开的标签仍接收本地输入，可用 exit / quit 关闭；登录、传输或交互式本机工具运行中暂不可选。新建会话不会自动加入。"
         alert.addButton(withTitle: "确定"); alert.addButton(withTitle: "取消")

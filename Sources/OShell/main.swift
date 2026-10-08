@@ -9,7 +9,7 @@ import Darwin
 // without taking keyboard focus from the user's foreground application.
 private let backgroundTransferTest = ProcessInfo.processInfo.environment["OSHELL_BACKGROUND_TEST"] == "1"
     && ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] != nil
-    && CommandLine.arguments.contains(where: { ["--zmodem-progress-test", "--zmodem-regression-test", "--file-feature-test", "--search-test", "--host-identity-test", "--session-links-test", "--session-defaults-test", "--shell-integration-test", "--live-keepalive-test", "--appearance-test", "--quicksend-persistence-test", "--local-password-test", "--management-test", "--startup-protection-test", "--tab-drag-test", "--tab-actions-test", "--master-removal-test", "--update-feature-test", "--update-integration-test", "--terminal-focus-test"].contains($0) })
+    && CommandLine.arguments.contains(where: { ["--third-party-import-test", "--keyboard-shortcuts-test", "--toolbar-actions-test", "--quicksend-groups-test", "--tab-behavior-test", "--layout-test", "--zmodem-progress-test", "--zmodem-regression-test", "--file-feature-test", "--search-test", "--host-identity-test", "--session-links-test", "--session-defaults-test", "--shell-integration-test", "--live-keepalive-test", "--appearance-test", "--quicksend-persistence-test", "--local-password-test", "--management-test", "--startup-protection-test", "--tab-drag-test", "--tab-actions-test", "--master-removal-test", "--update-feature-test", "--update-integration-test", "--terminal-focus-test", "--terminal-symbols-test", "--session-directory-test", "--quicksend-focus-test", "--arrangement-scroll-test", "--tab-number-test", "--links-catalog-test", "--named-tab-groups-test"].contains($0) })
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: WorkspaceController!
@@ -34,6 +34,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_ZOC_CLONE_TEST_ROOT"] != nil { SSHCloneTest.run(controller) }
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_ZOC_TEST_ROOT"] != nil { ZOCLaunchTest.run(controller) }
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
+        if CommandLine.arguments.contains("--named-tab-groups-test") { NamedTabGroupsTest.run(controller) }
+        if CommandLine.arguments.contains("--links-catalog-test") { LinksCatalogTest.run(controller) }
+        if CommandLine.arguments.contains("--tab-number-test") { TabNumberTest.run(controller) }
+        if CommandLine.arguments.contains("--arrangement-scroll-test") { ArrangementScrollTest.run(controller) }
+        if CommandLine.arguments.contains("--third-party-import-test") { ThirdPartyImportTest.run(controller) }
+        if CommandLine.arguments.contains("--keyboard-shortcuts-test") { KeyboardShortcutsTest.run(controller) }
+        if CommandLine.arguments.contains("--toolbar-actions-test") { ToolbarActionsTest.run(controller) }
+        if CommandLine.arguments.contains("--quicksend-groups-test") { QuickSendGroupsTest.run(controller) }
+        if CommandLine.arguments.contains("--quicksend-focus-test") { QuickSendFocusTest.run(controller) }
+        if CommandLine.arguments.contains("--session-directory-test") { SessionDirectoryTest.run(controller) }
+        if CommandLine.arguments.contains("--terminal-symbols-test") { TerminalSymbolsTest.run(controller) }
         if CommandLine.arguments.contains("--terminal-focus-test") { TerminalFocusTest.run(controller) }
         if CommandLine.arguments.contains("--update-feature-test") { UpdateFeatureTest.run(controller) }
         if CommandLine.arguments.contains("--update-integration-test") { UpdateIntegrationTest.run(controller) }
@@ -111,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(file, "导入会话…", #selector(WorkspaceController.importSessions))
         add(file, "导出全部会话…", #selector(WorkspaceController.exportSessions))
         add(file, "会话默认属性…", #selector(WorkspaceController.showSessionDefaults))
+        add(file, "当前会话完整属性…", #selector(WorkspaceController.editCurrentSessionProfile))
         add(file, "当前会话属性…", #selector(WorkspaceController.showCurrentSessionProperties))
         add(file, "新建会话…", #selector(WorkspaceController.newSession), "n")
         add(file, "连接所选会话", #selector(WorkspaceController.connectSelected), "\r")
@@ -130,6 +142,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(edit, "下一个匹配", #selector(WorkspaceController.findNextInTerminal), "g")
         add(edit, "上一个匹配", #selector(WorkspaceController.findPreviousInTerminal), "g", [.command, .shift])
         let view = menu("视图")
+        add(view, "新建标签组…", #selector(WorkspaceController.newNamedTabGroup))
+        add(view, "显示全部标签组", #selector(WorkspaceController.showAllTabGroups))
+        view.addItem(.separator())
         for mode in TabArrangement.allCases {
             add(view, mode.title, #selector(WorkspaceController.changeArrangement(_:)))
             view.items.last?.tag = mode.rawValue; view.items.last?.toolTip = mode.hint
@@ -141,9 +156,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(view, "下一个标签", #selector(WorkspaceController.nextTab), "\t", .control)
         add(view, "上一个标签", #selector(WorkspaceController.previousTab), "\t", [.control, .shift])
         add(view, "切回最近使用的标签", #selector(WorkspaceController.lastUsedTab), "`", .control)
+        let numberedItem = NSMenuItem(title: "按编号跳转", action: nil, keyEquivalent: "")
+        let numberedMenu = NSMenu(title: "按编号跳转"); numberedItem.submenu = numberedMenu; view.addItem(numberedItem)
+        for number in 1...9 {
+            add(numberedMenu, "跳到标签 \(number)", #selector(WorkspaceController.selectNumberedTab(_:)), String(number))
+            numberedMenu.items.last?.tag = number
+        }
+        add(numberedMenu, "输入标签编号…", #selector(WorkspaceController.chooseTabNumber), "0")
         add(view, "刷新标题识别", #selector(WorkspaceController.refreshCurrentHostIdentity))
         view.items.last?.toolTip = "在目标主机的 shell 命令提示符下使用，只读获取当前主机名和 IP。"
         let tools = menu("工具")
+        add(tools, "链接栏", #selector(WorkspaceController.toggleSessionLinkBar))
+        add(tools, "快速命令管理器…", #selector(WorkspaceController.showQuickCommands))
         add(tools, "快速发送栏", #selector(WorkspaceController.toggleQuickSendBar))
         add(tools, "定位快速发送栏", #selector(WorkspaceController.focusQuickSendBar), "k", [.command, .shift])
         add(tools, "撰写窗", #selector(WorkspaceController.toggleComposer), "i", [.command, .shift])
@@ -155,6 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let window = menu("窗口"); NSApp.windowsMenu = window
         add(window, "最小化", #selector(NSWindow.performMiniaturize(_:)), "m", target: nil); window.items.last?.target = nil
         NSApp.mainMenu = root
+        ShortcutRuntime.install(controller.configuration.preferences.keyboardShortcuts, menu: root)
     }
 }
 

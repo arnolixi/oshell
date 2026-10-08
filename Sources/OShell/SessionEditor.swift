@@ -7,12 +7,11 @@ import OShellCore
 final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private var profile: SessionProfile
     private let original: SessionProfile?
-    private let directoryBase: String
     private let defaults: SessionDefaults
     private let profiles: [SessionProfile]
     private let alert = PopupAlert()
     private let pages = NSTabView()
-    private let name = NSTextField(), directory = NSComboBox(), host = NSTextField(), port = NSTextField(), user = NSTextField(), key = NSTextField()
+    private let name = NSTextField(), directory = SessionDirectoryPicker(), host = NSTextField(), port = NSTextField(), user = NSTextField(), key = NSTextField()
     private let password = NSSecureTextField(), remember = NSButton(checkboxWithTitle: "保存密码", target: nil, action: nil)
     private let passwordProtection = NSPopUpButton(), proxyProtection = NSPopUpButton()
     private let proxyKind = NSPopUpButton(), proxyHost = NSTextField(), proxyPort = NSTextField(), proxyUser = NSTextField(), proxyPassword = NSSecureTextField()
@@ -24,7 +23,8 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
     private let idle = NSButton(checkboxWithTitle: "终端空闲时发送字符串", target: nil, action: nil)
     private let idleInterval = NSTextField(), idleText = NSTextField()
     private let quick = NSButton(checkboxWithTitle: "显示在顶部快捷连接菜单", target: nil, action: nil)
-    private let activeProbe = NSButton(checkboxWithTitle: "允许主动探测主机名/IP（可能写入命令历史）", target: nil, action: nil)
+    private let titleMode = NSPopUpButton()
+    private let titleModeNote = NSTextField(wrappingLabelWithString: "")
     var dialog: PopupAlert { alert }
     var pageTitles: [String] { pages.tabViewItems.map(\.label) }
     private let tunnels = NSTableView()
@@ -33,18 +33,16 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
     private var allPages = [NSTabViewItem]()
     private var lastKind: SessionKind = .ssh
     init(_ existing: SessionProfile?, profiles: [SessionProfile], directories: [String], initialDirectory: String, kind: SessionKind = .ssh, defaults: SessionDefaults = SessionDefaults()) {
-        directoryBase = existing?.group ?? initialDirectory
         original = existing; profile = existing ?? defaults.makeProfile(kind: kind, directory: initialDirectory); self.profiles = profiles; self.defaults = defaults
         lastKind = profile.kind
         super.init()
         alert.messageText = existing == nil ? "新建会话" : "会话属性"
         alert.informativeText = "配置在下次新建连接时生效。密码可由 OShell 本机自动加密，无需主密码；也可选择主密码保护。不使用系统钥匙串。"
         alert.addButton(withTitle: "保存"); alert.addButton(withTitle: "取消")
-        name.stringValue = profile.name; directory.stringValue = SessionDirectory.display(profile.group)
+        name.stringValue = profile.name; directory.configure(directories: directories, selected: profile.group)
         name.identifier = .init("session.name"); host.identifier = .init("session.host"); port.identifier = .init("session.port")
         user.identifier = .init("session.user"); interval.identifier = .init("session.keepAlive.interval")
         directory.identifier = .init("session.directory")
-        directory.addItems(withObjectValues: ["/"] + Array(Set(directories.map(SessionDirectory.display))).filter { $0 != "/" }.sorted { $0.localizedStandardCompare($1) == .orderedAscending }); directory.completes = true
         host.stringValue = profile.host; host.placeholderString = "主机地址或 SSH 配置别名"
         port.stringValue = String(profile.port); user.stringValue = profile.username
         user.placeholderString = "留空使用 SSH 默认用户"
@@ -65,8 +63,6 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
         }
         let passwordStorage = NSStackView(views: [remember, passwordProtection]); passwordStorage.spacing = 8
         let proxyStorage = NSStackView(views: [proxyRemember, proxyProtection]); proxyStorage.spacing = 8
-        directory.placeholderString = "/生产/机房/数据库"
-        directory.toolTip = "会话管理目录；/ 表示根目录。相对路径基于 \(SessionDirectory.display(directoryBase))，支持 . 和 ..；这不是服务器的文件目录。"
         legacy.state = profile.legacySSH ? .on : .off
         protocolKind.addItems(withTitles: ["SSH", "SFTP", "FTP"])
         protocolKind.selectItem(at: [.ssh, .sftp, .ftp].firstIndex(of: profile.kind) ?? 0)
@@ -102,12 +98,18 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
         addPage("保持活动", rows: [("默认配置", button("使用全局默认", #selector(useDefaultKeepAlive))), ("", alive), ("间隔（秒）", interval), ("最大未响应次数", missed), ("", tcp), ("", idle), ("空闲间隔（秒）", idleInterval), ("发送字符串", idleText)], note: "空闲字符串在登录成功后发送到终端，可执行命令；支持 \\n、\\r、\\t、\\e、\\\\。输入、输出或文件传输期间不发送。SSH 保活消息不会输入命令。默认属性可在会话管理右键菜单中配置；点击使用默认后需保存才生效。")
         [alive, idle].forEach { $0.target = self; $0.action = #selector(keepAliveChanged) }
         quick.state = profile.quickConnect ? .on : .off
-        activeProbe.state = profile.activeHostProbe ? .on : .off
-        addPage("标签与快捷连接", rows: [("", quick), ("", activeProbe)], note: "默认优先接收 Shell 集成上报；未配置脚本时，自动降级为提示符、OSC 0/2 标题和 OSC 7 目录识别，不输入探测命令。无法确认 IP 时显示待识别，不沿用上一层地址。仅在明确需要旧探测方式时勾选此项；收到集成上报后，该连接停止后续主动探测。")
+        titleMode.identifier = .init("session.titleMode")
+        titleMode.addItems(withTitles: HostTitleMode.allCases.map(\.title))
+        titleMode.selectItem(at: HostTitleMode.allCases.firstIndex(of: profile.titleMode)!)
+        titleMode.target = self; titleMode.action = #selector(titleModeChanged)
+        titleModeNote.font = .systemFont(ofSize: 11); titleModeNote.textColor = .secondaryLabelColor
+        titleModeChanged()
+        addPage("标签与快捷连接", rows: [("", quick), ("标题识别方式", titleMode), ("", titleModeNote)], note: "标签仅显示当前主机名。鼠标悬停可查看当前主机 IP、SSH 配置地址、端口、用户名和实际连接对端；无法确认的信息显示为未获取。配置在下次新建连接时生效。")
         pages.frame = NSRect(x: 0, y: 0, width: 680, height: 500); alert.accessoryView = pages
         alert.window.initialFirstResponder = name
         allPages = pages.tabViewItems; protocolChanged(); proxyChanged(); keepAliveChanged()
     }
+    @objc private func titleModeChanged() { titleModeNote.stringValue = HostTitleMode.allCases[titleMode.indexOfSelectedItem].explanation }
     private func label(_ text: String) -> NSTextField { let view = NSTextField(wrappingLabelWithString: text); view.font = .systemFont(ofSize: 11); view.textColor = .secondaryLabelColor; return view }
     private func button(_ text: String, _ action: Selector) -> NSButton { let b = NSButton(title: text, target: self, action: action); b.bezelStyle = .rounded; return b }
     private func addPage(_ title: String, rows: [(String, NSView)], note: String? = nil) {
@@ -140,7 +142,7 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
         }
         lastKind = kind
         key.isEnabled = kind.usesSSH; legacy.isEnabled = kind.usesSSH
-        activeProbe.isEnabled = kind.usesSSH
+        titleMode.isEnabled = kind == .ssh
         host.placeholderString = kind == .ftp ? "FTP 主机地址" : "主机地址或 SSH 配置别名"
         user.placeholderString = kind == .ftp ? "例如 anonymous" : "留空使用 SSH 默认用户"
         for item in pages.tabViewItems { pages.removeTabViewItem(item) }
@@ -190,13 +192,12 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
             profile.keepAlive.tcp = tcp.state == .on; profile.keepAlive.idleEnabled = profile.kind == .ssh && idle.state == .on
             profile.keepAlive.idleInterval = Int(idleInterval.stringValue) ?? 0; profile.keepAlive.idleText = idleText.stringValue
             profile.quickConnect = quick.state == .on
-            profile.activeHostProbe = activeProbe.state == .on
+            profile.titleMode = HostTitleMode.allCases[titleMode.indexOfSelectedItem]
             if profile.kind == .ftp {
                 profile.identityFile = ""; profile.jumpHost = ""; profile.proxy = ProxySettings(); profile.tunnels = []; profile.legacySSH = false; profile.keepAlive = KeepAliveSettings()
             }
             do {
-                profile.group = try SessionDirectory.resolvePath(directory.stringValue, relativeTo: directoryBase)
-                directory.stringValue = SessionDirectory.display(profile.group)
+                profile.group = directory.selectedDirectory
                 try profile.validate()
                 let known = profiles + profiles.filter { $0.proxy.encryptedPassword != nil }.map { $0.proxy.credentialProfile }
                 func protect(_ input: String, destination: SessionProfile, old: SessionProfile?, selection: NSPopUpButton, explicitIdentity: Bool) throws -> EncryptedPassword? {

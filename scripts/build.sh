@@ -43,6 +43,8 @@ cp "$helper_source/src/lrz" "$helper_source/src/lsz" "$app_dir/Contents/Helpers/
 ln -sf lrz "$app_dir/Contents/Helpers/rz"
 ln -sf lsz "$app_dir/Contents/Helpers/sz"
 cp -R "$binary_dir/SwiftTerm_SwiftTerm.bundle" "$app_dir/Contents/Resources/"
+rm -rf "$app_dir/Contents/Resources/NerdFonts"
+cp -R "$project_root/Vendor/NerdFonts" "$app_dir/Contents/Resources/NerdFonts"
 cp "$project_root/LICENSE" "$app_dir/Contents/Resources/OShell-LICENSE.txt"
 cp "$project_root/THIRD_PARTY_NOTICES.txt" "$app_dir/Contents/Resources/"
 cp "$project_root/Vendor/ColorSchemes/LICENSE" "$app_dir/Contents/Resources/ColorSchemes-LICENSE.txt"

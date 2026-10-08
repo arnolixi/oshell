@@ -36,6 +36,8 @@ enum Dialogs {
                                      [NSTextField(labelWithString: ""), gpu],
                                      [NSTextField(labelWithString: ""), zmodem], [NSTextField(labelWithString: ""), autoCopy], [NSTextField(labelWithString: ""), rightPaste], [NSTextField(labelWithString: ""), previewPaste]])
         grid.rowSpacing = 12; grid.columnSpacing = 18; grid.frame = NSRect(x: 0, y: 0, width: 500, height: 330)
+        let shortcutView = ShortcutSettingsView(settings: current.keyboardShortcuts)
+        defer { shortcutView.dispose() }
         let appearanceView = AppearanceSettingsView(preferences: current)
         defer { appearanceView.dispose() }
         let tabs = NSTabView(frame: NSRect(x: 0, y: 0, width: 840, height: 550))
@@ -45,11 +47,12 @@ enum Dialogs {
         let colors = NSTabViewItem(identifier: "appearance"); colors.label = "主题与配色"; colors.view = appearanceView; tabs.addTabViewItem(colors)
         let updatesView = UpdateSettingsView(preferences: current)
         let updates = NSTabViewItem(identifier: "updates"); updates.label = "更新"; updates.view = updatesView; tabs.addTabViewItem(updates)
+        let shortcuts = NSTabViewItem(identifier: "shortcuts"); shortcuts.label = "快捷键"; shortcuts.view = shortcutView; tabs.addTabViewItem(shortcuts)
         tabs.selectTabViewItem(at: updatesSelected ? 2 : (appearanceSelected ? 1 : 0)); alert.accessoryView = tabs
         var prefs = current
         while true {
             guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-            do { prefs = try updatesView.values(updating: appearanceView.values(updating: current)); break }
+            do { prefs = try updatesView.values(updating: appearanceView.values(updating: current)); prefs.keyboardShortcuts = try shortcutView.values(); break }
             catch { Dialogs.message(error.localizedDescription) }
         }
         prefs.fontName = font.selectedItem?.representedObject as? String ?? ""

@@ -6,8 +6,9 @@ import argparse,json,os,pathlib,posixpath,re,subprocess,sys
 ROOT=pathlib.Path(__file__).resolve().parent.parent
 RULES={
  'personal-home-path':re.compile(rb'(?:/Users|/home)/[A-Za-z0-9_.-]+/'),
+ 'windows-home-path':re.compile(rb'(?i)[a-z]:(?:\\+|/)(?:Users|Documents and Settings)(?:\\+|/)[^\\/\r\n\x00]+'),
  'workstation-temp-path':re.compile(rb'(?:/private)?/var/folders/[A-Za-z0-9]{2}/[A-Za-z0-9_-]{12,}/'),
- 'private-key-material':re.compile(rb'-----BEGIN (?:OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----'),
+ 'private-key-material':re.compile(rb'-----BEGIN (?:ENCRYPTED |OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----'),
  'github-token':re.compile(rb'(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})'),
  'cloud-access-key':re.compile(rb'AKIA[A-Z0-9]{16}')}
 def git(*args):return subprocess.check_output(['git','-C',str(ROOT),*args])
@@ -17,19 +18,37 @@ def forbidden(path):
          (p.parts[0]=='validation' and path!='validation/.gitkeep') or
          p.name in ['PROJECT_STATE.md','VALIDATION.md','configuration.json','local-credential-key.json','known_hosts','.DS_Store','.netrc','.npmrc','id_rsa','id_dsa','id_ecdsa','id_ed25519'] or
          ((p.name.startswith('.env') or p.name.endswith('.env') or '.env.' in p.name) and not p.name.endswith('.env.example') and p.name!='.env.example') or
-         p.name.endswith('.oshell.json') or '.ssh' in p.parts or '.aws' in p.parts or
+         p.name.endswith('.oshell.json') or p.suffix.lower() in ['.xsh','.xts','.xfp'] or '.ssh' in p.parts or '.aws' in p.parts or
          ('xcuserdata' in p.parts or '__pycache__' in p.parts) or p.suffix.lower() in ['.key','.pem','.p12','.pfx','.log','.pyc','.xcuserstate','.code-workspace'] or
          any(x.endswith('.dSYM') for x in p.parts))
 def audit(path,data,private_patterns,app=False):
  findings=[]
  if not app and forbidden(path):findings.append('excluded-local-file')
+ # Wide-character strings occur in Windows exports and some binary metadata.
+ views=[data]
+ if b'\0' in data:views.append(data.replace(b'\0',b''))
  if not app and not path.startswith('Vendor/'):
-  findings.extend(name for name,rule in RULES.items() if rule.search(data))
+  findings.extend(name for name,rule in RULES.items() if any(rule.search(view) for view in views))
+  suffix=pathlib.PurePosixPath(path).suffix.lower()
+  if suffix=='.json':
+   try:
+    value=json.loads(data)
+    if isinstance(value,dict) and (value.get('format')=='OShell.sessions' or ('profiles' in value and 'preferences' in value)):findings.append('session-configuration')
+   except (ValueError,UnicodeError):pass
+  if suffix=='.xml' and any(re.search(rb'<VanDyke(?:\s|>)',view,re.I) for view in views):findings.append('external-session-export')
+  if suffix=='.ini' and any(re.search(rb'(?m)^\s*S:"(?:Hostname|Protocol Name)"=',view) for view in views):findings.append('external-session-export')
  else:
-  # Upstream attribution is public; never silently rewrite vendor binaries.
-  if str(pathlib.Path.home()).encode() in data or str(ROOT).encode() in data:findings.append('current-workstation-path')
+  # Preserve public upstream attribution; detect this workstation in vendor/app bytes.
+  if any(str(pathlib.Path.home()).encode() in view or str(ROOT).encode() in view for view in views):findings.append('current-workstation-path')
+ local_user=pathlib.Path.home().name
+ if local_user.lower() not in ['root','runner','user','admin','administrator','build','builder','nobody']:
+  identity=re.compile(rb'(?i)(?<![a-z0-9])'+re.escape(local_user.encode())+rb'(?![a-z0-9])')
+  if any(identity.search(view) for view in views+[path.encode()]):findings.append('current-workstation-identity')
  for pattern in private_patterns:
-  if pattern.encode() in data:findings.append('private-pattern')
+  value=pattern.casefold().encode()
+  if not value:continue
+  expression=(rb'(?<![a-z0-9])' if re.match(rb'[a-z0-9]',value) else b'')+re.escape(value)+(rb'(?![a-z0-9])' if re.search(rb'[a-z0-9]$',value) else b'')
+  if any(re.search(expression,view.lower()) for view in views+[path.encode()]):findings.append('private-pattern')
  return sorted(set(findings))
 def blobs(entries):
  process=subprocess.Popen(['git','-C',str(ROOT),'cat-file','--batch'],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
@@ -53,6 +72,11 @@ def inspect(args):
   commits=git('rev-list',*(['--all'] if ref is None else [ref])).decode().split()
   unique={}
   for commit in commits:
+   # Author/committer identities are intentionally retained. Commit messages can
+   # still accidentally contain workstation paths or credentials.
+   message=git('show','-s','--format=%B',commit)
+   rules=audit('commit-message',message,private_patterns)
+   if rules:findings.append({'path':'commit:'+commit[:12]+':message','rules':rules})
    for row in git('ls-tree','-r','-z',commit).split(b'\0'):
     if not row:continue
     meta,name=row.split(b'\t',1);mode,kind,oid=meta.split()

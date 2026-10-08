@@ -22,4 +22,16 @@ with tempfile.TemporaryDirectory(prefix='oshell-public-check-') as folder:
  (root/'link').symlink_to('../outside.key');git('add','link');assert not report()['passed'];git('rm','-f','link')
  (root/'link').symlink_to('README.md');git('add','link');assert report()['passed']
  app=root/'Fixture.app';app.mkdir();binary=app/'fixture';binary.write_bytes(b'\0'+str(pathlib.Path.home()).encode()+b'/private-file');assert not report(app=app)['passed']
-print('PASS: clean index, excluded file, personal path, historical leak, token, unsafe/safe symlinks, binary build path')
+ # New import formats must not accidentally become source-control data.
+ for name,body in [('sessions.xsh','[CONNECTION]'),('sessions.xts','fixture'),('sessions.xfp','fixture'),('sessions.ini','S:"Hostname"=example.test'),('export.xml','<VanDyke><key name="Sessions"/></VanDyke>'),('renamed.json','{"format":"OShell.sessions","profiles":[]}')]:
+  (root/name).write_text(body);git('add',name);assert not report()['passed'];git('rm','-f',name)
+ windows='C:'+chr(92)+'Users'+chr(92)+'fixture-private'+chr(92)+'document.txt'
+ (root/'wide.txt').write_bytes(windows.encode('utf-16le'));git('add','wide.txt');assert not report()['passed'];git('rm','-f','wide.txt')
+ git('commit','--allow-empty','-m','fixture message '+('/Us'+'ers/private-fixture/notes'))
+ assert not report(history='main')['passed']
+ patterns=root/'private-patterns.json';patterns.write_text('["fixture-person", "private-fixture-id"]')
+ args=argparse.Namespace(private_patterns=patterns,app=None,history=None,working_tree=False,index=True)
+ (root/'safe.txt').write_text('public fixture');git('add','safe.txt');assert audit.inspect(args)['passed']
+ (root/'safe.txt').write_text('FIXTURE-PERSON');git('add','safe.txt');assert not audit.inspect(args)['passed'];git('rm','-f','safe.txt')
+ (root/'fixture-person.txt').write_text('public fixture');git('add','fixture-person.txt');assert not audit.inspect(args)['passed'];git('rm','-f','fixture-person.txt')
+print('PASS: clean index, excluded file, personal path, historical leak, token, unsafe/safe symlinks, binary build path, external exports, Windows/UTF-16 paths, commit messages and private identifiers')

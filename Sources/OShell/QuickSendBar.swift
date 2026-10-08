@@ -85,18 +85,22 @@ final class QuickSendBar: NSView, NSTextFieldDelegate, NSMenuDelegate {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func update(scope: QuickSendScope, ready: [TerminalPane], skipped: Int, commands: [QuickCommand]) {
+    func update(scope: QuickSendScope, ready: [TerminalPane], skipped: Int, commands: [QuickCommand], groupContext: String? = nil) {
         saved = commands
         let menu = NSMenu(); menu.autoenablesItems = false
-        let title = scope == .selected ? "已选会话" : scope.title.replacingOccurrences(of: "（本窗口）", with: "")
+        let title: String
+        if scope == .currentGroup { title = "当前分组 · " + (groupContext ?? "无") }
+        else if scope == .selectedGroups { title = "选择分组" }
+        else { title = scope == .selected ? "已选会话" : scope.title.replacingOccurrences(of: "（本窗口）", with: "") }
         menu.addItem(withTitle: "\(title) · \(ready.count)", action: nil, keyEquivalent: "")
         for value in QuickSendScope.allCases {
             let item = menu.addItem(withTitle: value.title, action: #selector(chooseScope(_:)), keyEquivalent: "")
             item.target = self; item.tag = value.rawValue; item.state = value == scope ? .on : .off
         }
         scopeButton.menu = menu
+        scopeButton.cell?.lineBreakMode = .byTruncatingTail
         scopeButton.oshellContentTintColor = ready.count > 1 ? .systemOrange : nil
-        scopeButton.toolTip = "实际接收 \(ready.count) 个终端会话" + (scope == .selected && ready.isEmpty ? "；请重新选择目标会话" : "") + (skipped > 0 ? "，跳过 \(skipped) 个登录、传输、交互式本机工具运行中或已关闭的标签" : "") + "\n" + ready.map { "\($0.title) · \($0.profile.name)" + ($0.ended ? " · 已断开（本地输入）" : "") }.joined(separator: "\n")
+        scopeButton.toolTip = (groupContext.map { "目标分组：" + $0 + "\n" } ?? "") + "实际接收 \(ready.count) 个终端会话" + (scope == .selected && ready.isEmpty ? "；请重新选择目标会话" : "") + (scope == .selectedGroups && ready.isEmpty ? "；请检查所选分组及会话状态" : "") + (skipped > 0 ? "，跳过 \(skipped) 个登录、传输、交互式本机工具运行中或已关闭的标签" : "") + "\n" + ready.map { "\($0.title) · \($0.profile.name)" + ($0.ended ? " · 已断开（本地输入）" : "") }.joined(separator: "\n")
         sendButton.isEnabled = !ready.isEmpty
         if historyButton.menu?.items.isEmpty != false { rebuildHistoryMenu() }
     }

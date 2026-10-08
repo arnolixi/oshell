@@ -9,22 +9,37 @@ public struct SessionArchive: Codable {
     public var version = 2
     public var profiles: [SessionProfile]
     public var directories: [String]
+    public var links: [SessionLink] = []
     public var passwordCount: Int { profiles.reduce(0) { $0 + ($1.encryptedPassword == nil ? 0 : 1) + ($1.proxy.encryptedPassword == nil ? 0 : 1) } }
     public static let maximumBytes = 16 * 1024 * 1024
-    public init(profiles: [SessionProfile], directories: [String], includePasswords: Bool) {
-        self.profiles = profiles; self.directories = directories
+    public init(profiles: [SessionProfile], directories: [String], includePasswords: Bool, links: [SessionLink] = []) {
+        self.profiles = profiles; self.directories = directories; self.links = links; version = links.isEmpty ? 2 : 3
         if !includePasswords {
             for index in self.profiles.indices { self.profiles[index].encryptedPassword = nil; self.profiles[index].proxy.encryptedPassword = nil }
         }
     }
+    private enum CodingKeys: String, CodingKey { case format, version, profiles, directories, links }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        format = try values.decode(String.self, forKey: .format); version = try values.decode(Int.self, forKey: .version)
+        profiles = try values.decode([SessionProfile].self, forKey: .profiles); directories = try values.decode([String].self, forKey: .directories)
+        links = try values.decodeIfPresent([SessionLink].self, forKey: .links) ?? []
+    }
     public func validate() throws {
-        guard format == "OShell.sessions", (1...2).contains(version), version >= 2 || !profiles.contains(where: { $0.kind.isFileSession }) else { throw ModelError.invalid("不是受支持的 OShell 会话导出文件，或文件版本过新。") }
-        guard profiles.count <= 2000, directories.count <= 4000,
+        guard format == "OShell.sessions", (1...3).contains(version), version >= 2 || !profiles.contains(where: { $0.kind.isFileSession }) else { throw ModelError.invalid("不是受支持的 OShell 会话导出文件，或文件版本过新。") }
+        guard profiles.count <= 2000, directories.count <= 4000, links.count <= 4000, version >= 3 || links.isEmpty,
               Set(profiles.map(\.id)).count == profiles.count else { throw ModelError.invalid("会话文件过大或包含重复的会话 ID。") }
-        for path in directories + profiles.map(\.group) {
+        for path in directories + profiles.map(\.group) + links.map(\.folder) {
             guard path.utf8.count <= 2048, path.split(separator: "/").count <= 32,
                   !path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
                   path == SessionDirectory.normalize(path) else { throw ModelError.invalid("会话目录路径无效。") }
+        }
+        let ids = Set(profiles.map(\.id))
+        guard Set(links.map(\.id)).count == links.count,
+              Set(links.map { $0.profileID.uuidString + "/" + $0.folder }).count == links.count else { throw ModelError.invalid("快捷引用 ID 或目录位置重复。") }
+        for link in links {
+            guard ids.contains(link.profileID), !link.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  link.name.utf8.count <= 1024, !link.name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { throw ModelError.invalid("快捷引用缺少源会话，或名称无效。") }
         }
         for profile in profiles { try profile.validate() }
     }
@@ -57,8 +72,10 @@ public struct SessionArchive: Codable {
             try ConfigurationCredentials.validateNewMaster(destinationMaster)
             if destinationLocalKeyID == nil { try ConfigurationCredentials.verify(configuration, master: destinationMaster, check: check) }
         }
-        let prefix = SessionDirectory.normalize(directory)
-        func path(_ value: String) -> String { [prefix, value].filter { !$0.isEmpty }.joined(separator: "/") }
+        let prefix = SessionDirectory.normalize(directory), linkDestination = SessionLinks.folder(for: SessionDirectory.normalize(directory))
+        func path(_ value: String) -> String { [linkDestination == nil ? prefix : "", value].filter { !$0.isEmpty }.joined(separator: "/") }
+        func linkFolder(_ value: String) -> String { [linkDestination ?? "", value].filter { !$0.isEmpty }.joined(separator: "/") }
+        var importedIDs = [UUID: UUID]()
         func rebind(_ source: SessionProfile, to destination: SessionProfile) throws -> EncryptedPassword? {
             try check()
             guard includePasswords, let envelope = source.encryptedPassword else { return nil }
@@ -71,6 +88,7 @@ public struct SessionArchive: Codable {
         for source in profiles {
             try check()
             var next = source; next.id = UUID(); next.proxy.id = UUID(); next.group = path(source.group)
+            importedIDs[source.id] = next.id
             var suffix = 1
             while result.profiles.contains(where: { $0.group == next.group && $0.name == next.name }) {
                 next.name = source.name + "（导入副本\(suffix == 1 ? "" : " \(suffix)")）"; suffix += 1
@@ -79,8 +97,27 @@ public struct SessionArchive: Codable {
             next.proxy.encryptedPassword = try rebind(source.proxy.credentialProfile, to: next.proxy.credentialProfile)
             result.profiles.append(next)
         }
-        result.directories += directories.map(path)
-        result.directories = SessionDirectory.all(result)
+        result.directories += directories.filter { !SessionLinks.containsDirectory($0) }.map(path)
+        result.sessionLinks.folders += directories.compactMap { SessionLinks.folder(for: $0) }.map(linkFolder)
+        for link in links {
+            try check()
+            guard let profileID = importedIDs[link.profileID] else { throw ModelError.invalid("快捷引用的源会话未导入。") }
+            let folder = linkFolder(link.folder)
+            var name = link.name, suffix = 1
+            while result.sessionLinks.entries.contains(where: { $0.folder == folder && $0.name == name }) {
+                name = link.name + "（导入副本\(suffix == 1 ? "" : " \(suffix)")）"; suffix += 1
+            }
+            result.sessionLinks.add(profileID: profileID, name: name, folder: folder)
+        }
+        if linkDestination != nil {
+            let referenced = Set(links.map(\.profileID))
+            for source in profiles where !referenced.contains(source.id) {
+                result.sessionLinks.add(profileID: importedIDs[source.id]!, name: source.name, folder: linkFolder(source.group))
+            }
+            result.sessionLinks.folders += directories.filter { !SessionLinks.containsDirectory($0) }.map(linkFolder)
+        }
+        result.normalizeSessionLinkDirectories()
+        result.sessionLinks.visible = configuration.sessionLinks.visible
         try check(); return result
     }
     public func protectedForExport(password: String, credentialKey: (SessionProfile) throws -> String, check: () throws -> Void = {}) throws -> SessionArchive {

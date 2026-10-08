@@ -11,8 +11,7 @@ final class PopupWindow: NSWindow {
     var onFind: (() -> Void)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if attachedSheet == nil, NSApp.modalWindow == nil,
-           event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
-           event.charactersIgnoringModifiers?.lowercased() == "f", let onFind { onFind(); return true }
+           ShortcutRuntime.matches(.find, event: event), let onFind { onFind(); return true }
         return super.performKeyEquivalent(with: event)
     }
 }
@@ -61,6 +60,7 @@ enum PopupKeyboard {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             guard isEscape(keyCode: event.keyCode, modifiers: event.modifierFlags),
                   let window = event.window ?? NSApp.keyWindow, window === NSApp.keyWindow else { return event }
+            if let recorder = ShortcutRecorder.active, recorder.window === window, recorder.isRecording { return event }
             return dismiss(window: window) ? nil : event
         }
     }

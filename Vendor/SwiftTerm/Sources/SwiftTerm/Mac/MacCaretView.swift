@@ -63,11 +63,12 @@ class CaretView: NSView, CALayerDelegate {
                 ? nil : UInt32(ch.code)
         }
         let character = hideBlinkingText ? " " : (terminal?.terminal.getCharacter(for: ch) ?? " ")
-        let res = NSAttributedString (
-            string: UnicodeUtil.textPresentationAdjusted (character),
-            attributes: terminal?.getAttributedValue(ch.attribute,
-                                                      usingFg: terminal?.effectiveCaretColor ?? caretColor,
-                                                      andBg: terminal?.effectiveCaretTextColor ?? NSColor.black))
+        var attributes = terminal?.getAttributedValue(ch.attribute,
+            usingFg: terminal?.effectiveCaretColor ?? caretColor,
+            andBg: terminal?.effectiveCaretTextColor ?? NSColor.black) ?? [:]
+        if let terminal, let fallback = terminal.privateUseFont(for: character,
+            base: (attributes[.font] as? NSFont) ?? terminal.font) { attributes[.font] = fallback }
+        let res = NSAttributedString(string: UnicodeUtil.textPresentationAdjusted(character), attributes: attributes)
         ctline = CTLineCreateWithAttributedString(res)
 
         setNeedsDisplay(bounds)

@@ -40,7 +40,7 @@ enum SessionFeatureTest {
                     let log = String(decoding: (try? Data(contentsOf: root.appendingPathComponent("session.log"))) ?? Data(), as: UTF8.self)
                     results["credentialsRemainEncrypted"] = ![password, proxyPassword, master].contains(where: { config.contains($0) || log.contains($0) })
                     results["secureDefaultsRejectLegacy"] = controlPane.ended
-                    results["automaticHostname"] = pane.title == "centos6-fixture · 10.6.0.6"
+                    results["automaticHostname"] = (pane.title == "centos6-fixture" && pane.remoteAddress == "10.6.0.6")
                     results["sessionReady"] = pane.sessionReady
                     let report: [String: Any] = ["passed": results.values.allSatisfy { $0 }, "checks": results]
                     try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: root.appendingPathComponent("client-result.json"))

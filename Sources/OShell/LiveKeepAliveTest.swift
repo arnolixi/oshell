@@ -46,7 +46,7 @@ enum LiveKeepAliveTest {
                       let counters = try? JSONSerialization.jsonObject(with: data) as? [String: Int] else { return -1 }
                 return counters["C"] ?? -1
             }
-            wait("connected", { pane.canEditLiveKeepAlive && pane.title.hasPrefix("outer-real · ") }) {
+            wait("connected", { pane.canEditLiveKeepAlive && pane.title == "outer-real" }) {
                 let pid = pane.terminal.process.shellPid, startup = pane.profile.keepAlive
                 var config = controller.configuration; config.profiles = [pane.profile]
                 config.profiles[0].keepAlive.interval = 77 // A future-connection setting must survive saving idle options.

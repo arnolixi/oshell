@@ -15,6 +15,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     private let tabStrip = TabStripView()
     let sessionLinkBar = SessionLinkBar()
     var sessionLinkHeight: NSLayoutConstraint!
+    let currentPropertiesButton = NSButton(), defaultPropertiesButton = NSButton()
+    let splitButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    let tabGroupButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let arrangementButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private(set) var arrangement: TabArrangement = .tabs
     private var arrangingView: TabArrangementView?
@@ -45,6 +48,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     let quickSendBar = QuickSendBar()
     var quickSendScope: QuickSendScope = .current
     var quickSendSelected = Set<UUID>()
+    var quickSendSelectedGroups = Set<UUID>()
+    let defaultQuickSendGroupID = UUID()
     var quickSendHeight: NSLayoutConstraint!
     private var quickSendVisibilityObserver: NSObjectProtocol?
     private var activationObserver: NSObjectProtocol?
@@ -96,6 +101,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         window.delegate = self; window.center(); window.setFrameAutosaveName(CommandLine.arguments.contains("--memory-profile") ? "OShell.memory-profile" : "OShell.main")
         quickSendScope = configuration.preferences.quickSendScope
         ApplicationAppearance.apply(configuration.preferences.interfaceTheme)
+        ShortcutRuntime.current = configuration.preferences.keyboardShortcuts
         buildInterface(); rebuildQuickLinks(); refreshSelection()
         quickSendVisibilityObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, self.quickSendScope == .visible, let clip = note.object as? NSClipView, clip.window === self.window, !self.quickSendRefreshPending else { return }
@@ -131,7 +137,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         guard let content = window?.contentView else { return }
         let new = iconButton("新建", "plus", #selector(newSession))
         let connect = iconButton("会话管理", "folder", #selector(showSessionManager))
-        connect.toolTip = "会话管理（⇧⌘O 打开，Esc 关闭）"
+        connect.toolTip = "会话管理（Esc 关闭）"
         quickButton.bezelStyle = .texturedRounded; quickButton.setAccessibilityLabel("快捷连接")
         let local = iconButton("本地", "terminal", #selector(newLocal))
         arrangementButton.bezelStyle = .texturedRounded
@@ -144,6 +150,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
             item.tag = mode.rawValue; item.target = self; item.toolTip = mode.hint
         }
         arrangementButton.menu = arrangementMenu
+        tabGroupButton.bezelStyle = .texturedRounded; tabGroupButton.setAccessibilityLabel("标签组")
+        tabGroupButton.widthAnchor.constraint(equalToConstant: 76).isActive = true
+        tabGroupButton.toolTip = "新建、命名和显示/隐藏标签组；隐藏不会断开连接"
         let tools = NSPopUpButton(frame: .zero, pullsDown: true); tools.bezelStyle = .texturedRounded
         let toolsMenu = NSMenu(); toolsMenu.addItem(withTitle: "工具", action: nil, keyEquivalent: "")
         for (title, action) in [("快捷链接栏", #selector(toggleSessionLinkBar)), ("快速发送栏", #selector(toggleQuickSendBar)), ("撰写窗", #selector(toggleComposer)), ("同步输入…", #selector(configureSyncInput)), ("停止同步输入", #selector(stopSyncInput)), ("快速命令管理器…", #selector(showQuickCommands)), ("文件管理…", #selector(showFiles)), ("突出显示集…", #selector(showHighlights))] {
@@ -155,7 +164,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         recordButton.image = NSImage(oshellSymbolName: "record.circle", accessibilityDescription: "日志记录")
         recordButton.imagePosition = .imageLeading; recordButton.bezelStyle = .texturedRounded
         let settings = iconButton("", "gearshape", #selector(showPreferences)); settings.toolTip = "设置"
-        let toolbar = NSStackView(views: [connect, quickButton, new, local, tools, syncIndicator, stopSyncButton, NSView(), arrangementButton, find, recordButton, settings])
+        configurePropertyButtons()
+        let toolbar = WorkspaceToolbar(views: [connect, quickButton, new, local, currentPropertiesButton, defaultPropertiesButton, tools, syncIndicator, stopSyncButton, NSView(), tabGroupButton, splitButton, arrangementButton, find, recordButton, settings])
+        toolbar.identifier = .init("workspace.toolbar")
+        toolbar.compactButtons = [new, local, find, recordButton]
+        for (button, label) in [(new, "新建会话"), (local, "本地终端"), (find, "搜索终端"), (recordButton, "记录终端日志")] {
+            button.toolTip = label; button.setAccessibilityLabel(label)
+        }
         toolbar.orientation = .horizontal; toolbar.spacing = 6
         toolbar.detachesHiddenViews = true
         toolbar.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
@@ -207,7 +222,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         let workspace = NSView()
         configureTerminalTabStrip(tabStrip)
         terminalHost.target = { [weak self] source, point in self?.tabDropTarget(source: source, point: point) }
-        terminalHost.drop = { [weak self] source, target in self?.moveTab(source, beside: target.tab, position: target.position) ?? false }
+        terminalHost.drop = { [weak self] source, target in
+            if let group = target.group { return self?.moveTab(source, toGroup: group) ?? false }
+            if let tab = target.tab { return self?.moveTab(source, beside: tab, position: target.position) ?? false }
+            return false
+        }
         tabStripHeight = tabStrip.heightAnchor.constraint(equalToConstant: TabStripView.barHeight)
         composerHeight = composerHost.heightAnchor.constraint(equalToConstant: 0)
         quickSendHeight = quickSendBar.heightAnchor.constraint(equalToConstant: configuration.preferences.quickSendBarVisible ? 36 : 0)
@@ -232,7 +251,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         let subtitle = NSTextField(labelWithString: "连接你的服务器，专注每一条命令。")
         subtitle.textColor = .secondaryLabelColor; subtitle.font = .systemFont(ofSize: 14)
         let buttons = NSStackView(views: [iconButton("新建 SSH 会话", "plus", #selector(newSession)), iconButton("打开本地终端", "terminal", #selector(newLocal))]); buttons.spacing = 12
-        let shortcuts = NSTextField(labelWithString: "⌘T 新建标签    工具栏“排列”同时查看多个会话    ⌘F 搜索")
+        let shortcuts = NSTextField(labelWithString: "工具栏可新建终端、排列多个会话和搜索；快捷键可在设置中自定义。")
         shortcuts.font = .systemFont(ofSize: 11); shortcuts.textColor = .tertiaryLabelColor
         let center = NSStackView(views: [icon, title, subtitle, buttons, shortcuts]); center.orientation = .vertical; center.spacing = 18; center.alignment = .centerX
         center.translatesAutoresizingMaskIntoConstraints = false; welcome.addSubview(center)
@@ -264,18 +283,21 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
             }
             try normalized.migrateFileSessions()
             try normalized.sessionDefaults.validate()
-            normalized.directories = SessionDirectory.all(normalized)
             normalized.sessionLinks.normalize(profiles: normalized.profiles)
+            normalized.normalizeSessionLinkDirectories()
             try store.save(normalized); configuration = normalized; configurationRevision += 1
             if let migrated, let master = PasswordVault.shared.cachedMaster { PasswordVault.shared.acceptRotation(migrated, master: master) }
             PasswordVault.shared.configureProtection(configuration); refreshMasterWarning()
-            rebuildQuickLinks(); rebuildCommandMenu(); applyHighlightConfiguration(); sessionManager?.reload(); refreshQuickSendBar(); return true
+            rebuildQuickLinks(); rebuildCommandMenu(); applyHighlightConfiguration(); sessionManager?.reload(); refreshQuickSendBar(); ShortcutRuntime.install(configuration.preferences.keyboardShortcuts); return true
         } catch { Dialogs.message("保存配置失败：\(error.localizedDescription)"); return false }
     }
     private func persist() { _ = saveConfiguration(configuration) }
     @objc func showSessionManager() {
         if sessionManager == nil { sessionManager = SessionManager(workspace: self) }
         sessionManager?.show()
+    }
+    func showSessionDirectory(_ directory: String) {
+        showSessionManager(); sessionManager?.revealDirectory(directory)
     }
     func showFileSessions(selection: @escaping (SessionProfile) -> Void) {
         if sessionManager == nil { sessionManager = SessionManager(workspace: self) }
@@ -294,7 +316,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
               let profile = Dialogs.session(selected, profiles: credentialProfiles, directories: SessionDirectory.all(configuration), defaults: configuration.sessionDefaults),
               let index = configuration.profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         var value = configuration; value.profiles[index] = profile
-        if saveConfiguration(value) { sessionManager?.reveal(profile) }
+        let linkID = sessionManager?.selectedLink?.id
+        if saveConfiguration(value) {
+            if let linkID { sessionManager?.revealLink(linkID) } else { sessionManager?.reveal(profile) }
+        }
     }
     @objc func deleteSession() {
         guard let profile = selectedProfile, Dialogs.confirm("删除“\(profile.name)”？", text: "已打开的连接继续保留。", action: "删除") else { return }
@@ -382,7 +407,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         pane.onCloseRequested = { [weak self] pane in
             guard let self, pane.ended,
                   let tab = self.tabs.first(where: { $0.layout.panes.contains(where: { $0 === pane }) }) else { return }
-            self.close(tab)
+            // An ended terminal can close synchronously during a quick-send
+            // broadcast. Advance terminal focus only if a terminal owned it;
+            // text fields/composers must keep their current field editor.
+            let focusTerminal = self.inputPanes.contains { self.window?.firstResponder === $0.terminal }
+            self.close(tab, focusRemainingTerminal: focusTerminal)
         }
         pane.onUserInput = { [weak self] pane, bytes in self?.routeKeyboard(pane, bytes: bytes) ?? false }
         pane.onPaste = { [weak self] pane, text in self?.pasteText(text, from: pane) }
@@ -407,11 +436,27 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
             show(); NSApp.activate(ignoringOtherApps: true)
         } catch { Dialogs.message("无法打开外部启动会话，请检查连接参数。") }
     }
+    /// Each visible strip is an independent numbering scope. The underlying
+    /// UUID remains the identity when closing/moving tabs changes ordinals.
+    var tabNumbers: [UUID: Int] {
+        let groups = customTabLayout?.groups.map(\.tabs) ?? [tabs.map(\.id)]
+        return Dictionary(uniqueKeysWithValues: groups.flatMap { ids in ids.enumerated().map { ($0.element, $0.offset + 1) } })
+    }
+    var numberedTabs: [TerminalTab] {
+        guard let layout = customTabLayout else { return tabs }
+        let visible = layout.groups.filter { !$0.isHidden }
+        let group = visible.first { $0.id == activeTabGroupID }
+            ?? visible.first { group in selectedTab.map { group.tabs.contains($0.id) } ?? false } ?? visible.first
+        return group?.tabs.compactMap { id in tabs.first { $0.id == id } } ?? []
+    }
     private func refreshTabTitles() {
-        tabStrip.update(tabs: tabs, selected: selectedTab)
+        let numbers = tabNumbers
+        tabStrip.update(tabs: tabs, selected: selectedTab, numbers: numbers)
         for (group, strip) in groupStrips {
-            strip.update(tabs: group.tabs.compactMap { id in tabs.first { $0.id == id } }, selected: tabs.first { $0.id == group.active })
+            strip.update(tabs: group.tabs.compactMap { id in tabs.first { $0.id == id } }, selected: tabs.first { $0.id == group.active }, numbers: numbers)
+            configureGroupHeading(strip, group: group)
         }
+        refreshTabGroupMenu()
     }
     private func recordTerminalOutput(_ pane: TerminalPane) {
         if isObservingSelectedTab, selectedTab?.layout.panes.contains(where: { $0 === pane }) == true { return }
@@ -421,6 +466,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         refreshTabTitles()
     }
     private func refreshSelection() {
+        refreshSessionLinkAddButton(); refreshToolbarActions()
         if isObservingSelectedTab { selectedTab?.markOutputRead() }
         for tab in tabs {
             for pane in tab.layout.panes { pane.setSelected(tab === selectedTab && pane === tab.activePane) }
@@ -433,26 +479,30 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         tabs.forEach { $0.layout.view.removeFromSuperview() }
         arrangingView = nil; groupStrips.removeAll(); reconcileTabGroups()
         tabStrip.isHidden = customTabLayout != nil; tabStripHeight.constant = customTabLayout == nil ? TabStripView.barHeight : 0
-        guard let selectedTab else { showWelcome(); refreshSelection(); return }
         if let customTabLayout {
-            let root = buildTabGroupView(customTabLayout)
-            let view = TabArrangementView(root: root); arrangingView = view; install(view)
-        } else if arrangement == .tabs { install(selectedTab.layout.view) }
-        else {
+            if let root = buildTabGroupView(customTabLayout) {
+                let view = TabArrangementView(root: root); arrangingView = view; install(view)
+            } else { install(hiddenTabGroupsView()) }
+        } else if let selectedTab, arrangement == .tabs { install(selectedTab.layout.view) }
+        else if !tabs.isEmpty {
             let view = TabArrangementView(tabs: tabs, mode: arrangement)
             arrangingView = view; install(view); view.equalize()
-        }
+        } else { showWelcome() }
         terminalHost.layoutSubtreeIfNeeded()
         let visible = visibleTerminalTabs
         visible.flatMap { $0.layout.panes }.forEach { $0.prepareForDisplay() }
         refreshSelection()
     }
+    func updateGroupSelection(_ tab: TerminalTab?, group: UUID?) {
+        guard tab == nil || tabs.contains(where: { $0 === tab }) else { return }
+        selectedTab = tab; activeTabGroupID = group
+    }
     func select(_ tab: TerminalTab, focus: Bool = true) {
         guard tabs.contains(where: { $0 === tab }) else { return }
         selectedTab = tab
         if let group = customTabLayout?.group(containing: tab.id) { activeTabGroupID = group.id }
-        if let group = customTabLayout?.group(containing: tab.id), group.active != tab.id {
-            group.active = tab.id; rebuildWorkspace()
+        if let group = customTabLayout?.group(containing: tab.id), group.active != tab.id || group.isHidden {
+            group.isHidden = false; group.active = tab.id; rebuildWorkspace()
         }
         if customTabLayout == nil, arrangement == .tabs, tab.layout.view.superview !== terminalHost {
             install(tab.layout.view)
@@ -466,23 +516,40 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         if arrangement != .tabs || customTabLayout != nil { tab.activePane.view.scrollToVisible(tab.activePane.view.bounds) }
     }
     func arrange(_ mode: TabArrangement) {
-        customTabLayout = nil; arrangement = mode
+        if mode != .tabs, let root = customTabLayout, root.groups.contains(where: { $0.name != nil }) {
+            customTabLayout = arrangedGroupTree(root.groups, mode: mode)
+        } else { customTabLayout = nil }
+        arrangement = mode
+        if customTabLayout == nil, selectedTab == nil { selectedTab = tabs.first }
         rebuildWorkspace()
         if let selectedTab { select(selectedTab) }
     }
     @objc func changeArrangement(_ sender: NSMenuItem) {
         if let mode = TabArrangement(rawValue: sender.tag) { arrange(mode) }
     }
-    private func close(_ tab: TerminalTab) {
+    private func close(_ tab: TerminalTab, focusRemainingTerminal: Bool = true) {
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
         if tab.layout.panes.contains(where: \.hasActiveProcess),
            !Dialogs.confirm("关闭此标签？", text: "此标签中的连接、本机工具与文件传输会结束。", action: "关闭") { return }
         let wasSelected = selectedTab === tab
+        var groupNeighbor: TerminalTab?
+        if let group = customTabLayout?.group(containing: tab.id), let position = group.tabs.firstIndex(of: tab.id) {
+            let remaining = group.tabs.filter { $0 != tab.id }
+            if !remaining.isEmpty {
+                let nextID = remaining[min(position, remaining.count - 1)]
+                groupNeighbor = tabs.first { $0.id == nextID }
+            }
+        }
         tab.layout.panes.forEach { $0.shutdown() }; tab.layout.view.removeFromSuperview(); tabs.remove(at: index)
         tabHistory.removeAll { $0 == tab.id }
-        if wasSelected { selectedTab = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)] }
+        if wasSelected {
+            let visible = tabs.filter { customTabLayout?.group(containing: $0.id)?.isHidden != true }
+            let adjacent = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)]
+            selectedTab = groupNeighbor ?? adjacent.flatMap { candidate in visible.contains(where: { $0 === candidate }) ? candidate : nil } ?? visible.first
+            if let selectedTab { activeTabGroupID = customTabLayout?.group(containing: selectedTab.id)?.id }
+        }
         rebuildWorkspace()
-        if let selectedTab { select(selectedTab) }
+        if let selectedTab { select(selectedTab, focus: focusRemainingTerminal) }
         if tabs.isEmpty { idleMemoryReclaimer.schedule { [weak self] in self?.tabs.isEmpty == true } }
     }
     @objc func closeTab() { if let tab = selectedTab { close(tab) } }
@@ -550,34 +617,57 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         guard saveConfiguration(value) else { return }
         do { try appUpdater.configure() } catch { Dialogs.message(error.localizedDescription) }
         ApplicationAppearance.apply(preferences.interfaceTheme)
-        tabs.flatMap { $0.layout.panes }.forEach { $0.apply(preferences) }; refreshStatus()
+        tabs.flatMap { $0.layout.panes }.forEach { $0.apply(preferences) }; refreshSelection()
     }
     @objc func lockPasswords() { PasswordVault.shared.lock() }
+    @discardableResult func selectTab(number: Int) -> Bool {
+        let candidates = numberedTabs
+        guard isSecurityUnlocked, window?.attachedSheet == nil, NSApp.modalWindow == nil,
+              number > 0, number <= candidates.count else { return false }
+        select(candidates[number - 1]); return true
+    }
+    @objc func selectNumberedTab(_ sender: NSMenuItem) { _ = selectTab(number: sender.tag) }
+    @objc func chooseTabNumber() {
+        guard isSecurityUnlocked, !numberedTabs.isEmpty, window?.attachedSheet == nil, NSApp.modalWindow == nil else { return }
+        let alert = PopupAlert(); alert.messageText = "跳转到标签"
+        alert.informativeText = "输入当前分屏窗口的标签编号（1–\(numberedTabs.count)）；各标签的快捷键可在设置中自定义。"
+        alert.addButton(withTitle: "跳转"); alert.addButton(withTitle: "取消")
+        let input = NSTextField(string: String(selectedTab.flatMap { tabNumbers[$0.id] } ?? 1))
+        input.identifier = .init("tab.number"); input.setAccessibilityLabel("标签编号")
+        input.frame = NSRect(x: 0, y: 0, width: 320, height: 26)
+        alert.accessoryView = input; alert.window.initialFirstResponder = input
+        while alert.runModal() == .alertFirstButtonReturn {
+            let text = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty, text.utf8.allSatisfy({ (48...57).contains($0) }), let number = Int(text), selectTab(number: number) { return }
+            alert.informativeText = "请输入当前分屏窗口内 1–\(numberedTabs.count) 范围的有效编号。"; input.selectText(nil)
+        }
+    }
     @objc func nextTab() { cycleTab(1) }
     @objc func previousTab() { cycleTab(-1) }
     @objc func refreshCurrentHostIdentity() { selectedTab?.activePane.refreshHostIdentity() }
     @objc func lastUsedTab() {
         guard window?.attachedSheet == nil, NSApp.modalWindow == nil,
-              let id = tabHistory.first(where: { $0 != selectedTab?.id }),
+              let id = tabHistory.first(where: { $0 != selectedTab?.id && customTabLayout?.group(containing: $0)?.isHidden != true }),
               let tab = tabs.first(where: { $0.id == id }) else { return }
         select(tab)
     }
     private func cycleTab(_ delta: Int) {
-        guard window?.attachedSheet == nil, NSApp.modalWindow == nil,
-              let tab = selectedTab, let index = tabs.firstIndex(where: { $0 === tab }), !tabs.isEmpty else { return }
-        select(tabs[(index + delta + tabs.count) % tabs.count])
+        let visible = tabs.filter { customTabLayout?.group(containing: $0.id)?.isHidden != true }
+        guard window?.attachedSheet == nil, NSApp.modalWindow == nil, !visible.isEmpty else { return }
+        guard let tab = selectedTab, let index = visible.firstIndex(where: { $0 === tab }) else { select(delta > 0 ? visible[0] : visible[visible.count - 1]); return }
+        select(visible[(index + delta + visible.count) % visible.count])
     }
     private func refreshStatus() {
         refreshOperatorState()
         let panes = tabs.flatMap { $0.layout.panes }
-        arrangementButton.isEnabled = !tabs.isEmpty
+        arrangementButton.isEnabled = !tabs.isEmpty || customTabLayout != nil
         for item in arrangementButton.menu?.items.dropFirst() ?? [] {
             item.state = customTabLayout == nil && item.tag == arrangement.rawValue ? .on : .off
         }
         if let pane = selectedTab?.activePane {
             window?.title = "\(tabs.count) 个标签 · \(panes.count) 个终端 | \(pane.title)\(pane.isLogging ? " · 日志记录中" : "")\(pane.isTransferring ? " · 文件传输中" : "") — OShell"
             recordButton.title = pane.isLogging ? "停止记录" : "记录"; recordButton.isEnabled = !pane.ended
-        } else { window?.title = "OShell"; recordButton.title = "记录"; recordButton.isEnabled = false }
+        } else { window?.title = tabs.isEmpty ? "OShell" : "\(tabs.count) 个标签 · \(panes.count) 个终端 · 当前无活动标签 — OShell"; recordButton.title = "记录"; recordButton.isEnabled = false }
     }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(checkForUpdates) {
@@ -587,18 +677,22 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         if menuItem.action == #selector(showUpdatePreferences) { return isSecurityUnlocked && NSApp.modalWindow == nil }
         if menuItem.action == #selector(clearMasterPassword) { return isSecurityUnlocked && configuration.hasMasterPassword && NSApp.modalWindow == nil }
         if [#selector(showPreferences), #selector(showAppearancePreferences)].contains(menuItem.action) { return NSApp.modalWindow == nil && window?.attachedSheet == nil }
+        if menuItem.action == #selector(editCurrentSessionProfile) { return canEditCurrentSessionProfile }
+        if [#selector(splitVertical), #selector(splitHorizontal)].contains(menuItem.action) { return isSecurityUnlocked && selectedTab != nil }
         if menuItem.action == #selector(showCurrentSessionProperties) { return selectedTab?.activePane.canEditLiveKeepAlive == true }
         if menuItem.action == #selector(toggleSessionLinkBar) { menuItem.state = configuration.sessionLinks.visible ? .on : .off; return true }
         if menuItem.action == #selector(toggleQuickSendBar) { menuItem.state = quickSendBar.isHidden ? .off : .on; return true }
         if menuItem.action == #selector(changeArrangement(_:)) {
             menuItem.state = customTabLayout == nil && menuItem.tag == arrangement.rawValue ? .on : .off
-            return !tabs.isEmpty
+            return !tabs.isEmpty || customTabLayout != nil
         }
         if [#selector(editSession), #selector(deleteSession)].contains(menuItem.action) { return selectedProfile != nil }
         if menuItem.action == #selector(findInTerminal) { return NSApp.keyWindow?.windowController is SessionManager || (selectedTab != nil && NSApp.keyWindow === window) }
         if [#selector(findNextInTerminal), #selector(findPreviousInTerminal)].contains(menuItem.action) { return selectedTab != nil && NSApp.keyWindow === window && window?.attachedSheet == nil && NSApp.modalWindow == nil }
         if [#selector(toggleLogging), #selector(reconnect), #selector(closeTab)].contains(menuItem.action) { return selectedTab != nil }
         if menuItem.action == #selector(refreshCurrentHostIdentity) { return selectedTab?.activePane.canRefreshHostIdentity == true }
+        if menuItem.action == #selector(selectNumberedTab(_:)) { return isSecurityUnlocked && menuItem.tag > 0 && menuItem.tag <= numberedTabs.count && NSApp.keyWindow === window && window?.attachedSheet == nil && NSApp.modalWindow == nil }
+        if menuItem.action == #selector(chooseTabNumber) { return isSecurityUnlocked && !numberedTabs.isEmpty && NSApp.keyWindow === window && window?.attachedSheet == nil && NSApp.modalWindow == nil }
         if [#selector(nextTab), #selector(previousTab), #selector(lastUsedTab)].contains(menuItem.action) { return tabs.count > 1 && window?.attachedSheet == nil && NSApp.modalWindow == nil }
         return true
     }

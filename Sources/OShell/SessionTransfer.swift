@@ -6,17 +6,17 @@ import UniformTypeIdentifiers
 import OShellCore
 
 enum SessionTransfer {
-    static func export(profiles: [SessionProfile], directories: [String]) {
+    static func export(profiles: [SessionProfile], directories: [String], links: [SessionLink] = []) {
         let currentProfiles = PasswordVault.shared.currentCredentials(in: Configuration(profiles: profiles)).profiles
         let hasLocal = currentProfiles.contains { $0.encryptedPassword?.localKeyID != nil || $0.proxy.encryptedPassword?.localKeyID != nil }
         let options = PopupAlert(); options.messageText = "导出会话"
-        options.informativeText = "导出 \(profiles.count) 个会话及目录结构。包含代理、隧道、保活等连接设置；不包含私钥文件、主机指纹或终端历史。"
+        options.informativeText = "导出 \(profiles.count) 个会话、\(links.count) 个快捷引用及目录结构。包含代理、隧道、保活等连接设置；不包含私钥文件、主机指纹或终端历史。"
         options.addButton(withTitle: "选择保存位置…"); options.addButton(withTitle: "取消")
         let passwords = NSButton(checkboxWithTitle: hasLocal ? "包含已保存密码（单独设置导出文件密码）" : "包含已保存的加密密码（导入时需要原主密码）", target: nil, action: nil)
         passwords.frame = NSRect(x: 0, y: 0, width: 420, height: 26); passwords.state = .off; options.accessoryView = passwords
         guard options.runModal() == .alertFirstButtonReturn else { return }
         do {
-            var archive = SessionArchive(profiles: currentProfiles, directories: directories, includePasswords: passwords.state == .on)
+            var archive = SessionArchive(profiles: currentProfiles, directories: directories, includePasswords: passwords.state == .on, links: links)
             if passwords.state == .on && hasLocal {
                 guard let exportPassword = PasswordVault.promptMaster(title: "设置导出文件密码", creating: true),
                       let keys = try PasswordVault.shared.credentialKeys(for: currentProfiles + currentProfiles.map { $0.proxy.credentialProfile }) else { return }
@@ -38,17 +38,59 @@ enum SessionTransfer {
     }
 
     static func importSessions(workspace: WorkspaceController, directory: String) {
-        let panel = NSOpenPanel(); panel.title = "导入 OShell 会话"; panel.oshellJSONFilesOnly()
-        panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        importArchive(at: url, workspace: workspace, directory: directory)
+        let source = PopupAlert(); source.messageText = "选择会话导入来源"
+        source.informativeText = "SecureCRT 支持 XML、INI 和 Sessions 目录；Xshell 支持 XSH、ZIP 结构 XTS 和 Sessions 目录。第三方密码与自动执行脚本不迁移，导入前可预览结果。"
+        source.addButton(withTitle: "选择文件或目录…"); source.addButton(withTitle: "取消")
+        let kinds = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 420, height: 28))
+        kinds.addItems(withTitles: ["OShell 会话导出（JSON）", "SecureCRT 会话（XML / INI / 目录）", "Xshell 会话（XSH / XTS / ZIP / 目录）"])
+        source.accessoryView = kinds
+        guard source.runModal() == .alertFirstButtonReturn else { return }
+        let panel = NSOpenPanel()
+        if kinds.indexOfSelectedItem == 0 {
+            panel.title = "导入 OShell 会话"; panel.oshellJSONFilesOnly()
+            panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            importArchive(at: url, workspace: workspace, directory: directory)
+        } else {
+            let format: ThirdPartySessionFormat = kinds.indexOfSelectedItem == 1 ? .secureCRT : .xshell
+            panel.title = "导入 " + format.title + " 会话"; panel.allowedFileTypes = format.extensions
+            panel.canChooseDirectories = true; panel.canChooseFiles = true; panel.allowsMultipleSelection = true; panel.resolvesAliases = false
+            guard panel.runModal() == .OK else { return }
+            importExternal(at: panel.urls, format: format, workspace: workspace, directory: directory)
+        }
+    }
+
+    static func importExternal(at urls: [URL], format: ThirdPartySessionFormat, workspace: WorkspaceController, directory: String) {
+        guard workspace.isSecurityUnlocked else { return }
+        guard let result = CredentialTask.run(title: "读取 " + format.title + " 会话…", message: "正在读取并检查会话文件。取消不会修改配置，不会连接服务器。", work: { token in
+            try ThirdPartySessionImporter.read(urls, format: format, check: token.check)
+        }) else { return }
+        do { try importExternalReport(result.get(), format: format, workspace: workspace, directory: directory) }
+        catch { Dialogs.message("导入失败，未修改配置：\(error.localizedDescription)") }
+    }
+
+    static func importExternalReport(_ report: ThirdPartySessionReport, format: ThirdPartySessionFormat, workspace: WorkspaceController, directory: String) throws {
+        let preview = PopupAlert(); preview.messageText = format.title + "：可导入 \(report.profiles.count) 个会话，跳过 \(report.skippedCount) 项"
+        preview.informativeText = "目标：" + SessionDirectory.display(directory) + "。会话按来源放入 " + format.title + " 子目录并保留层级。同名会话另存为导入副本，原有会话保留。密码、代理和隧道不迁移，登录自动化不启用；导入后不会自动连接。"
+        preview.addButton(withTitle: "导入"); preview.addButton(withTitle: "取消")
+        preview.buttons.first?.isEnabled = !report.profiles.isEmpty
+        preview.accessoryView = ThirdPartyImportPreview(report)
+        guard preview.runModal() == .alertFirstButtonReturn, !report.profiles.isEmpty else { return }
+        let snapshot = workspace.configuration, revision = workspace.configurationRevision
+        guard let result = CredentialTask.run(title: "正在导入会话…", message: "正在合并目录和会话。完成后一次性保存；取消不会修改配置。", work: { token in
+            try report.archive.merging(into: snapshot, directory: directory, includePasswords: false, check: token.check)
+        }) else { return }
+        let updated = try result.get()
+        guard workspace.configurationRevision == revision else { throw ModelError.invalid("处理期间配置已变化，请重新导入。") }
+        guard workspace.saveConfiguration(updated) else { return }
+        Dialogs.message("已导入 \(report.profiles.count) 个会话，原有会话已保留。第三方保存的密码未迁移；请在连接前核对用户名、私钥、代理及隧道设置。")
     }
 
     static func importArchive(at url: URL, workspace: WorkspaceController, directory: String) {
         do {
             let archive = try SessionArchive.read(url)
             let preview = PopupAlert(); preview.messageText = "导入 \(archive.profiles.count) 个会话"
-            preview.informativeText = "目标：\(directory.isEmpty ? "所有会话" : directory)。保留文件中的目录层级，包括空目录。同名会话另存为“导入副本”，现有会话和设置保留。导入后不会自动连接。"
+            preview.informativeText = "目标：\(directory.isEmpty ? "所有会话" : directory)。保留文件中的目录层级，包括空目录；快捷引用及其目录统一恢复到 /Links。同名会话另存为“导入副本”，现有会话和设置保留。导入后不会自动连接。"
             preview.addButton(withTitle: "导入"); preview.addButton(withTitle: "取消")
             let passwords = NSButton(checkboxWithTitle: "导入 \(archive.passwordCount) 项加密密码", target: nil, action: nil)
             passwords.state = archive.passwordCount > 0 ? .on : .off; passwords.isEnabled = archive.passwordCount > 0

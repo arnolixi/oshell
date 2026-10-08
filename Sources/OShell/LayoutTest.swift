@@ -129,8 +129,9 @@ enum LayoutTest {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 for (index, pane) in originalPanes.enumerated() where !pane.ended {
-                    let text = String(decoding: pane.terminal.getTerminal().getBufferAsData(), as: UTF8.self)
-                    check(text.contains("LAYOUT_MARKER_\(index)"), "terminal output preserved")
+                    // The nested panes may wrap a marker across display rows.
+                    // Search logical terminal lines rather than newline-separated screen rows.
+                    check(pane.terminal.searchMatchSummary("LAYOUT_MARKER_\(index)").total > 0, "terminal output preserved")
                 }
                 controller.tabs.flatMap { $0.layout.panes }.forEach { $0.shutdown() }
                 while !controller.tabs.isEmpty {

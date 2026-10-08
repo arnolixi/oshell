@@ -32,6 +32,13 @@ Assets/Brand/Archive/
 Assets/Brand/Session-concepts/
 
 # Session exports and authentication material
+*.xsh
+*.xts
+*.xfp
+/Sessions/
+/SecureCRT*.xml
+/SCRTConfig*.xml
+/Xshell*.zip
 *.oshell.json
 *.env
 *.env.*

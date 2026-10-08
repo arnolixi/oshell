@@ -1,0 +1,141 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (c) 2026 OShell contributors
+name: Build and publish macOS DMGs
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing stable tag matching Info.plist, e.g. v0.2.58'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  metadata:
+    if: github.event_name != 'push' || !github.event.deleted
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      build: ${{ steps.meta.outputs.build }}
+      commit: ${{ steps.meta.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate tag, version and source
+        id: meta
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          python3 scripts/ci-release.py metadata --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
+          python3 scripts/check-public-source.py --history HEAD
+          python3 scripts/test-ci-release.py
+
+  build:
+    needs: metadata
+    name: DMG / ${{ matrix.flavor }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: legacy
+            runner: macos-15-intel
+          - flavor: compat
+            runner: macos-15-intel
+          - flavor: arm64
+            runner: macos-15
+          - flavor: intel
+            runner: macos-15-intel
+    env:
+      # Swift 6 / macOS SDK 15.5; keeps the legacy Swift runtime available.
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.metadata.outputs.commit }}
+      FLAVOR: ${{ matrix.flavor }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check toolchain
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          swift --version
+          uname -m
+      - name: Build application, run core checks and create DMG
+        run: python3 scripts/package-release.py --flavor "$FLAVOR" --format dmg --test-core
+      - name: Verify DMG payload, architectures and deployment targets
+        run: python3 scripts/verify-installers.py --flavor "$FLAVOR" --format dmg
+      - name: Stage the verified artifact
+        run: python3 scripts/ci-release.py stage --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --flavor "$FLAVOR" --output work/ci-output
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: dmg-${{ matrix.flavor }}
+          path: work/ci-output/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Preserve build diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: diagnostics-${{ matrix.flavor }}
+          path: |
+            validation/package-*.log
+            validation/package-*.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release:
+    needs: [metadata, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.metadata.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: dmg-*
+          path: work/release-input
+          merge-multiple: false
+      - name: Export corresponding audited source
+        run: python3 scripts/export-public-source.py --ref "$RELEASE_COMMIT" --output "dist/source/OShell-${RELEASE_VERSION}-source.tar.gz"
+      - name: Require four matching DMGs and prepare checksums
+        run: |
+          python3 scripts/ci-release.py collect --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
+            --artifacts work/release-input --source "dist/source/OShell-${RELEASE_VERSION}-source.tar.gz" --output dist/github-release
+      - name: Upload as draft, verify all assets, then publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-release.py publish --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --output dist/github-release

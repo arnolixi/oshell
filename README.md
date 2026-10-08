@@ -19,10 +19,11 @@
 
 | 构建 | 运行系统 | 架构 |
 | --- | --- | --- |
-| 现代版 | macOS 13 或更新版本 | Apple Silicon；可构建 Universal |
+| 现代版 | macOS 13 或更新版本 | Apple Silicon arm64 / Intel x86_64 |
+| 通用兼容版 | macOS 11 或更新版本 | Universal（arm64 + x86_64） |
 | Intel 兼容版 | macOS 10.13 或更新版本 | Intel x86_64 |
 
-macOS 10.13 是兼容构建目标，仍需真实旧系统上的进一步验证。具体安装包、签名和公证状态以对应 Release 说明为准。
+macOS 10.13 / 11 是兼容构建目标，仍需真实旧系统上的进一步验证。具体安装包、签名和公证状态以对应 Release 说明为准。
 
 从项目的 Releases 页面选择适合架构的 PKG 或 DMG。PKG 安装到 `/Applications`；DMG 可将应用拖入 Applications。升级前退出应用，再覆盖安装。没有已发布安装包时，可以从源码构建。
 
@@ -40,6 +41,7 @@ open dist/OShell.app
 ## 文档
 
 - [使用指南](docs/usage.md)
+- [SecureCRT / Xshell 会话导入教程](docs/session-import.md)
 - [Shell 集成](shell-integration/README.md)
 - [开发与测试](docs/development.md)
 - [构建与发布更新](docs/releases.md)

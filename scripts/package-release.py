@@ -2,18 +2,20 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (c) 2026 OShell contributors
 
-"""Build modern Universal/arm64 and legacy Intel apps, then produce PKG and DMG files.
+"""Build catalogued macOS apps, then produce DMG or PKG + DMG files.
 Never installs an app or replaces the developer's dist/OShell.app.
 """
 import argparse
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import plistlib
 import shutil
 import subprocess
 import tempfile
+from release_targets import TARGETS, RELEASE_FLAVORS
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / 'work/release'
@@ -35,8 +37,8 @@ def output(args):
     return subprocess.check_output(list(map(str,args)),text=True).strip()
 
 def build_swift(flavor, arch, minimum):
-    base = ROOT / ('work/build-legacy' if flavor == 'legacy' else f'work/build-modern-{arch}')
-    env = dict(os.environ, OSHELL_LEGACY='1' if flavor == 'legacy' else '0')
+    base = ROOT / ('work/build-legacy' if flavor == 'legacy' else f'work/build-compat-{arch}' if flavor == 'compat' else f'work/build-modern-{arch}')
+    env = dict(os.environ, OSHELL_LEGACY='1' if flavor == 'legacy' else '0', OSHELL_MACOS_MINIMUM=minimum)
     args = ['swift','build','--package-path',ROOT,'--scratch-path',base/'swift','--cache-path',base/'cache',
         '--config-path',base/'config','--security-path',base/'security','--disable-sandbox','-c','release',
         '--triple',f'{arch}-apple-macosx{minimum}', '-Xlinker','-rpath','-Xlinker','@executable_path/../Frameworks',
@@ -87,6 +89,7 @@ def assemble(flavor, arches, minimum, binaries, helpers):
     bridge_info=plistlib.loads((ROOT/'scripts/FileZilla-Info.plist').read_bytes());bridge_info['LSMinimumSystemVersion']=minimum
     (bridge/'Contents/Info.plist').write_bytes(plistlib.dumps(bridge_info))
     for source,name in [(ROOT/'LICENSE','OShell-LICENSE.txt'),(ROOT/'THIRD_PARTY_NOTICES.txt','THIRD_PARTY_NOTICES.txt'),(ROOT/'Vendor/SwiftTerm/LICENSE','SwiftTerm-LICENSE.txt'),(helpers[arches[0]].parent/'COPYING','lrzsz-COPYING.txt'),(ROOT/'Vendor/lrzsz-0.12.20.tar.gz','lrzsz-0.12.20.tar.gz')]: shutil.copy2(source,resources/name)
+    shutil.copytree(ROOT/'Vendor/NerdFonts',resources/'NerdFonts')
     if flavor=='legacy': shutil.copy2(ROOT/'Vendor/CryptoSwift/LICENSE',resources/'CryptoSwift-LICENSE.txt')
     shutil.copy2(ROOT/'shell-integration/oshell-integration.sh',resources/'oshell-integration.sh')
     shutil.copy2(ROOT/'Vendor/ColorSchemes/LICENSE',resources/'ColorSchemes-LICENSE.txt')
@@ -121,69 +124,80 @@ def assemble(flavor, arches, minimum, binaries, helpers):
     (LOG/f'package-{flavor}-binaries.json').write_text(json.dumps(entries,indent=2))
     return app
 
-def package(flavor, arches, minimum, app):
+def package(flavor, arches, minimum, app, package_format="both"):
     run(['python3',ROOT/'scripts/check-public-source.py','--app',app],log=f'package-{flavor}-privacy.log')
     assert (app/'Contents/Resources/OShell-LICENSE.txt').read_bytes()==(ROOT/'LICENSE').read_bytes(), 'Rebuild the app with the project license before packaging'
 
-    suffix={'modern':'macOS13-Universal','arm64':'macOS13-arm64','legacy':'macOS10.13-Intel'}[flavor]
+    suffix=TARGETS[flavor].suffix
     base=f'OShell-{VERSION}-{suffix}'
     stage=WORK/flavor
-    payload=stage/'payload'
-    if payload.exists(): shutil.rmtree(payload)
-    payload.mkdir()
-    shutil.copytree(app,payload/'OShell.app',dirs_exist_ok=True,symlinks=True)
-    component=stage/'component.plist'
-    run(['pkgbuild','--analyze','--root',payload,component],log=f'package-{flavor}-analyze.log')
-    components=plistlib.loads(component.read_bytes())
-    for item in components:item['BundleIsRelocatable']=False;item['BundleIsVersionChecked']=False;item['BundleOverwriteAction']='upgrade'
-    component.write_bytes(plistlib.dumps(components))
-    part=stage/'OShell-component.pkg'
-    run(['pkgbuild','--compression','legacy','--root',payload,'--component-plist',component,'--identifier','app.oshell.mac','--version',VERSION,'--install-location','/Applications',part],log=f'package-{flavor}-component.log')
     archlist=','.join(arches)
-    distribution=stage/'Distribution.xml'
-    distribution.write_text(f'''<?xml version="1.0" encoding="utf-8"?>
-<installer-gui-script minSpecVersion="2">
-<title>OShell {VERSION}</title>
-<options customize="never" require-scripts="false" rootVolumeOnly="true" hostArchitectures="{archlist}"/>
-<domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
-<volume-check><allowed-os-versions><os-version min="{minimum}"/></allowed-os-versions></volume-check>
-<choices-outline><line choice="default"/></choices-outline>
-<choice id="default" title="OShell"><pkg-ref id="app.oshell.mac"/></choice>
-<pkg-ref id="app.oshell.mac" version="{VERSION}" onConclusion="none">OShell-component.pkg</pkg-ref>
-</installer-gui-script>
-''')
-    pkg=OUT/(base+'.pkg')
-    run(['productbuild','--distribution',distribution,'--package-path',stage,pkg],log=f'package-{flavor}-product.log')
+    artifacts=[]
+    if package_format == 'both':
+        payload=stage/'payload'
+        if payload.exists(): shutil.rmtree(payload)
+        payload.mkdir()
+        shutil.copytree(app,payload/'OShell.app',dirs_exist_ok=True,symlinks=True)
+        component=stage/'component.plist'
+        run(['pkgbuild','--analyze','--root',payload,component],log=f'package-{flavor}-analyze.log')
+        components=plistlib.loads(component.read_bytes())
+        for item in components:item['BundleIsRelocatable']=False;item['BundleIsVersionChecked']=False;item['BundleOverwriteAction']='upgrade'
+        component.write_bytes(plistlib.dumps(components))
+        part=stage/'OShell-component.pkg'
+        run(['pkgbuild','--compression','legacy','--root',payload,'--component-plist',component,'--identifier','app.oshell.mac','--version',VERSION,'--install-location','/Applications',part],log=f'package-{flavor}-component.log')
+        distribution=stage/'Distribution.xml'
+        distribution.write_text(f'''<?xml version="1.0" encoding="utf-8"?>
+    <installer-gui-script minSpecVersion="2">
+    <title>OShell {VERSION}</title>
+    <options customize="never" require-scripts="false" rootVolumeOnly="true" hostArchitectures="{archlist}"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <volume-check><allowed-os-versions><os-version min="{minimum}"/></allowed-os-versions></volume-check>
+    <choices-outline><line choice="default"/></choices-outline>
+    <choice id="default" title="OShell"><pkg-ref id="app.oshell.mac"/></choice>
+    <pkg-ref id="app.oshell.mac" version="{VERSION}" onConclusion="none">OShell-component.pkg</pkg-ref>
+    </installer-gui-script>
+    ''')
+        pkg=OUT/(base+'.pkg')
+        run(['productbuild','--distribution',distribution,'--package-path',stage,pkg],log=f'package-{flavor}-product.log')
+        artifacts.append(pkg)
     image=stage/'image'
     if image.exists(): shutil.rmtree(image)
     image.mkdir()
     shutil.copytree(app,image/'OShell.app',dirs_exist_ok=True,symlinks=True)
     if not (image/'Applications').is_symlink():(image/'Applications').symlink_to('/Applications')
-    (image/'安装说明.txt').write_text(f'OShell {VERSION}\n适用：macOS {minimum} 或更新版本；架构 {archlist}。\n把 OShell.app 拖入 Applications，或使用同版本 PKG 安装。\n新旧两种包使用同一个应用及会话目录，不需要同时安装。\n本包为本地 ad-hoc 签名，未进行 Developer ID 签名或 Apple 公证。\n旧包已完成编译和当前系统的 Intel 转译验证，尚未在真实 macOS 10.13 上验证。\n')
+    pkg_hint='，或使用同版本 PKG 安装' if package_format == 'both' else ''
+    (image/'安装说明.txt').write_text(f'OShell {VERSION}\n适用：macOS {minimum} 或更新版本；架构 {archlist}。\n把 OShell.app 拖入 Applications{pkg_hint}。\n各版本使用同一个应用及会话目录，只需安装适合本机的一种。\n本包为本地 ad-hoc 签名，未进行 Developer ID 签名或 Apple 公证。\n构建校验不等同于最低系统的实际运行验证。\n')
     dmg=OUT/(base+'.dmg')
     run(['hdiutil','create','-ov','-format','UDZO','-fs','HFS+','-volname',f'OShell {VERSION}','-srcfolder',image,dmg],log=f'package-{flavor}-dmg.log')
     run(['hdiutil','verify',dmg],log=f'package-{flavor}-dmg-verify.log')
-    return [pkg,dmg]
+    artifacts.append(dmg)
+    return artifacts
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--flavor',choices=['modern','arm64','legacy','all'],default='all');parser.add_argument('--repository',help='Public GitHub owner/repo to embed as the default update source');parser.add_argument('--apps-only',action='store_true');parser.add_argument('--package-only',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--flavor',choices=[*TARGETS, 'all'],default='all');parser.add_argument('--repository',help='Public GitHub owner/repo to embed as the default update source');parser.add_argument('--apps-only',action='store_true');parser.add_argument('--package-only',action='store_true');parser.add_argument('--format',choices=['both','dmg'],default='both');parser.add_argument('--test-core',action='store_true');args=parser.parse_args()
+    if args.apps_only and args.package_only: parser.error('--apps-only and --package-only are mutually exclusive')
+    if args.test_core and args.package_only: parser.error('--test-core requires a source build')
     if args.repository:
         import re
         if not re.fullmatch(r'[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*/[A-Za-z0-9_.-]+',args.repository): parser.error('Repository must be owner/repo')
         INFO['OShellUpdateRepository']=args.repository
     WORK.mkdir(parents=True,exist_ok=True);OUT.mkdir(parents=True,exist_ok=True);LOG.mkdir(exist_ok=True)
     artifacts=[]
-    for flavor,arches,minimum in [('modern',['arm64','x86_64'],'13.0'),('arm64',['arm64'],'13.0'),('legacy',['x86_64'],'10.13')]:
-        if args.flavor not in ['all',flavor]:continue
+    for flavor in (RELEASE_FLAVORS if args.flavor == 'all' else [args.flavor]):
+        target=TARGETS[flavor];arches=list(target.architectures);minimum=target.minimum
         if args.package_only:
             app=WORK/flavor/'OShell.app'
             run(['codesign','--verify','--deep','--strict',app])
         else:
             binaries={a:build_swift(flavor,a,minimum) for a in arches}
+            if args.test_core:
+                native=platform.machine()
+                if native not in binaries: raise SystemExit('Core checks require a runner matching one of the target architectures')
+                run([binaries[native]/'OShellCoreChecks'],log=f'package-{flavor}-core.log')
             helpers={a:build_lrzsz(a,minimum) for a in arches}
             app=assemble(flavor,arches,minimum,binaries,helpers)
         print('Built application:',app,flush=True)
-        if not args.apps_only:artifacts+=package(flavor,arches,minimum,app)
+        if not args.apps_only:artifacts+=package(flavor,arches,minimum,app,args.format)
     if artifacts:
         checksum=OUT/'SHA256SUMS.txt'
         checksum.write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(OUT.glob('OShell-*')) if p.suffix in ['.pkg','.dmg']))

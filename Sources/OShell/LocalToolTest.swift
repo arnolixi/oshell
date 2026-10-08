@@ -62,7 +62,7 @@ enum LocalToolTest {
             checks["toolsLazyUntilCommand"] = !pane.isRunningLocalTool && pane.localToolPID == 0
             controller.chooseQuickSendScope(.all)
             checks["quickSendLaunchesToolsOnAllTabs"] = controller.sendQuickCommand(.init(text: "ping -c 1 127.0.0.1", appendReturn: true))
-            checks["toolTitleUsesHostAndIPOnly"] = pane.title.hasPrefix(LocalHostIdentity.current().hostname + " · ") && !pane.title.contains("ping")
+            checks["toolTitleUsesHostAndIPOnly"] = pane.title == LocalHostIdentity.current().hostname && !pane.title.contains("ping")
             wait("pingCompletesAndReturnsPrompt", { [pane, peer].allSatisfy { !$0.isRunningLocalTool && text($0).contains("1 packets transmitted") } }) {
                 let http = "http://127.0.0.1:\(f["httpPort"] as! Int)/"
                 send(pane, "curl --silent '\(http)'\r")

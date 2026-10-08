@@ -27,8 +27,8 @@ final class TerminalSearchPanel: NSView, NSSearchFieldDelegate {
         query.sendsSearchStringImmediately = true; query.setAccessibilityLabel("终端搜索内容")
         status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor; status.lineBreakMode = .byTruncatingMiddle
         for (button, symbol, title, action) in [
-            (previous, "chevron.up", "上一个匹配（⇧↩ / ⇧⌘G）", #selector(previousMatch)),
-            (next, "chevron.down", "下一个匹配（↩ / ⌘G）", #selector(nextMatch)),
+            (previous, "chevron.up", "上一个匹配（⇧↩，其他快捷键可在设置中修改）", #selector(previousMatch)),
+            (next, "chevron.down", "下一个匹配（↩，其他快捷键可在设置中修改）", #selector(nextMatch)),
             (closeButton, "xmark", "关闭搜索（Esc）", #selector(closeSearch))] {
             button.image = NSImage(oshellSymbolName: symbol, accessibilityDescription: title)
             button.toolTip = title; button.setAccessibilityLabel(title)

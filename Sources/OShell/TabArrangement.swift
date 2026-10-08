@@ -129,6 +129,28 @@ final class TabArrangementView: NSScrollView {
         documentView?.setFrameSize(NSSize(width: max(contentSize.width, minimumSize.width),
                                           height: max(contentSize.height, minimumSize.height)))
     }
+    /// Terminals consume wheel events for scrollback. They hand unused axes
+    /// and boundary scrolling here so arranged panes remain reachable.
+    @discardableResult func scrollArrangement(with event: NSEvent) -> Bool {
+        guard let documentView else { return false }
+        let clip = contentView.bounds
+        let maxX = max(0, documentView.frame.width - clip.width)
+        let maxY = max(0, documentView.frame.height - clip.height)
+        var dx = event.scrollingDeltaX, dy = event.scrollingDeltaY
+        // A standard mouse only supplies a vertical wheel. When panes overflow
+        // horizontally alone, use it to reach the columns to the left/right.
+        if maxX > 0, maxY <= 0, abs(dy) > abs(dx) { dx = dy; dy = 0 }
+        let xStep = event.hasPreciseScrollingDeltas ? 1 : horizontalLineScroll
+        let yStep = event.hasPreciseScrollingDeltas ? 1 : verticalLineScroll
+        let next = NSPoint(x: min(maxX, max(0, clip.minX - dx * xStep)),
+                           y: min(maxY, max(0, clip.minY + (documentView.isFlipped ? -dy : dy) * yStep)))
+        guard next != clip.origin else { return false }
+        contentView.scroll(to: next); reflectScrolledClipView(contentView)
+        return true
+    }
+    override func scrollWheel(with event: NSEvent) {
+        if !scrollArrangement(with: event) { super.scrollWheel(with: event) }
+    }
     func equalize() {
         layoutSubtreeIfNeeded()
         (documentView as? Split)?.equalize()

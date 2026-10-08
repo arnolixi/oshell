@@ -62,7 +62,13 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
             makeContextMenu?(row(at: convert(event.locationInWindow, from: nil)))
         }
     }
-    private enum Row { case parent, directory(String), session(SessionProfile) }
+    private enum Row { case parent, directory(String), session(SessionProfile), link(SessionLink, SessionProfile) }
+    private struct DragRow: Codable {
+        let profileID: UUID?
+        let directory: String?
+        var linkID: UUID? = nil
+    }
+    static let movePasteboardType = NSPasteboard.PasteboardType("app.oshell.session-directory-move")
     private weak var workspace: WorkspaceController?
     private let table = ContextTable(), search = NSSearchField(), path = NSTextField(labelWithString: "所有会话")
     private var rows = [Row]()
@@ -72,22 +78,34 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
     private let connectButton = NSButton()
     private var sourceProfiles = [SessionProfile](), sortedProfiles = [SessionProfile]()
     private var sourceDirectories = [String](), allDirectories = [String]()
+    private var sourceLinks = [SessionLink](), sourceLinkFolders = [String](), linkMetadata = [UUID: String]()
     private var metadata = [UUID: String](), directoryMetadata = [String: String]()
     private var currentQuery = SessionSearchQuery("")
     private func key(_ row: Row) -> String {
-        switch row { case .parent: return "parent"; case .directory(let path): return "directory:" + path; case .session(let profile): return profile.id.uuidString }
+        switch row { case .parent: return "parent"; case .directory(let path): return "directory:" + path; case .session(let profile): return profile.id.uuidString; case .link(let link, _): return "link:" + link.id.uuidString }
     }
     let kindFilter = NSPopUpButton()
     private var filesOnly = false
     private var fileSelection: ((SessionProfile) -> Void)?
     private(set) var currentDirectory = ""
+    private func connectionProfile(_ row: Row) -> SessionProfile? {
+        switch row { case .session(let profile), .link(_, let profile): return profile; default: return nil }
+    }
+    private func displayProfile(_ row: Row) -> SessionProfile? {
+        guard var profile = connectionProfile(row) else { return nil }
+        if case .link(let link, _) = row { profile.name = link.name; profile.group = SessionLinks.directory(for: link.folder) }
+        return profile
+    }
     var selectedProfiles: [SessionProfile] {
-        table.selectedRowIndexes.compactMap { index in
-            guard rows.indices.contains(index), case .session(let profile) = rows[index] else { return nil }; return profile
-        }
+        table.selectedRowIndexes.compactMap { rows.indices.contains($0) ? connectionProfile(rows[$0]) : nil }
     }
     var selectedProfile: SessionProfile? {
-        guard table.selectedRowIndexes.count == 1, rows.indices.contains(table.selectedRow), case .session(let profile) = rows[table.selectedRow] else { return nil }; return profile
+        guard table.selectedRowIndexes.count == 1, rows.indices.contains(table.selectedRow) else { return nil }
+        return connectionProfile(rows[table.selectedRow])
+    }
+    var selectedLink: SessionLink? {
+        guard table.selectedRowIndexes.count == 1, rows.indices.contains(table.selectedRow), case .link(let link, _) = rows[table.selectedRow] else { return nil }
+        return link
     }
     init(workspace: WorkspaceController) {
         self.workspace = workspace
@@ -104,13 +122,13 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
     func showPreservingMode() { reload(); showWindow(nil); window?.makeKeyAndOrderFront(nil) }
     private func clearFileSelection() { fileSelection = nil; filesOnly = false; table.allowsMultipleSelection = true; window?.title = "会话管理" }
     func windowWillClose(_ notification: Notification) { clearFileSelection() }
-    var visibleProfiles: [SessionProfile] { rows.compactMap { if case .session(let profile) = $0 { return profile }; return nil } }
+    var visibleProfiles: [SessionProfile] { rows.compactMap(connectionProfile) }
     @objc private func changeKindFilter() { reload() }
     private func button(_ title: String, _ action: Selector) -> NSButton { let button = NSButton(title: title, target: self, action: action); button.bezelStyle = .rounded; return button }
     private func build() {
         guard let content = window?.contentView else { return }
         search.placeholderString = "名称、IP、用户名、端口；空格分隔关键词"; search.delegate = self
-        search.toolTip = "搜索名称、主机/IP、用户名、端口、协议和目录。多个关键词需同时匹配，例如：生产 root 2222。⌘F 聚焦；↓ 进入结果；回车打开选中项。"
+        search.toolTip = "搜索名称、主机/IP、用户名、端口、协议和目录。多个关键词需同时匹配，例如：生产 root 2222。搜索快捷键可在设置中修改；↓ 进入结果；回车打开选中项。"
         search.setAccessibilityLabel("会话搜索")
         search.target = self; search.action = #selector(searchSubmitted)
         search.sendsSearchStringImmediately = false
@@ -138,6 +156,9 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         table.intercellSpacing = NSSize(width: 8, height: 0)
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.allowsMultipleSelection = true
+        table.registerForDraggedTypes([Self.movePasteboardType])
+        table.setDraggingSourceOperationMask([.move, .link], forLocal: true)
+        table.setDraggingSourceOperationMask([], forLocal: false)
         table.usesAlternatingRowBackgroundColors = true; table.delegate = self; table.dataSource = self
         table.target = self; table.doubleAction = #selector(openSelection)
         table.activateSelection = { [weak self] in self?.activateSelection() }
@@ -150,7 +171,7 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         resultStatus.font = .systemFont(ofSize: 11); resultStatus.textColor = .secondaryLabelColor
         resultStatus.lineBreakMode = .byTruncatingTail; resultStatus.setAccessibilityLabel("会话搜索结果")
         resultStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        resultStatus.toolTip = "⌘ 单击多选，⇧ 单击连续选择，点击连接批量打开；单击 ../ 返回上级；右键管理；Esc 关闭。"
+        resultStatus.toolTip = "⌘ 单击多选，⇧ 单击连续选择，点击连接批量打开；单击 ../ 返回上级；拖到目录或 ../ 迁移；右键管理；Esc 关闭。"
         connectButton.title = "连接"; connectButton.target = self; connectButton.action = #selector(activateSelection); connectButton.bezelStyle = .rounded
         let bottom = NSStackView(views: [resultStatus, NSView(), connectButton, button("关闭", #selector(hide))]); bottom.spacing = 10
         emptyLabel.alignment = .center; emptyLabel.maximumNumberOfLines = 2; emptyLabel.textColor = .secondaryLabelColor; emptyLabel.font = .systemFont(ofSize: 13)
@@ -177,38 +198,52 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         }
         if table.selectedRowIndexes.count > 1 {
             add("连接（\(selectedProfiles.count)）", #selector(connect), enabled: !selectedProfiles.isEmpty)
+            add("移动到…", #selector(move), enabled: selectedMoveRows.count == table.selectedRowIndexes.count)
             return menu
         }
         if rows.indices.contains(row) {
             switch rows[row] {
             case .parent:
                 add("上一级", #selector(up))
-            case .directory:
+            case .directory(let path):
                 add("打开目录", #selector(openDirectory))
-                add("重命名…", #selector(edit))
+                add("重命名…", #selector(edit), enabled: path != SessionLinks.rootDirectory)
             case .session(let profile):
                 add("连接", #selector(connect), enabled: !filesOnly || profile.kind != .local)
                 if profile.kind.usesSSH { add("打开 SFTP 文件", #selector(openFiles)) }
                 if profile.kind == .sftp { add("打开 SSH 终端", #selector(openTerminal)) }
                 add("属性…", #selector(edit), enabled: profile.kind != .local)
                 add("复制会话", #selector(duplicateSession), enabled: profile.kind != .local)
+                add("添加到快捷链接…", #selector(addSavedLink))
+            case .link(_, let profile):
+                add("连接", #selector(connect), enabled: !filesOnly || profile.kind != .local)
+                if profile.kind.usesSSH { add("打开 SFTP 文件", #selector(openFiles)) }
+                if profile.kind == .sftp { add("打开 SSH 终端", #selector(openTerminal)) }
+                add("链接属性…", #selector(edit))
+                add("源会话属性…", #selector(editLinkSource), enabled: profile.kind != .local)
             }
             if case .parent = rows[row] { /* Navigation only; never mutate this row. */ }
             else {
-                add("移动到…", #selector(move))
-                add("删除…", #selector(remove))
+                let reserved = key(rows[row]) == "directory:" + SessionLinks.rootDirectory
+                add("移动到…", #selector(move), enabled: !reserved)
+                add(selectedLink == nil ? "删除…" : "删除快捷引用", #selector(remove), enabled: !reserved)
             }
             menu.addItem(.separator())
         }
-        add("新建 SSH 会话…", #selector(newSession))
-        add("新建 SFTP 会话…", #selector(newSFTP))
-        add("新建 FTP 会话…", #selector(newFTP))
+        if SessionLinks.containsDirectory(currentDirectory) {
+            add("添加已有会话链接…", #selector(addSavedLink), enabled: !sourceProfiles.isEmpty)
+        } else {
+            add("新建 SSH 会话…", #selector(newSession))
+            add("新建 SFTP 会话…", #selector(newSFTP))
+            add("新建 FTP 会话…", #selector(newFTP))
+        }
         add("新建目录…", #selector(newDirectory))
         add("会话默认属性…", #selector(showSessionDefaults))
         menu.addItem(.separator())
         if rows.indices.contains(row) {
             switch rows[row] {
             case .session: add("导出此会话…", #selector(exportSelection))
+            case .link: add("导出此快捷引用…", #selector(exportSelection))
             case .directory: add("导出此目录…", #selector(exportSelection))
             case .parent: break
             }
@@ -222,14 +257,17 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         switch rows[table.selectedRow] {
         case .parent: return
         case .session(let profile): SessionTransfer.export(profiles: [profile], directories: profile.group.isEmpty ? [] : [profile.group])
+        case .link(let link, let profile): SessionTransfer.export(profiles: [profile], directories: [SessionLinks.directory(for: link.folder)], links: [link])
         case .directory(let directory):
-            SessionTransfer.export(profiles: workspace.configuration.profiles.filter { SessionDirectory.contains($0.group, in: directory) },
-                                   directories: SessionDirectory.all(workspace.configuration).filter { SessionDirectory.contains($0, in: directory) })
+            let links = workspace.configuration.sessionLinks.entries.filter { SessionDirectory.contains(SessionLinks.directory(for: $0.folder), in: directory) }
+            let linkedIDs = Set(links.map(\.profileID))
+            SessionTransfer.export(profiles: workspace.configuration.profiles.filter { SessionDirectory.contains($0.group, in: directory) || linkedIDs.contains($0.id) },
+                                   directories: SessionDirectory.all(workspace.configuration).filter { SessionDirectory.contains($0, in: directory) }, links: links)
         }
     }
     @objc func exportAll() {
         guard let workspace else { return }
-        SessionTransfer.export(profiles: workspace.configuration.profiles, directories: SessionDirectory.all(workspace.configuration))
+        SessionTransfer.export(profiles: workspace.configuration.profiles, directories: SessionDirectory.all(workspace.configuration), links: workspace.configuration.sessionLinks.entries)
     }
     @objc func importSessions() {
         guard let workspace else { return }
@@ -238,8 +276,13 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
     func reload(select id: UUID? = nil) {
         guard let configuration = workspace?.configuration else { return }
         let oldKeys = id.map { Set([$0.uuidString]) } ?? Set(table.selectedRowIndexes.compactMap { rows.indices.contains($0) ? key(rows[$0]) : nil })
-        if sourceProfiles != configuration.profiles || sourceDirectories != configuration.directories || metadata.count != configuration.profiles.count {
+        if sourceProfiles != configuration.profiles || sourceDirectories != configuration.directories || sourceLinks != configuration.sessionLinks.entries || sourceLinkFolders != configuration.sessionLinks.allFolders || metadata.count != configuration.profiles.count || allDirectories.isEmpty {
             sourceProfiles = configuration.profiles; sourceDirectories = configuration.directories
+            sourceLinks = configuration.sessionLinks.entries; sourceLinkFolders = configuration.sessionLinks.allFolders
+            linkMetadata = Dictionary(uniqueKeysWithValues: sourceLinks.compactMap { link -> (UUID, String)? in
+                guard let profile = sourceProfiles.first(where: { $0.id == link.profileID }), let projected = displayProfile(.link(link, profile)) else { return nil }
+                return (link.id, SessionSearchQuery.metadata(projected))
+            })
             sortedProfiles = sourceProfiles.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             allDirectories = SessionDirectory.all(configuration)
             metadata = Dictionary(sourceProfiles.map { ($0.id, SessionSearchQuery.metadata($0)) }, uniquingKeysWith: { _, next in next })
@@ -260,18 +303,27 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
             && (searching ? inScope($0.group) : $0.group == currentDirectory)
             && currentQuery.matches(normalized: metadata[$0.id] ?? "")
         }
+        let links: [Row] = sourceLinks.compactMap { link in
+            let directory = SessionLinks.directory(for: link.folder)
+            guard let profile = sourceProfiles.first(where: { $0.id == link.profileID }),
+                  (!filesOnly || profile.kind != .local), kind == nil || profile.kind == kind,
+                  (searching ? inScope(directory) : directory == currentDirectory),
+                  currentQuery.matches(normalized: linkMetadata[link.id] ?? "") else { return nil }
+            return .link(link, profile)
+        }
         rows = currentDirectory.isEmpty ? [] : [.parent]
-        rows += directoryRows.map(Row.directory); rows += profiles.map(Row.session)
+        rows += directoryRows.map(Row.directory)
+        rows += (profiles.map(Row.session) + links).sorted { (displayProfile($0)?.name ?? "").localizedStandardCompare(displayProfile($1)?.name ?? "") == .orderedAscending }
         path.stringValue = SessionDirectory.display(currentDirectory)
         path.toolTip = path.stringValue
         table.reloadData(); table.deselectAll(nil)
         let retained = IndexSet(rows.indices.filter { oldKeys.contains(key(rows[$0])) && !(searching && key(rows[$0]) == "parent") })
         if !retained.isEmpty { table.selectRowIndexes(retained, byExtendingSelection: false) }
         else if searching, let index = rows.firstIndex(where: { if case .parent = $0 { return false }; return true }) { table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
-        resultStatus.stringValue = currentQuery.isValid ? "\(profiles.count) 个会话 · \(directoryRows.count) 个目录" + (searching ? (global ? " · 全部目录" : " · 当前目录及子目录") : "") : "搜索内容过长：最多 4 KB / 32 个关键词"
+        resultStatus.stringValue = currentQuery.isValid ? "\(profiles.count + links.count) 个会话 · \(directoryRows.count) 个目录" + (searching ? (global ? " · 全部目录" : " · 当前目录及子目录") : "") : "搜索内容过长：最多 4 KB / 32 个关键词"
         resultStatus.textColor = currentQuery.isValid ? .secondaryLabelColor : .systemRed
         emptyLabel.stringValue = searching ? "没有匹配的会话或目录\n可调整关键词、协议或搜索范围" : "当前目录没有可显示的会话或目录\n右键可以新建会话或目录"
-        emptyLabel.isHidden = !profiles.isEmpty || !directoryRows.isEmpty
+        emptyLabel.isHidden = !profiles.isEmpty || !links.isEmpty || !directoryRows.isEmpty
         searchScope.isEnabled = searching; kindFilter.item(at: 4)?.isEnabled = !filesOnly
         updateConnectButton()
     }
@@ -285,7 +337,7 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
     @objc private func activateSelection() {
         if !selectedProfiles.isEmpty { connect(); return }
         guard table.selectedRowIndexes.count == 1, rows.indices.contains(table.selectedRow) else { return }
-        switch rows[table.selectedRow] { case .parent: up(); case .directory: openDirectory(); case .session: connect() }
+        switch rows[table.selectedRow] { case .parent: up(); case .directory: openDirectory(); case .session, .link: connect() }
     }
     @objc private func searchSubmitted() {
         if let editor = search.currentEditor() as? NSTextView, editor.hasMarkedText() { return }
@@ -302,6 +354,12 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         }
         return false
     }
+    func revealDirectory(_ directory: String) { navigate(to: directory) }
+    func revealLink(_ id: UUID) {
+        guard let link = workspace?.configuration.sessionLinks.entries.first(where: { $0.id == id }) else { return }
+        kindFilter.selectItem(at: 0); navigate(to: SessionLinks.directory(for: link.folder))
+        if let index = rows.firstIndex(where: { key($0) == "link:" + id.uuidString }) { table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+    }
     func reveal(_ profile: SessionProfile) { kindFilter.selectItem(at: 0); currentDirectory = profile.group; search.stringValue = ""; reload(select: profile.id) }
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -317,8 +375,10 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
             default: text = ""
             }
             symbol = "folder"
-        case .session(let profile):
+        case .session, .link:
+            let profile = displayProfile(rows[row])!
             symbol = profile.kind.isFileSession ? "folder.badge.gearshape" : "terminal"
+            if case .link = rows[row] { symbol = "link" }
             switch tableColumn?.identifier.rawValue {
             case "name": text = profile.name
             case "protocol": text = profile.kind.title
@@ -342,9 +402,57 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         }
         cell.label.attributedStringValue = styled
         cell.icon.image = identifier.rawValue == "name" ? symbol.flatMap { NSImage(oshellSymbolName: $0, accessibilityDescription: nil) } : nil
-        if case .parent = rows[row] { cell.toolTip = "点击返回上一级目录" } else { cell.toolTip = text }
+        if case .parent = rows[row] { cell.toolTip = "点击返回上一级目录" }
+        else if case .link(_, let source) = rows[row] { cell.toolTip = "快捷引用 → " + SessionDirectory.display(source.group) + "/" + source.name + "\n" + text }
+        else { cell.toolTip = text }
         return cell
     }
+    private func moveRow(at index: Int) -> DragRow? {
+        guard rows.indices.contains(index) else { return nil }
+        switch rows[index] {
+        case .parent: return nil
+        case .session(let profile): return DragRow(profileID: profile.id, directory: nil)
+        case .directory(let path): return path == SessionLinks.rootDirectory ? nil : DragRow(profileID: nil, directory: path)
+        case .link(let link, _): return DragRow(profileID: nil, directory: nil, linkID: link.id)
+        }
+    }
+    private var selectedMoveRows: [DragRow] { table.selectedRowIndexes.compactMap { moveRow(at: $0) } }
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+        guard let value = moveRow(at: row), let data = try? JSONEncoder().encode(value) else { return nil }
+        let item = NSPasteboardItem(); item.setData(data, forType: Self.movePasteboardType); return item
+    }
+    private func proposedMove(_ info: NSDraggingInfo, row: Int, operation: NSTableView.DropOperation) -> Configuration? {
+        guard let source = info.draggingSource as? NSTableView, source === table,
+              info.draggingSourceOperationMask.contains(.move), let workspace,
+              let items = info.draggingPasteboard.pasteboardItems, !items.isEmpty, items.count <= 10000 else { return nil }
+        var selection = [DragRow]()
+        for item in items {
+            guard let data = item.data(forType: Self.movePasteboardType), data.count <= 8192,
+                  let decoded = try? JSONDecoder().decode(DragRow.self, from: data),
+                  [decoded.profileID != nil, decoded.directory != nil, decoded.linkID != nil].filter({ $0 }).count == 1 else { return nil }
+            selection.append(decoded)
+        }
+        let destination: String
+        if operation == .on, rows.indices.contains(row) {
+            switch rows[row] {
+            case .directory(let path): destination = path
+            case .parent: destination = SessionDirectory.parent(currentDirectory)
+            case .session, .link: return nil
+            }
+        } else if operation == .above && row == rows.count { destination = currentDirectory }
+        else { return nil }
+        return try? SessionDirectory.moving(workspace.configuration, profileIDs: selection.compactMap(\.profileID), directories: selection.compactMap(\.directory), linkIDs: selection.compactMap(\.linkID), to: destination)
+    }
+    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+        guard let value = proposedMove(info, row: row, operation: dropOperation) else { return [] }
+        if let current = workspace?.configuration, value.sessionLinks.entries.count > current.sessionLinks.entries.count, info.draggingSourceOperationMask.contains(.link) { return .link }
+        return .move
+    }
+    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
+        guard let value = proposedMove(info, row: row, operation: dropOperation), workspace?.saveConfiguration(value) == true else { return false }
+        reload(); return true
+    }
+
     func controlTextDidChange(_ obj: Notification) {
         if let editor = search.currentEditor() as? NSTextView, editor.hasMarkedText() { return }
         reload()
@@ -390,34 +498,44 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
     @objc private func newSession() { workspace?.createSession(kind: .ssh) }
     @objc private func newSFTP() { workspace?.createSession(kind: .sftp) }
     @objc private func newFTP() { workspace?.createSession(kind: .ftp) }
+    @objc private func addSavedLink() {
+        workspace?.addSavedSessionLink(profile: selectedLink == nil ? selectedProfile : nil, folder: SessionLinks.folder(for: currentDirectory) ?? "")
+    }
+    @objc private func editLinkSource() { workspace?.editSession() }
     @objc private func showSessionDefaults() { workspace?.showSessionDefaults() }
     @objc private func duplicateSession() {
         guard let profile = selectedProfile, let copy = workspace?.duplicateSavedSession(profile.id) else { return }
         reveal(copy)
     }
-    private func askPath(_ title: String, value: String, message: String, relativeTo base: String) -> String? {
-        let alert = PopupAlert(); alert.messageText = title; alert.informativeText = message; alert.addButton(withTitle: "确定"); alert.addButton(withTitle: "取消")
-        let input = NSTextField(string: SessionDirectory.display(value)); input.placeholderString = "/生产/机房"; input.identifier = .init("session.directory.path"); input.frame = NSRect(x: 0, y: 0, width: 420, height: 26); alert.accessoryView = input; alert.window.initialFirstResponder = input
+    private func askChildName(_ title: String, name: String, parent: String) -> String? {
+        let alert = PopupAlert(); alert.messageText = title
+        alert.informativeText = "所在目录：\(SessionDirectory.display(parent))\n只填写一个目录名称。"
+        alert.addButton(withTitle: "确定"); alert.addButton(withTitle: "取消")
+        let input = NSTextField(string: name); input.placeholderString = "目录名称"
+        input.identifier = .init("session.directory.name"); input.frame = NSRect(x: 0, y: 0, width: 420, height: 26)
+        alert.accessoryView = input; alert.window.initialFirstResponder = input
         while alert.runModal() == .alertFirstButtonReturn {
-            do { return try SessionDirectory.resolvePath(input.stringValue, relativeTo: base) }
+            do { return try SessionDirectory.childPath(named: input.stringValue, in: parent) }
             catch { Dialogs.message(error.localizedDescription) }
         }
         return nil
     }
     @objc private func newDirectory() {
-        guard let workspace, let path = askPath("新建目录", value: currentDirectory.isEmpty ? "新目录" : currentDirectory + "/新目录", message: "使用 Linux 格式，例如 /生产/机房；相对路径基于当前目录，支持 . 和 ..。", relativeTo: currentDirectory), !path.isEmpty else { return }
+        guard let workspace, let path = askChildName("新建子目录", name: "新目录", parent: currentDirectory) else { return }
         var config = workspace.configuration
         guard !SessionDirectory.all(config).contains(path) else { Dialogs.message("目录已存在。"); return }
         config.directories.append(path)
-        if workspace.saveConfiguration(config) { currentDirectory = SessionDirectory.parent(path); reload() }
+        if workspace.saveConfiguration(config) { reload() }
     }
     @objc private func edit() {
         guard rows.indices.contains(table.selectedRow) else { return }
         switch rows[table.selectedRow] {
         case .parent: return
         case .session: workspace?.editSession()
+        case .link(let link, _): workspace?.editSavedSessionLink(link.id)
         case .directory(let old):
-            guard let next = askPath("重命名 / 移动目录", value: old, message: "填写新路径，例如 /生产/机房；相对路径基于原父目录。子目录和会话会一起移动。", relativeTo: SessionDirectory.parent(old)) else { return }; renameDirectory(old, to: next)
+            guard old != SessionLinks.rootDirectory else { return }
+            guard let next = askChildName("重命名目录", name: String(old.split(separator: "/").last!), parent: SessionDirectory.parent(old)) else { return }; renameDirectory(old, to: next)
         }
     }
     private func renameDirectory(_ old: String, to next: String) {
@@ -425,35 +543,41 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         var config = workspace.configuration
         guard !SessionDirectory.contains(next, in: old), !SessionDirectory.all(config).contains(next) else { Dialogs.message("目标目录已存在，或位于当前目录内部。"); return }
         func remap(_ path: String) -> String { SessionDirectory.contains(path, in: old) ? next + String(path.dropFirst(old.count)) : path }
-        config.directories = SessionDirectory.all(config).map(remap)
+        if let from = SessionLinks.folder(for: old), let destination = SessionLinks.folder(for: next) {
+            do { try config.sessionLinks.renameFolder(from, to: destination) } catch { Dialogs.message(error.localizedDescription); return }
+        }
+        config.directories = config.directories.map(remap)
         for index in config.profiles.indices { config.profiles[index].group = remap(config.profiles[index].group) }
         if workspace.saveConfiguration(config) { reload() }
     }
     @objc private func move() {
-        guard let workspace, rows.indices.contains(table.selectedRow) else { return }
-        if case .parent = rows[table.selectedRow] { return }
-        let origin: String
-        switch rows[table.selectedRow] { case .session(let profile): origin = profile.group; case .directory(let path): origin = SessionDirectory.parent(path); case .parent: return }
-        guard let destination = askPath("移动到目录", value: origin, message: "填写目标路径；/ 或留空表示根目录，相对路径基于当前所属目录。不存在的目录将自动创建。", relativeTo: origin) else { return }
-        switch rows[table.selectedRow] {
-        case .parent: return
-        case .directory(let old): renameDirectory(old, to: [destination, String(old.split(separator: "/").last!)].filter { !$0.isEmpty }.joined(separator: "/"))
-        case .session(let profile):
-            var config = workspace.configuration; guard let index = config.profiles.firstIndex(where: { $0.id == profile.id }) else { return }
-            config.profiles[index].group = destination
-            if !destination.isEmpty { config.directories.append(destination) }
-            if workspace.saveConfiguration(config) { reload() }
-        }
+        guard let workspace else { return }
+        let selection = selectedMoveRows
+        guard !selection.isEmpty, selection.count == table.selectedRowIndexes.count,
+              let destination = SessionDirectoryTree.choose(directories: SessionDirectory.all(workspace.configuration), selected: currentDirectory, excluded: selection.compactMap(\.directory), title: "移动到目录") else { return }
+        do {
+            guard let value = try SessionDirectory.moving(workspace.configuration, profileIDs: selection.compactMap(\.profileID), directories: selection.compactMap(\.directory), linkIDs: selection.compactMap(\.linkID), to: destination) else { return }
+            if workspace.saveConfiguration(value) { reload() }
+        } catch { Dialogs.message(error.localizedDescription) }
     }
     @objc private func remove() {
         guard let workspace, rows.indices.contains(table.selectedRow) else { return }
         switch rows[table.selectedRow] {
         case .parent: return
         case .session: workspace.deleteSession()
+        case .link(let link, _):
+            var config = workspace.configuration; config.sessionLinks.entries.removeAll { $0.id == link.id }; _ = workspace.saveConfiguration(config); reload()
         case .directory(let directory):
+            guard directory != SessionLinks.rootDirectory else { return }
             var config = workspace.configuration
-            guard !config.profiles.contains(where: { SessionDirectory.contains($0.group, in: directory) }), !SessionDirectory.all(config).contains(where: { $0.hasPrefix(directory + "/") }) else { Dialogs.message("目录非空，请先移动或删除其中的会话和子目录。"); return }
+            if let folder = SessionLinks.folder(for: directory) {
+                guard !config.profiles.contains(where: { SessionDirectory.contains($0.group, in: directory) }) else { Dialogs.message("目录内仍有原始会话，请先移动这些会话。"); return }
+                guard Dialogs.confirm("删除快捷链接目录“\(directory)”？", text: "将删除该目录及所有子目录中的快捷引用；原会话、密码和连接配置保留。", action: "删除") else { return }
+                config.sessionLinks.removeFolder(folder); _ = workspace.saveConfiguration(config); reload(); return
+            }
+            guard !config.profiles.contains(where: { SessionDirectory.contains($0.group, in: directory) }), !config.sessionLinks.entries.contains(where: { SessionDirectory.contains(SessionLinks.directory(for: $0.folder), in: directory) }), !SessionDirectory.all(config).contains(where: { $0.hasPrefix(directory + "/") }) else { Dialogs.message("目录非空，请先移动或删除其中的会话和子目录。"); return }
             guard Dialogs.confirm("删除空目录“\(directory)”？", text: "此操作不会关闭任何已打开的连接。", action: "删除") else { return }
+            if let folder = SessionLinks.folder(for: directory) { config.sessionLinks.removeFolder(folder) }
             config.directories.removeAll { $0 == directory }; _ = workspace.saveConfiguration(config); reload()
         }
     }

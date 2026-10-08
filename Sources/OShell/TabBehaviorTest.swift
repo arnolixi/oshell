@@ -67,40 +67,40 @@ enum TabBehaviorTest {
             finish()
         }
         feed(pane, "\u{1b}]2;root@gateway.test:~\u{7}")
-        checks["outerOSC"] = pane.title == "gateway.test · IP 待识别"
+        checks["outerOSC"] = (pane.title == "gateway.test" && pane.remoteAddress == nil)
         for byte in "\u{1b}]0;admin@app-node:/srv\u{1b}\\".utf8 { pane.receive(Data([byte])) }
-        checks["fragmentedNestedOSC"] = pane.title == "app-node · IP 待识别"
+        checks["fragmentedNestedOSC"] = (pane.title == "app-node" && pane.remoteAddress == nil)
         feed(pane, "\u{1b}]7;file://db-node/var/lib\u{7}")
-        checks["nestedDirectoryUpdatesHost"] = pane.title == "db-node · IP 待识别"
+        checks["nestedDirectoryUpdatesHost"] = (pane.title == "db-node" && pane.remoteAddress == nil)
         checks["nestedDirectoryDoesNotRetargetSFTP"] = pane.remoteDirectory == "." && pane.profile.host == "gateway.test"
         feed(pane, "\u{1b}]2;root@gateway.test:~\u{7}")
-        checks["returnToOuterOSC"] = pane.title == "gateway.test · IP 待识别"
+        checks["returnToOuterOSC"] = (pane.title == "gateway.test" && pane.remoteAddress == nil)
         feed(pane, "\u{1b}]2;vim /etc/hosts\u{7}")
-        checks["applicationTitleNotMistakenForHost"] = pane.title == "gateway.test · IP 待识别"
+        checks["applicationTitleNotMistakenForHost"] = (pane.title == "gateway.test" && pane.remoteAddress == nil)
         for target in [fixed, pinned] { feed(target, "\u{1b}]2;root@unwanted:~\u{7}\u{1b}]7;file://unwanted/tmp\u{7}\r\n[root@unwanted ~]# ") }
         feed(pane, "\r\n\u{1b}[32m[root@centos6 ~]# \u{1b}[0m")
         later {
-            checks["centosPromptFallback"] = pane.title == "centos6 · IP 待识别"
-            checks["savedNameDoesNotOverrideTitle"] = fixed.title == "unwanted · IP 待识别"
-            checks["externalSessionUsesDetectedHost"] = pinned.title == "unwanted · IP 待识别"
+            checks["centosPromptFallback"] = (pane.title == "centos6" && pane.remoteAddress == nil)
+            checks["savedNameDoesNotOverrideTitle"] = (fixed.title == "unwanted" && fixed.remoteAddress == nil)
+            checks["externalSessionUsesDetectedHost"] = (pinned.title == "unwanted" && pinned.remoteAddress == nil)
             feed(pane, "\r\u{1b}[Kroot@ubuntu:/srv$ ")
             later {
-                checks["nestedPromptFallback"] = pane.title == "ubuntu · IP 待识别"
+                checks["nestedPromptFallback"] = (pane.title == "ubuntu" && pane.remoteAddress == nil)
                 feed(pane, "ssh root@wrong-host\r\nPassword: ")
                 later {
-                    checks["typedSSHAndPasswordPromptIgnored"] = pane.title == "ubuntu · IP 待识别"
+                    checks["typedSSHAndPasswordPromptIgnored"] = (pane.title == "ubuntu" && pane.remoteAddress == nil)
                     feed(pane, "\u{1b}[?1049h\r\n[root@fake-editor ~]# ")
                     later {
-                        checks["alternateScreenPromptIgnored"] = pane.title == "ubuntu · IP 待识别"
+                        checks["alternateScreenPromptIgnored"] = (pane.title == "ubuntu" && pane.remoteAddress == nil)
                         feed(pane, "\u{1b}[?1049l\r\n[root@centos6 ~]# ")
                         later {
-                            checks["returnToOuterPrompt"] = pane.title == "centos6 · IP 待识别"
+                            checks["returnToOuterPrompt"] = (pane.title == "centos6" && pane.remoteAddress == nil)
                             feed(pane, String(repeating: "\r\nordinary output", count: 60) + "\r\n[root@deep-node ~]# ")
                             pane.terminal.getTerminal().buffer.yDisp = 0
                             later {
-                                checks["scrolledViewportDoesNotChangeHostDetection"] = pane.title == "deep-node · IP 待识别"
+                                checks["scrolledViewportDoesNotChangeHostDetection"] = (pane.title == "deep-node" && pane.remoteAddress == nil)
                                 pane.shutdown(); feed(pane, "\u{1b}]2;root@closed:~\u{7}")
-                                checks["closedPaneCannotChangeTitle"] = pane.title == "deep-node · IP 待识别"
+                                checks["closedPaneCannotChangeTitle"] = (pane.title == "deep-node" && pane.remoteAddress == nil)
                                 keyboard()
                             }
                         }
