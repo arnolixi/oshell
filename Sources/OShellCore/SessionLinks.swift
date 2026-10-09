@@ -4,9 +4,9 @@
 import Foundation
 
 public enum SessionLinkItem: Hashable {
-    case link(UUID), folder(String)
+    case link(UUID), session(UUID), folder(String)
     public var key: String {
-        switch self { case .link(let id): return "link:" + id.uuidString; case .folder(let path): return "folder:" + path }
+        switch self { case .link(let id): return "link:" + id.uuidString; case .session(let id): return "session:" + id.uuidString; case .folder(let path): return "folder:" + path }
     }
 }
 
@@ -43,20 +43,28 @@ public struct SessionLinks: Codable {
         visible = try values.decodeIfPresent(Bool.self, forKey: .visible) ?? true
         rootOrder = try values.decodeIfPresent([String].self, forKey: .rootOrder) ?? []
     }
-    public var orderedRootItems: [SessionLinkItem] {
+    public var orderedRootItems: [SessionLinkItem] { orderedRootItems(profiles: []) }
+    public func orderedRootItems(profiles: [SessionProfile]) -> [SessionLinkItem] {
         let defaults = allFolders.filter { SessionDirectory.parent($0).isEmpty }.map(SessionLinkItem.folder)
             + entries.filter { $0.folder.isEmpty }.map { SessionLinkItem.link($0.id) }
+            + profiles.filter { $0.group == Self.rootDirectory }.map { SessionLinkItem.session($0.id) }
         let available = Dictionary(uniqueKeysWithValues: defaults.map { ($0.key, $0) })
         var seen = Set<String>()
         return (rootOrder + defaults.map(\.key)).compactMap { key in
             guard let item = available[key], seen.insert(key).inserted else { return nil }; return item
         }
     }
-    public mutating func normalizeRootOrder() {
-        if !rootOrder.isEmpty { rootOrder = orderedRootItems.map(\.key) }
+    public mutating func normalizeRootOrder(profiles: [SessionProfile]? = nil) {
+        guard !rootOrder.isEmpty else { return }
+        if let profiles { rootOrder = orderedRootItems(profiles: profiles).map(\.key) }
+        else {
+            let valid = Set(orderedRootItems.map(\.key))
+            rootOrder = rootOrder.filter { valid.contains($0) || $0.hasPrefix("session:") }
+            rootOrder += orderedRootItems.map(\.key).filter { !rootOrder.contains($0) }
+        }
     }
-    @discardableResult public mutating func reorderRoot(_ source: SessionLinkItem, before target: SessionLinkItem?) throws -> Bool {
-        let current = orderedRootItems
+    @discardableResult public mutating func reorderRoot(_ source: SessionLinkItem, before target: SessionLinkItem?, profiles: [SessionProfile] = []) throws -> Bool {
+        let current = orderedRootItems(profiles: profiles)
         guard current.contains(source), target == nil || current.contains(target!) else { throw ModelError.invalid("链接栏项目已变化，请重新拖动。") }
         if source == target { return false }
         var reordered = current.filter { $0 != source }
@@ -84,7 +92,7 @@ public struct SessionLinks: Codable {
             guard ids.insert(value.id).inserted, locations.insert(value.profileID.uuidString + "/" + value.folder).inserted else { return nil }
             return value
         }
-        folders = allFolders; normalizeRootOrder()
+        folders = allFolders; normalizeRootOrder(profiles: profiles)
     }
     public mutating func add(profileID: UUID, name: String, folder: String = "") {
         let folder = SessionDirectory.normalize(folder)
@@ -117,7 +125,7 @@ extension Configuration {
         let paths = SessionDirectory.all(self)
         sessionLinks.folders += paths.compactMap { SessionLinks.folder(for: $0) }.filter { !$0.isEmpty }
         sessionLinks.folders = sessionLinks.allFolders
-        sessionLinks.normalizeRootOrder()
+        sessionLinks.normalizeRootOrder(profiles: profiles)
         // A single owner for Links directories prevents a deleted folder from
         // reappearing through a stale second copy in the ordinary catalog.
         directories = paths.filter { !SessionLinks.containsDirectory($0) }

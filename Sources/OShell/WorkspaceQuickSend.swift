@@ -93,7 +93,7 @@ extension WorkspaceController {
     @objc func toggleQuickSendBar() {
         var config = configuration; config.preferences.quickSendBarVisible.toggle()
         guard saveConfiguration(config) else { return }
-        quickSendBar.isHidden = !config.preferences.quickSendBarVisible; quickSendHeight.constant = quickSendBar.isHidden ? 0 : 36
+        quickSendBar.isHidden = !configuration.preferences.quickSendBarVisible; quickSendHeight.constant = quickSendBar.isHidden ? 0 : 36
         window?.contentView?.layoutSubtreeIfNeeded()
         if quickSendBar.isHidden { selectedTab?.activePane.activate() } else { window?.makeFirstResponder(quickSendBar.field) }
     }

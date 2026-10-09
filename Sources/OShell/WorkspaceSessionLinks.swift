@@ -14,6 +14,7 @@ extension WorkspaceController {
         sessionLinkBar.onOpen = { [weak self] target, view in
             guard let self else { return }
             switch target {
+            case .session(let id): self.openLinkBarSession(id)
             case .link(let id): self.openSessionLink(id)
             case .folder(let folder): self.sessionLinkMenu(folder: folder).popUp(positioning: nil, at: NSPoint(x: 0, y: view.bounds.height), in: view)
             }
@@ -31,15 +32,26 @@ extension WorkspaceController {
             switch position {
             case .before(let target):
                 var value = configuration
+                if case .session(let id) = source,
+                   let profile = value.profiles.first(where: { $0.id == id }), profile.group != SessionLinks.rootDirectory {
+                    guard SessionLinks.containsDirectory(profile.group), let moved = try SessionDirectory.moving(value, profileIDs: [id], directories: [], to: SessionLinks.rootDirectory, createReferences: false) else { return nil }
+                    value = moved
+                    _ = try value.sessionLinks.reorderRoot(source, before: target, profiles: value.profiles)
+                    return value
+                }
                 if case .link(let id) = source,
                    let link = value.sessionLinks.entries.first(where: { $0.id == id }), !link.folder.isEmpty {
                     guard let moved = try SessionDirectory.moving(value, profileIDs: [], directories: [], linkIDs: [id], to: SessionLinks.rootDirectory) else { return nil }
                     value = moved
-                    _ = try value.sessionLinks.reorderRoot(source, before: target)
+                    _ = try value.sessionLinks.reorderRoot(source, before: target, profiles: value.profiles)
                     return value
                 }
-                return try value.sessionLinks.reorderRoot(source, before: target) ? value : nil
+                return try value.sessionLinks.reorderRoot(source, before: target, profiles: value.profiles) ? value : nil
             case .folder(let folder):
+                if case .session(let id) = source {
+                    guard configuration.profiles.contains(where: { $0.id == id && SessionLinks.containsDirectory($0.group) }) else { return nil }
+                    return try SessionDirectory.moving(configuration, profileIDs: [id], directories: [], to: SessionLinks.directory(for: folder), createReferences: false)
+                }
                 guard case .link(let id) = source, configuration.sessionLinks.entries.contains(where: { $0.id == id }) else { return nil }
                 return try SessionDirectory.moving(configuration, profileIDs: [], directories: [], linkIDs: [id], to: SessionLinks.directory(for: folder))
             }
@@ -53,9 +65,12 @@ extension WorkspaceController {
     func rebuildSessionLinkBar() {
         sessionLinkBar.invalidateDragSources()
         let links = configuration.sessionLinks
-        let entries: [SessionLinkBar.Entry] = links.orderedRootItems.compactMap { item in
+        let entries: [SessionLinkBar.Entry] = links.orderedRootItems(profiles: configuration.profiles).compactMap { item in
             switch item {
-            case .folder(let path): return .init(target: item, title: path, detail: "快捷链接文件夹：/Links/" + path)
+            case .folder(let path): return .init(target: item, title: path, detail: "会话与快捷引用目录：/Links/" + path)
+            case .session(let id):
+                guard let profile = configuration.profiles.first(where: { $0.id == id }) else { return nil }
+                return .init(target: item, title: profile.name, detail: "实际会话 · " + profile.kind.title + "\n" + SessionDirectory.display(profile.group) + "\n" + profile.host)
             case .link(let id):
                 guard let link = links.entries.first(where: { $0.id == id }) else { return nil }
                 return .init(target: item, title: link.name, detail: linkDetail(link))
@@ -67,7 +82,7 @@ extension WorkspaceController {
     }
     private func linkDetail(_ link: SessionLink) -> String {
         guard let profile = configuration.profiles.first(where: { $0.id == link.profileID }) else { return link.name }
-        return "\(link.name) · \(profile.kind.title)\n\(profile.username)@\(profile.host):\(profile.port)\n点击新建连接 · 右键管理链接"
+        return "快捷引用 · \(link.name) · \(profile.kind.title)\n\(profile.username)@\(profile.host):\(profile.port)\n点击新建连接 · 右键管理链接"
     }
     @objc func toggleSessionLinkBar() {
         var value = configuration; value.sessionLinks.visible.toggle(); _ = saveConfiguration(value)
@@ -204,16 +219,32 @@ extension WorkspaceController {
               let profile = configuration.profiles.first(where: { $0.id == link.profileID }) else { return }
         open(profile)
     }
+    private func openLinkBarSession(_ id: UUID) {
+        guard let profile = configuration.profiles.first(where: { $0.id == id && SessionLinks.containsDirectory($0.group) }) else { return }
+        open(profile)
+    }
+    @objc private func connectLinkBarSession(_ sender: NSMenuItem) { if let id = sender.representedObject as? UUID { openLinkBarSession(id) } }
+    @objc private func manageLinkBarSession(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID, let profile = configuration.profiles.first(where: { $0.id == id }) else { return }
+        // Session management owns editing/deletion confirmations for actual profiles.
+        showSessionManagerSelection(profile)
+    }
     @objc private func connectSessionLink(_ sender: NSMenuItem) { if let id = sender.representedObject as? UUID { openSessionLink(id) } }
     func sessionLinkMenu(folder: String) -> NSMenu {
         let menu = NSMenu(); menu.autoenablesItems = false
         let links = configuration.sessionLinks
-        let items = folder.isEmpty ? links.orderedRootItems : links.allFolders.filter { SessionDirectory.parent($0) == folder }.map(SessionLinkItem.folder) + links.entries.filter { $0.folder == folder }.map { SessionLinkItem.link($0.id) }
+        let items = folder.isEmpty ? links.orderedRootItems(profiles: configuration.profiles) : links.allFolders.filter { SessionDirectory.parent($0) == folder }.map(SessionLinkItem.folder) + links.entries.filter { $0.folder == folder }.map { SessionLinkItem.link($0.id) } + configuration.profiles.filter { $0.group == SessionLinks.directory(for: folder) }.map { SessionLinkItem.session($0.id) }
         for target in items {
             switch target {
             case .folder(let child):
                 let item = menu.addItem(withTitle: String(child.split(separator: "/").last ?? ""), action: nil, keyEquivalent: "")
                 item.image = NSImage(oshellSymbolName: "folder", accessibilityDescription: nil); item.submenu = sessionLinkMenu(folder: child)
+            case .session(let id):
+                guard let profile = configuration.profiles.first(where: { $0.id == id }) else { continue }
+                let detail = "实际会话 · " + profile.kind.title + "\n" + profile.host
+                let item = menu.addItem(withTitle: profile.name, action: #selector(connectLinkBarSession(_:)), keyEquivalent: "")
+                item.target = self; item.representedObject = id; item.toolTip = detail
+                item.view = sessionLinkBar.makeMenuLinkButton(.session(id), title: profile.name, detail: detail) { [weak self] in self?.openLinkBarSession(id) }
             case .link(let id):
                 guard let link = links.entries.first(where: { $0.id == id }) else { continue }
                 let item = menu.addItem(withTitle: link.name, action: #selector(connectSessionLink(_:)), keyEquivalent: "")
@@ -231,6 +262,9 @@ extension WorkspaceController {
         }
         var folder = ""
         switch target {
+        case .session(let id):
+            add("新建连接", #selector(connectLinkBarSession(_:)), id)
+            add("在会话管理中查看…", #selector(manageLinkBarSession(_:)), id)
         case .link(let id):
             add("新建连接", #selector(connectSessionLink(_:)), id)
             add("重命名链接…", #selector(renameSessionLink(_:)), id)
@@ -335,7 +369,7 @@ extension WorkspaceController {
     @objc private func removeLinkFolder(_ sender: NSMenuItem) {
         guard let folder = sender.representedObject as? String else { return }
         guard !configuration.profiles.contains(where: { SessionDirectory.contains($0.group, in: SessionLinks.directory(for: folder)) }) else {
-            Dialogs.message("该目录还有原始会话，请先在会话管理中移动这些会话。"); return
+            Dialogs.message("该目录包含实际会话，请在会话管理中删除并确认范围。"); return
         }
         guard Dialogs.confirm("删除快捷链接文件夹“\(folder)”？", text: "将同时从 /Links 和快捷链接栏删除该目录及快捷引用；原会话及其配置保留。", action: "删除") else { return }
         var value = configuration; value.sessionLinks.removeFolder(folder); _ = saveConfiguration(value)

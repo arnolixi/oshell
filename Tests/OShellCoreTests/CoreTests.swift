@@ -3,6 +3,7 @@
 
 import Foundation
 import CoreFoundation
+import Darwin
 import OShellCore
 
 private var failures = [String]()
@@ -783,6 +784,24 @@ final class CoreTests {
         XCTAssertEqual(restored.ftpProfiles, [ftp])
         var invalid = command; invalid.text = "bad\0"; XCTAssertThrowsError(try invalid.validate())
     }
+    func testCopyWhitespacePreferences() throws {
+        let old = try JSONDecoder().decode(Preferences.self, from: Data("{}".utf8))
+        XCTAssertTrue(!old.copyTrimLeadingWhitespace && !old.copyTrimTrailingWhitespace && old.confirmMultilinePaste)
+        for leading in [false, true] {
+            for trailing in [false, true] {
+                var preferences = old
+                preferences.copyTrimLeadingWhitespace = leading; preferences.copyTrimTrailingWhitespace = trailing
+                let restored = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(preferences))
+                XCTAssertEqual(restored.copyTrimLeadingWhitespace, leading)
+                XCTAssertEqual(restored.copyTrimTrailingWhitespace, trailing)
+                let prefix = " \t\r\n", suffix = "\t \r\n"
+                let body = "中文 e\u{301} 🐚  \r\n    indented\tvalue"
+                XCTAssertEqual(InputText.copied(prefix + body + suffix, trimLeading: leading, trimTrailing: trailing), (leading ? "" : prefix) + body + (trailing ? "" : suffix))
+                XCTAssertEqual(InputText.copied("", trimLeading: leading, trimTrailing: trailing), "")
+                XCTAssertEqual(InputText.copied(" \t\n", trimLeading: leading, trimTrailing: trailing), leading || trailing ? "" : " \t\n")
+            }
+        }
+    }
     func testPasteFramingAndPathValidation() throws {
         XCTAssertTrue(!InputText.isMultiline("ls -l")); XCTAssertTrue(InputText.isMultiline("one\r\ntwo"))
         XCTAssertEqual(String(decoding: InputText.bytes("one\r\ntwo", bracketed: false, appendReturn: true), as: UTF8.self), "one\rtwo\r")
@@ -1118,6 +1137,164 @@ final class CoreTests {
         for host in ["-oProxyCommand=evil", "host\nother", "user@host", "host name", ""] {
             XCTAssertThrowsError(try SessionProfile(host: host).sshArguments())
         }
+    }
+    func testSharedSessionConflictMerge() throws {
+        let a = SessionProfile(name: "same-name", host: "a.example.test"), b = SessionProfile(name: "same-name", host: "b.example.test")
+        let base = Configuration(profiles: [a, b])
+        var local = base, remote = base
+        local.profiles[0].username = "local-user"; remote.profiles[1].port = 2222
+        let independent = try ConfigurationMerge(base: base, local: local, remote: remote)
+        XCTAssertTrue(independent.conflicts.isEmpty)
+        let merged = try independent.resolve([:])
+        XCTAssertEqual(merged.profiles.first { $0.id == a.id }?.username, "local-user")
+        XCTAssertEqual(merged.profiles.first { $0.id == b.id }?.port, 2222)
+        remote.profiles[0].host = "remote.example.test"
+        let conflict = try ConfigurationMerge(base: base, local: local, remote: remote)
+        XCTAssertEqual(conflict.conflicts.count, 1)
+        XCTAssertThrowsError(try conflict.resolve([:]))
+        let key = conflict.conflicts[0].key
+        XCTAssertEqual(try conflict.resolve([key: .local]).profiles.first { $0.id == a.id }, local.profiles[0])
+        XCTAssertEqual(try conflict.resolve([key: .remote]).profiles.first { $0.id == a.id }, remote.profiles[0])
+        local.profiles.removeFirst()
+        let deletion = try ConfigurationMerge(base: base, local: local, remote: remote)
+        XCTAssertEqual(deletion.conflicts.count, 1)
+        XCTAssertTrue(!deletion.conflicts[0].localDescription.contains("remote-user"))
+        let deleted = try deletion.resolve([key: .local])
+        XCTAssertTrue(!deleted.profiles.contains { $0.id == a.id })
+        let kept = try deletion.resolve([key: .remote])
+        XCTAssertEqual(kept.profiles.count, 2)
+        let same = try ConfigurationMerge(base: base, local: remote, remote: remote)
+        XCTAssertTrue(same.conflicts.isEmpty)
+        local = base; remote = base
+        local.profiles.append(SessionProfile(name: "same-new", host: "l.example.test"))
+        remote.profiles.append(SessionProfile(name: "same-new", host: "r.example.test"))
+        XCTAssertEqual(try ConfigurationMerge(base: base, local: local, remote: remote).resolve([:]).profiles.count, 4)
+        local = base; remote = base
+        local.preferences.fontSize = 16; remote.preferences.fontSize = 18
+        let settings = try ConfigurationMerge(base: base, local: local, remote: remote)
+        XCTAssertEqual(settings.conflicts.map(\.key), ["preferences"])
+        XCTAssertEqual(try settings.resolve(["preferences": .remote]).preferences.fontSize, 18)
+        var secure = base
+        let envelope = try SessionCipher.encrypt("secret-fixture", master: "fixture-master", profile: a, identity: SSHIdentity(host: a.host, user: "", port: a.port))
+        secure.profiles[0].encryptedPassword = envelope
+        local = secure; remote = secure
+        local.profiles[0].name = "changed-local"; remote.profiles[0].name = "changed-remote"
+        let protected = try ConfigurationMerge(base: secure, local: local, remote: remote)
+        XCTAssertTrue(!protected.conflicts[0].localDescription.contains(envelope.ciphertext) && !protected.conflicts[0].localDescription.contains("secret-fixture"))
+        local.masterPasswordVerifier = envelope
+        XCTAssertThrowsError(try ConfigurationMerge(base: secure, local: local, remote: remote))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("oshell-conflict-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = ConfigurationStore(directory: root); try writer.save(base)
+        let other = ConfigurationStore(directory: root); _ = try other.load()
+        let snapshot = try writer.sharedSnapshot()
+        remote = base; remote.profiles[0].username = "later"; try other.save(remote)
+        XCTAssertThrowsError(try writer.saveResolved(base, expected: snapshot.fingerprint))
+        XCTAssertEqual(try ConfigurationStore(directory: root).load().profiles[0].username, "later")
+    }
+    func testWebDAVAndSharingProtection() throws {
+        let settings = WebDAVSettings(address: "https://example.test/dav/", username: "fixture", password: "fixture")
+        XCTAssertEqual(try settings.directory().scheme, "https")
+        for address in ["http://example.test/dav", "https://u:p@example.test/dav", "https://example.test/dav?token=secret", "https://example.test/#fragment"] {
+            XCTAssertThrowsError(try WebDAVSettings(address: address, username: "u", password: "p").directory())
+        }
+        XCTAssertTrue(WebDAVClient.validETag("\"version-1\""))
+        for tag in ["W/\"weak\"", "*", "\"bad\r\nheader\"", "\"a\"b\""] { XCTAssertTrue(!WebDAVClient.validETag(tag)) }
+        let master = "fixture-sharing-master"
+        var config = Configuration(profiles: [SessionProfile(name: "private-name", host: "private.example.test")])
+        XCTAssertThrowsError(try SharedVault.encode(config, password: master))
+        config.masterPasswordVerifier = try MasterPasswordProtection.createVerifier(master)
+        let encrypted = try SharedVault.encode(config, password: master)
+        XCTAssertTrue(!String(decoding: encrypted, as: UTF8.self).contains("private-name"))
+        XCTAssertEqual(try SharedVault.decode(encrypted, password: master).profiles, config.profiles)
+        XCTAssertThrowsError(try SharedVault.open(encrypted, password: "incorrect"))
+        var body = try JSONSerialization.jsonObject(with: encrypted) as! [String: Any]
+        body["salt"] = Data(repeating: 1, count: 16).base64EncodedString()
+        XCTAssertThrowsError(try SharedVault.open(JSONSerialization.data(withJSONObject: body), password: master))
+        var local = try SessionCipher.encrypt("fixture", master: master, profile: config.profiles[0], identity: SSHIdentity(host: config.profiles[0].host, user: "", port: 22))
+        local.localKeyID = UUID(); config.profiles[0].encryptedPassword = local
+        XCTAssertThrowsError(try SharedVault.encode(config, password: master))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ConfigurationStore(directory: directory, masterPassword: master, requiresMasterProtection: true)
+        XCTAssertThrowsError(try store.save(Configuration()))
+        XCTAssertThrowsError(try store.save(config))
+    }
+    func testStorageLocationAndSharedWrites() throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("oshell-storage-" + UUID().uuidString)
+        let source = root.appendingPathComponent("device-a"), target = root.appendingPathComponent("shared"), second = root.appendingPathComponent("device-b")
+        defer { try? FileManager.default.removeItem(at: root) }
+        for directory in [source, target, second] { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+        let key = try LocalCredentialStore(directory: source).loadOrCreate()
+        var profile = SessionProfile(name: "shared-fixture", host: "shared.example.test", username: "ops")
+        var envelope = try SessionCipher.encrypt("fixture-secret", master: key.secret, profile: profile, identity: SSHIdentity(host: profile.host, user: profile.username, port: profile.port))
+        envelope.localKeyID = key.id; profile.encryptedPassword = envelope
+        var config = Configuration(profiles: [profile])
+        let initial = ConfigurationStore(directory: source); try initial.save(config)
+        let master = "storage-master-fixture"
+        XCTAssertThrowsError(try SharingProtection.require(config))
+        config = try MasterPasswordProtection.enabling(config, password: master, credentialKey: { _ in key.secret }).configuration
+        try initial.save(config)
+        try PrivateFile.write(Data("fixture host trust".utf8), to: source.appendingPathComponent("known_hosts"))
+        try PrivateFile.write(Data("local diagnostic".utf8), to: source.appendingPathComponent("transfer-diagnostics.log"))
+        let location = StorageLocation(base: source)
+        let choice = StorageLocation.Pending(path: target.path, mode: .migrate)
+        try location.schedule(choice, master: master)
+        XCTAssertEqual(try location.activeDirectory().path, source.path)
+        XCTAssertEqual(try location.pending(), choice)
+        let endpoint = try LaunchEndpoint.directory(for: source)
+        let lock = try LaunchEndpoint.lock("server.lock", directory: endpoint, nonblocking: true)
+        XCTAssertThrowsError(try location.activatePending(master: master)); close(lock)
+        config.profiles[0].name = "latest-before-restart"; try initial.save(config)
+        XCTAssertEqual(try location.activatePending(master: master).path, target.path)
+        XCTAssertEqual(try location.pending(), nil)
+        XCTAssertEqual(try ConfigurationStore(directory: target, masterPassword: master, requiresMasterProtection: true).load().profiles, config.profiles)
+        XCTAssertEqual(try initial.load().profiles, config.profiles)
+        XCTAssertTrue(!FileManager.default.fileExists(atPath: target.appendingPathComponent("local-credential-key.json").path))
+        XCTAssertTrue(!FileManager.default.fileExists(atPath: target.appendingPathComponent("known_hosts").path))
+        XCTAssertTrue(!FileManager.default.fileExists(atPath: target.appendingPathComponent("storage-location.json").path))
+        XCTAssertTrue(!FileManager.default.fileExists(atPath: target.appendingPathComponent("transfer-diagnostics.log").path))
+        let sealed = try Data(contentsOf: target.appendingPathComponent("configuration.json"))
+        XCTAssertTrue(SharedVault.isEncrypted(sealed))
+        XCTAssertTrue(!String(decoding: sealed, as: UTF8.self).contains("shared.example.test"))
+        XCTAssertEqual(try SharedVault.decode(sealed, password: master).profiles, config.profiles)
+        XCTAssertThrowsError(try SharedVault.decode(sealed, password: "wrong-master"))
+        XCTAssertEqual(try SessionCipher.decrypt(config.profiles[0].encryptedPassword!, master: master, profile: config.profiles[0]), "fixture-secret")
+        let otherLocation = StorageLocation(base: second)
+        try otherLocation.schedule(.init(path: target.path, mode: .existing), master: master)
+        XCTAssertEqual(try otherLocation.activatePending(master: master).path, target.path)
+        let a = ConfigurationStore(directory: target, masterPassword: master, requiresMasterProtection: true), b = ConfigurationStore(directory: target, masterPassword: master, requiresMasterProtection: true)
+        var first = try a.load(), stale = try b.load()
+        first.profiles.append(SessionProfile(name: "from-a", host: "a.example.test")); try a.save(first)
+        stale.profiles.append(SessionProfile(name: "from-b", host: "b.example.test"))
+        XCTAssertThrowsError(try b.save(stale))
+        _ = try b.load() // Inspection does not acknowledge an unreviewed external change.
+        XCTAssertThrowsError(try b.save(stale))
+        XCTAssertThrowsError(try b.reloadIfChanged { _ in throw ModelError.invalid("fixture-rejected") })
+        XCTAssertThrowsError(try b.save(stale))
+        var refreshed = try b.reloadIfChanged { _ in }!
+        XCTAssertEqual(refreshed.profiles, first.profiles)
+        refreshed.profiles.append(stale.profiles.last!); try b.save(refreshed)
+        XCTAssertEqual(try ConfigurationStore(directory: target, masterPassword: master, requiresMasterProtection: true).load().profiles.count, 3)
+        XCTAssertNil(try b.reloadIfChanged { _ in })
+        let saved = try Data(contentsOf: b.url)
+        try FileManager.default.removeItem(at: b.url)
+        XCTAssertThrowsError(try b.save(refreshed)); XCTAssertThrowsError(try b.load())
+        XCTAssertTrue(!FileManager.default.fileExists(atPath: b.url.path))
+        try PrivateFile.write(saved, to: b.url)
+        XCTAssertThrowsError(try StorageLocation(base: source).schedule(.init(path: target.path, mode: .migrate)))
+        let placeholder = root.appendingPathComponent("placeholder")
+        try FileManager.default.createDirectory(at: placeholder, withIntermediateDirectories: true)
+        try Data().write(to: placeholder.appendingPathComponent(".configuration.json.icloud"))
+        XCTAssertThrowsError(try ConfigurationStore(directory: placeholder).load())
+        let broken = root.appendingPathComponent("broken"), empty = root.appendingPathComponent("empty")
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        try ConfigurationStore(directory: broken).save(config)
+        let failed = StorageLocation(base: broken); try failed.schedule(.init(path: empty.path, mode: .migrate), master: master)
+        XCTAssertThrowsError(try failed.activatePending(master: "wrong-master"))
+        XCTAssertEqual(try failed.activeDirectory().path, broken.path)
+        let remaining = try FileManager.default.contentsOfDirectory(atPath: empty.path)
+        XCTAssertTrue(remaining.isEmpty)
     }
     func testConfigurationRoundTripAndPermissions() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -1577,6 +1754,7 @@ extension CoreTests {
         try tests.testArchiveValidationLimits()
         try tests.testPrivateAtomicFileAndFailedWrite()
         try tests.testOperatorPreferencesAndCommandsRoundTrip()
+        try tests.testCopyWhitespacePreferences()
         try tests.testPasteFramingAndPathValidation()
         try tests.testHighlightRulesAndRegexBudget()
         tests.testEndedSessionCommands()
@@ -1591,13 +1769,16 @@ extension CoreTests {
         tests.testZFINTrailerKeepsPromptAndBlocksRetransmission()
         try tests.testEncryptedSessionPasswordAndEndpointBinding()
         try tests.testSSHArgumentsRemainSeparateAndKeepHostVerification()
+        try tests.testSharedSessionConflictMerge()
+        try tests.testWebDAVAndSharingProtection()
+        try tests.testStorageLocationAndSharedWrites()
         try tests.testConfigurationRoundTripAndPermissions()
         tests.testSplitANSISequencesAndUTF8ArePreserved()
         tests.testZmodemDetectionAcrossEveryBoundary()
         tests.testInvalidZmodemHeadersRemainOrdinaryOutput()
         try tests.testLoggerFlushesEveryAcceptedChunk()
         tests.testCancellationDropsInFlightBytesAcrossEveryBoundary()
-        if failures.isEmpty { print("PASS: 60 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
+        if failures.isEmpty { print("PASS: 64 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
         else { failures.forEach { print("FAIL: \($0)") }; exit(1) }
     }
 }

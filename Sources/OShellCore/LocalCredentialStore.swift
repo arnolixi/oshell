@@ -15,12 +15,12 @@ public struct LocalCredentialKey: Codable, Equatable {
 public final class LocalCredentialStore {
     public let url: URL
     public init(directory: URL) { url = directory.appendingPathComponent("local-credential-key.json") }
-    public func load(expectedID: UUID? = nil) throws -> LocalCredentialKey {
+    public func load(expectedID: UUID? = nil, repairPermissions: Bool = false) throws -> LocalCredentialKey {
         let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
         guard fd >= 0 else { throw ModelError.invalid("无法读取 OShell 本机密钥。请恢复原数据目录中的 local-credential-key.json，或重新输入并保存密码。"); }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true); defer { try? handle.oshellClose() }
         var info = stat()
-        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == geteuid(), (info.st_mode & 0o077) == 0, info.st_size <= 4096 else {
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == geteuid(), ((info.st_mode & 0o077) == 0 || repairPermissions), info.st_size <= 4096 else {
             throw ModelError.invalid("本机密钥文件类型、所有者或权限不正确；文件需仅当前用户可读写（600）。")
         }
         let data = try handle.oshellRead(upToCount: 4097) ?? Data()
@@ -28,6 +28,11 @@ public final class LocalCredentialStore {
             throw ModelError.invalid("OShell 本机密钥文件损坏，已保留原文件，请从备份恢复。")
         }
         guard expectedID == nil || key.id == expectedID else { throw ModelError.invalid("密码与当前 OShell 本机密钥不匹配，请恢复原密钥或重新输入密码。"); }
+        // A downloaded copy may inherit broader permissions. Restrict only an
+        // owned, validated regular key file in the explicitly selected data folder.
+        if repairPermissions, (info.st_mode & 0o077) != 0, fchmod(fd, 0o600) != 0 {
+            throw ModelError.invalid("无法将共享密钥权限限制为仅当前用户可读写。")
+        }
         return key
     }
     public func loadOrCreate() throws -> LocalCredentialKey {
@@ -49,7 +54,7 @@ public final class LocalCredentialStore {
         defer { try? FileManager.default.removeItem(at: temporary) }
         try PrivateFile.write(JSONEncoder().encode(key), to: temporary)
         // Atomic publication without replacing an existing key.
-        guard link(temporary.path, url.path) == 0 else {
+        guard renamex_np(temporary.path, url.path, UInt32(RENAME_EXCL)) == 0 else {
             if errno == EEXIST { return try load() }
             throw ModelError.invalid("无法保存 OShell 本机密钥。")
         }

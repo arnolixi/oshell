@@ -108,7 +108,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
             transferMode.isEnabled = profile.kind.usesSSH
             if let backendFactory { backend = try backendFactory(profile); connectBackend(destination); return }
             if profile.kind.usesSSH {
-                backend = try SFTPBackend(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: launchPassword, connectionGroup: connectionGroup)
+                backend = try SFTPBackend(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup)
                 connectBackend(destination)
             } else {
                 let token = UUID(); operationID = token; busy = true; status.stringValue = "等待 FTP 认证…"; onStateChanged?()
@@ -230,7 +230,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         let input = NSTextField(string: destination); input.frame = NSRect(x: 0, y: 0, width: 500, height: 26); alert.accessoryView = input; alert.addButton(withTitle: "上传"); alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let target = input.stringValue, useSCP = sshProfile != nil && transferMode.indexOfSelectedItem == 1
-        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: launchPassword, connectionGroup: connectionGroup) } } catch { Dialogs.message(error.localizedDescription); return }
+        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup) } } catch { Dialogs.message(error.localizedDescription); return }
         let scp = self.scp, token = UUID()
         perform("正在上传…", id: token) { [weak self] backend in
             var names = Set(try backend.list(target).map(\.name))
@@ -249,7 +249,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         let panel = NSOpenPanel(); panel.title = "从 \(profile?.name ?? "") 下载保存到…"; panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
         guard panel.runPopupModal() == .OK, let destination = panel.url else { return }
         let useSCP = sshProfile != nil && transferMode.indexOfSelectedItem == 1
-        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: launchPassword, connectionGroup: connectionGroup) } } catch { Dialogs.message(error.localizedDescription); return }
+        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup) } } catch { Dialogs.message(error.localizedDescription); return }
         let scp = self.scp, token = UUID()
         perform("正在下载…", id: token) { [weak self] backend in
             var names = Set(try FileManager.default.contentsOfDirectory(atPath: destination.path))
@@ -306,7 +306,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         guard panel.runPopupModal() == .OK, let url = panel.url else { return }
         do {
             try RemotePath.validate(remote.stringValue)
-            let task = try SCPTransfer(profile: profile, knownHosts: workspace.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"), oneTimePassword: launchPassword, connectionGroup: connectionGroup); scp = task
+            let task = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup); scp = task
             let remotePath = remote.stringValue, token = UUID(); operationID = token; busy = true; cancelButton.isEnabled = true; progress.isIndeterminate = true; progress.startAnimation(nil); status.stringValue = "SCP 传输中…"; onStateChanged?()
             worker.async { [weak self] in
                 let result = Result {

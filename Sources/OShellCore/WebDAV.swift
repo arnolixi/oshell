@@ -1,0 +1,105 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (c) 2026 OShell contributors
+import Foundation
+
+public struct WebDAVSettings: Codable {
+    public var address: String
+    public var username: String
+    public var password: String
+    public init(address: String, username: String, password: String) { self.address = address; self.username = username; self.password = password }
+    public func directory(allowLoopbackHTTP: Bool = false) throws -> URL {
+        guard var parts = URLComponents(string: address.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let host = parts.host, !host.isEmpty, parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
+              parts.scheme == "https" || (allowLoopbackHTTP && parts.scheme == "http" && ["127.0.0.1", "localhost", "::1"].contains(host)),
+              !username.contains(":"), !username.contains("\n"), !username.contains("\r"), !password.contains("\n"), !password.contains("\r") else {
+            throw ModelError.invalid("请输入 HTTPS WebDAV 目录地址，账号密码请填写在单独字段中。")
+        }
+        if !parts.path.hasSuffix("/") { parts.path += "/" }
+        guard let url = parts.url else { throw ModelError.invalid("WebDAV 地址无效。") }; return url
+    }
+}
+public struct WebDAVObject {
+    public let data: Data
+    public let etag: String
+}
+public enum WebDAVFailure: Error, LocalizedError {
+    case conflict, authentication, status(Int), unsafeVersion, network, tooLarge, redirect
+    public var errorDescription: String? {
+        switch self {
+        case .conflict: return "共享版本已变化，未覆盖。请重新同步并确认冲突。"
+        case .authentication: return "WebDAV 身份验证失败，请检查账号、密码及应用专用密码。"
+        case .status(let code): return "WebDAV 返回 HTTP \(code)。请确认目录存在且账号有读写权限。"
+        case .unsafeVersion: return "服务器未提供可用的强 ETag，无法安全同步；不会无条件覆盖数据。"
+        case .network: return "WebDAV 网络请求失败或超时，本地数据已保留。"
+        case .tooLarge: return "WebDAV 响应超过大小限制。"
+        case .redirect: return "WebDAV 地址发生重定向。请直接填写最终 HTTPS 目录地址。"
+        }
+    }
+}
+private final class DAVRequest: NSObject, URLSessionDataDelegate {
+    let done = DispatchSemaphore(value: 0)
+    var data = Data(), response: HTTPURLResponse?, error: Error?
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { error = WebDAVFailure.redirect; completionHandler(nil) }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        self.response = response as? HTTPURLResponse
+        if response.expectedContentLength > Int64(SharedVault.maximumSize) { error = WebDAVFailure.tooLarge; completionHandler(.cancel) }
+        else { completionHandler(.allow) }
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive chunk: Data) {
+        if data.count + chunk.count > SharedVault.maximumSize { error = WebDAVFailure.tooLarge; dataTask.cancel() }
+        else { data.append(chunk) }
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError failure: Error?) { if error == nil, failure != nil { error = WebDAVFailure.network }; done.signal() }
+}
+public final class WebDAVClient {
+    private let settings: WebDAVSettings, directory: URL
+    private let lock = NSLock()
+    private var active: URLSession?, cancelled = false
+    public init(_ settings: WebDAVSettings, allowLoopbackHTTP: Bool = false) throws { self.settings = settings; directory = try settings.directory(allowLoopbackHTTP: allowLoopbackHTTP) }
+    public func cancel() { lock.lock(); cancelled = true; let session = active; lock.unlock(); session?.invalidateAndCancel() }
+    private func request(_ method: String, url: URL, data: Data? = nil, headers: [String: String] = [:]) throws -> (HTTPURLResponse, Data) {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.httpMethod = method; request.httpBody = data
+        request.setValue("Basic " + Data((settings.username + ":" + settings.password).utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+        request.setValue("OShell", forHTTPHeaderField: "User-Agent")
+        headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        let delegate = DAVRequest(), queue = OperationQueue(); queue.maxConcurrentOperationCount = 1
+        let config = URLSessionConfiguration.ephemeral; config.urlCache = nil; config.urlCredentialStorage = nil; config.httpCookieStorage = nil; config.httpShouldSetCookies = false; config.timeoutIntervalForResource = 45
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: queue)
+        lock.lock(); let stopped = cancelled; if !stopped { active = session }; lock.unlock()
+        defer { session.invalidateAndCancel(); lock.lock(); active = nil; lock.unlock() }
+        guard !stopped else { throw WebDAVFailure.network }
+        session.dataTask(with: request).resume()
+        guard delegate.done.wait(timeout: .now() + 50) == .success else { session.invalidateAndCancel(); throw WebDAVFailure.network }
+        if let error = delegate.error { throw error }
+        guard let response = delegate.response else { throw WebDAVFailure.network }
+        if [401, 403].contains(response.statusCode) { throw WebDAVFailure.authentication }
+        if (300...399).contains(response.statusCode) { throw WebDAVFailure.redirect }
+        return (response, delegate.data)
+    }
+    public func probe() throws {
+        let body = Data("<?xml version=\"1.0\"?><d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/></d:prop></d:propfind>".utf8)
+        let (response, _) = try request("PROPFIND", url: directory, data: body, headers: ["Depth":"0", "Content-Type":"application/xml; charset=utf-8"])
+        guard response.statusCode == 207 else { throw WebDAVFailure.status(response.statusCode) }
+        _ = try fetch()
+    }
+    public func fetch() throws -> WebDAVObject? {
+        let (response, data) = try request("GET", url: directory.appendingPathComponent("oshell-vault.json"))
+        if response.statusCode == 404 { return nil }
+        guard response.statusCode == 200 else { throw WebDAVFailure.status(response.statusCode) }
+        guard let tag = response.allHeaderFields.first(where: { String(describing: $0.key).lowercased() == "etag" }).map({ String(describing: $0.value) }), Self.validETag(tag) else { throw WebDAVFailure.unsafeVersion }
+        return WebDAVObject(data: data, etag: tag)
+    }
+    public static func validETag(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        return bytes.count >= 2 && bytes.count <= 1024 && bytes.first == 34 && bytes.last == 34 && bytes.dropFirst().dropLast().allSatisfy { $0 == 33 || $0 >= 35 && $0 != 127 }
+    }
+    public func put(_ data: Data, matching etag: String?) throws {
+        guard data.count <= SharedVault.maximumSize else { throw WebDAVFailure.tooLarge }
+        if let etag, !Self.validETag(etag) { throw WebDAVFailure.unsafeVersion }
+        let headers = ["Content-Type":"application/json", etag == nil ? "If-None-Match" : "If-Match": etag ?? "*"]
+        let (response, _) = try request("PUT", url: directory.appendingPathComponent("oshell-vault.json"), data: data, headers: headers)
+        if response.statusCode == 412 { throw WebDAVFailure.conflict }
+        guard [200, 201, 204].contains(response.statusCode) else { throw WebDAVFailure.status(response.statusCode) }
+    }
+}

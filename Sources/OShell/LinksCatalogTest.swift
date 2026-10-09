@@ -126,11 +126,50 @@ enum LinksCatalogTest {
         manager.revealLink(bLink)
         invoke(action("连接", row: table.selectedRow))
         manager.show(); manager.revealDirectory("Links")
-        nextModal { root in press(root, "删除") }
+        nextModal { root in press(root, "递归删除") }
         invoke(action("删除…", row: row("生产")))
         checks["managerDeletesReferenceSubtreeOnly"] = !SessionDirectory.all(workspace.configuration).contains("Links/生产") && workspace.configuration.profiles.count == 3 && SessionDirectory.all(workspace.configuration).contains("生产/空目录")
         checks["persistedReferenceCatalog"] = (try? workspace.store.load().sessionLinks.entries) == workspace.configuration.sessionLinks.entries
         checks["persistedFolderCatalog"] = (try? workspace.store.load().sessionLinks.allFolders) == workspace.configuration.sessionLinks.allFolders
+        manager.revealDirectory("Links")
+        checks["linksOffersActualSessionCreation"] = ["新建 SSH 会话…", "新建 SFTP 会话…", "新建 FTP 会话…"].allSatisfy { title in action(title, row: -1) != nil }
+        nextModal { root in
+            input(root, "session.name")?.stringValue = "Links实际SSH"
+            input(root, "session.host")?.stringValue = "actual.example.test"
+            input(root, "session.user")?.stringValue = "ops"
+            press(root, "保存")
+        }
+        invoke(action("新建 SSH 会话…", row: -1))
+        let actual = workspace.configuration.profiles.first { $0.name == "Links实际SSH" }!
+        checks["createActualInsideLinks"] = actual.group == "Links" && !workspace.configuration.sessionLinks.entries.contains { $0.profileID == actual.id }
+        checks["barShowsActualSession"] = workspace.sessionLinkBar.buttons.contains { $0.destination == .session(actual.id) }
+        checks["managerDistinguishesActualAndAlias"] = manager.selectedLink == nil && manager.selectedProfile?.id == actual.id
+        manager.reveal(local)
+        nextModal { root in
+            let tree = descendants(root).compactMap { $0 as? SessionDirectoryTree }.first!
+            _ = tree.selectDirectory("Links/空目录"); press(root, "选择")
+        }
+        invoke(action("移动实际会话到…", row: row(local.name)))
+        checks["explicitMoveChangesSourceDirectory"] = workspace.configuration.profiles.first { $0.id == local.id }?.group == "Links/空目录"
+        checks["explicitMoveKeepsExistingReferences"] = workspace.configuration.sessionLinks.entries.contains { $0.id == localLink && $0.profileID == local.id }
+        checks["folderMenuShowsActualSession"] = workspace.sessionLinkMenu(folder: "空目录").items.contains { $0.title == local.name }
+        checks["actualSessionDragsToBar"] = workspace.sessionLinkBar.onDrop?(.session(local.id), .before(.folder("空目录"))) == true
+        checks["actualMoveDoesNotCreateExtraReference"] = workspace.configuration.profiles.first { $0.id == local.id }?.group == "Links" && workspace.configuration.sessionLinks.entries.filter { $0.profileID == local.id }.count == 1
+        let rootItems = workspace.configuration.sessionLinks.orderedRootItems(profiles: workspace.configuration.profiles)
+        checks["actualRootOrderPersists"] = (try? workspace.store.load()).map { $0.sessionLinks.orderedRootItems(profiles: $0.profiles) } == rootItems && rootItems.firstIndex(of: .session(local.id))! < rootItems.firstIndex(of: .session(actual.id))!
+        let beforeActualConnect = workspace.tabs.count
+        workspace.sessionLinkBar.buttons.first { $0.destination == .session(local.id) }?.performClick(nil)
+        checks["actualBarOpensOriginalProfile"] = workspace.tabs.count == beforeActualConnect + 1 && workspace.selectedTab?.activePane.profile.id == local.id
+        checks["actualCanMoveToBarFolder"] = workspace.sessionLinkBar.onDrop?(.session(local.id), .folder("空目录")) == true
+        manager.show(); manager.reveal(workspace.configuration.profiles.first { $0.id == local.id }!)
+        let actualDrag = drag([table.selectedRow])
+        checks["actualInLinksDragRemainsActual"] = manager.tableView(table, acceptDrop: actualDrag, row: 0, dropOperation: .on) && workspace.configuration.profiles.first { $0.id == local.id }?.group == "Links"
+        manager.revealLink(localLink)
+        invoke(action("删除快捷引用", row: table.selectedRow))
+        checks["deletingAliasKeepsActualInLinks"] = workspace.configuration.profiles.contains { $0.id == local.id && $0.group == "Links" } && workspace.sessionLinkBar.buttons.contains { $0.destination == .session(local.id) }
+        manager.reveal(actual)
+        nextModal { root in press(root, "删除") }; invoke(action("删除…", row: table.selectedRow))
+        checks["deletingActualRemovesItsBarItem"] = !workspace.configuration.profiles.contains { $0.id == actual.id } && !workspace.sessionLinkBar.buttons.contains { $0.destination == .session(actual.id) }
         if let path = ProcessInfo.processInfo.environment["OSHELL_LINKS_CATALOG_PREVIEW"], let view = manager.window?.contentView {
             view.layoutSubtreeIfNeeded()
             if let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) { view.cacheDisplay(in: view.bounds, to: bitmap); try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path)) }

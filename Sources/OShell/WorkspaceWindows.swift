@@ -10,17 +10,20 @@ final class WorkspaceWindows {
     private(set) weak var active: WorkspaceController?
     let store: ConfigurationStore
     let updater: AppUpdater
+    lazy var webDAV = WebDAVSync(windows: self)
     var quickMenu: NSMenu?
     var commandMenu: NSMenu?
     var onActiveChanged: ((WorkspaceController?) -> Void)?
     private var quitting = false
+    private var sharedConfiguration: Configuration
+    private var lastSyncError: String?
 
     init(initial: WorkspaceController) {
-        store = initial.store; updater = initial.appUpdater
+        store = initial.store; updater = initial.appUpdater; sharedConfiguration = initial.configuration
         workspaces = [initial]; active = initial; initial.windowCoordinator = self
     }
     @discardableResult func newWindow() -> WorkspaceController {
-        let workspace = WorkspaceController(store: store)
+        let workspace = WorkspaceController(store: store, configuration: sharedConfiguration)
         workspace.windowCoordinator = self
         // Startup protection is app-wide; opening another window does not unlock
         // the password cache or bypass an explicitly locked credential vault.
@@ -71,7 +74,47 @@ final class WorkspaceWindows {
         workspace.windowCoordinator = nil
     }
     func publish(_ configuration: Configuration, from source: WorkspaceController) {
+        sharedConfiguration = configuration
         for workspace in workspaces where workspace !== source { workspace.receiveConfiguration(configuration) }
+        webDAV.schedule()
+    }
+    func reloadSharedConfiguration(interactive: Bool) {
+        guard !quitting, NSApp.modalWindow == nil, !workspaces.contains(where: { $0.window?.attachedSheet != nil }) else { return }
+        if store.encryptedStorage && store.masterPassword == nil {
+            guard interactive, let master = PasswordVault.shared.masterForImport(hasSavedPasswords: true) else { return }
+            store.masterPassword = master
+        }
+        if webDAV.enabled { webDAV.sync(interactive: interactive); return }
+        if SharedConflictDrafts.exists(for: store) {
+            if interactive { active?.resolvePendingSharedConflicts() }
+            return
+        }
+        do {
+            let changed = try store.reloadIfChanged { [self] config in
+                guard config.masterPasswordVerifier == sharedConfiguration.masterPasswordVerifier,
+                      config.hasMasterPassword == sharedConfiguration.hasMasterPassword else {
+                    throw ModelError.invalid("共享数据的主密码保护已改变，请退出并重新打开 OShell，以新的主密码解锁。当前配置不会覆盖共享数据。")
+                }
+                guard !updater.isBusy || config.preferences.updateRepository == sharedConfiguration.preferences.updateRepository else { throw ModelError.invalid("更新正在进行，请完成更新后再加载共享配置。") }
+                if store.requiresMasterProtection { try SharingProtection.require(config) }
+                let ids = Set(ConfigurationCredentials.profiles(in: config).compactMap { $0.encryptedPassword?.localKeyID })
+                guard ids.count <= 1 else { throw ModelError.invalid("共享密码与本机密钥不一致，请等待同步完成。") }
+                if let id = ids.first { _ = try LocalCredentialStore(directory: store.url.deletingLastPathComponent()).load(expectedID: id, repairPermissions: true) }
+            }
+            if let changed {
+                sharedConfiguration = changed
+                PasswordVault.shared.acceptSharedConfiguration(changed)
+                ApplicationAppearance.apply(changed.preferences.interfaceTheme)
+                workspaces.forEach { $0.receiveConfiguration(changed) }
+                ShortcutRuntime.install(changed.preferences.keyboardShortcuts)
+                try updater.configure()
+            }
+            lastSyncError = nil
+            if interactive { Dialogs.message(changed == nil ? "本机已下载的数据没有新变化。" : "已载入共享数据，现有连接继续运行。") }
+        } catch {
+            let message = error.localizedDescription
+            if interactive || lastSyncError != message { lastSyncError = message; Dialogs.message(message) }
+        }
     }
     func externalWorkspace() -> WorkspaceController? {
         guard !quitting else { return nil }
@@ -85,7 +128,7 @@ final class WorkspaceWindows {
                                   text: "全部 \(workspaces.count) 个窗口中的 \(running) 个终端连接和 \(files) 个文件操作会结束。",
                                   action: forUpdate ? "关闭会话并更新" : "退出") else { return false }
         }
-        quitting = true
+        quitting = true; webDAV.cancel()
         workspaces.forEach { $0.shutdown() }
         return true
     }

@@ -88,10 +88,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         let callbacks = startupWaiters; startupWaiters.removeAll()
         callbacks.forEach { $0(allowed) }
     }
-    init(store: ConfigurationStore) {
+    init(store: ConfigurationStore, configuration snapshot: Configuration? = nil) {
         self.store = store
-        do { configuration = try store.load() }
-        catch { configuration = Configuration(); loadFailed = true }
+        if let snapshot { configuration = snapshot }
+        else {
+            do { configuration = try store.load() }
+            catch { configuration = Configuration(); loadFailed = true }
+        }
         let window = WorkspaceWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "OShell"; window.minSize = NSSize(width: 760, height: 460)
@@ -100,7 +103,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         super.init(window: window)
         PasswordVault.shared.configureLocalStorage(directory: store.url.deletingLastPathComponent())
         PasswordVault.shared.configureProtection(configuration)
-        if !loadFailed && !configuration.hasMasterPassword { completeStartupUnlock(true) }
+        if !loadFailed && !configuration.hasMasterPassword && !store.requiresMasterProtection { completeStartupUnlock(true) }
         window.delegate = self; window.center(); window.setFrameAutosaveName(CommandLine.arguments.contains("--memory-profile") ? "OShell.memory-profile" : "OShell.main")
         quickSendScope = configuration.preferences.quickSendScope
         ApplicationAppearance.apply(configuration.preferences.interfaceTheme)
@@ -272,9 +275,31 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     }
     private func showWelcome() { install(welcome) }
     private var selectedProfile: SessionProfile? { sessionManager?.selectedProfile }
-    @discardableResult func saveConfiguration(_ value: Configuration, updatingMasterProtection: Bool = false) -> Bool {
+    var requiresSharingProtection: Bool {
+        store.requiresMasterProtection || windowCoordinator?.webDAV.enabled == true || (ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] == nil && (try? StorageLocation().pending()) != nil)
+    }
+    var knownHostsURL: URL {
+        if !store.requiresMasterProtection { return store.url.deletingLastPathComponent().appendingPathComponent("known_hosts") }
+        let id = PlatformDigest.sha256(Data(store.url.path.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
+        let folder = WebDAVSync.root.appendingPathComponent("host-trust").appendingPathComponent(id)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions:0o700])
+        return folder.appendingPathComponent("known_hosts")
+    }
+    @discardableResult func saveConfiguration(_ value: Configuration, updatingMasterProtection: Bool = false, storageMaster: String? = nil) -> Bool {
         guard !loadFailed else { Dialogs.message("原配置读取失败，本次启动不会覆盖配置。"); return false }
+        guard !SharedConflictDrafts.exists(for: store) else { Dialogs.message("还有未处理的本机同步草稿，请先选择“会话 → 处理同步冲突…”。"); return false }
+        if store.encryptedStorage && store.masterPassword == nil {
+            guard let master = PasswordVault.shared.masterForImport(hasSavedPasswords: true) else { return false }
+            store.masterPassword = master
+        }
+        let oldStorageMaster = store.masterPassword, oldEncryption = store.encryptedStorage
+        var committed = false
+        defer { if !committed { store.masterPassword = oldStorageMaster; store.encryptedStorage = oldEncryption } }
         do {
+            if updatingMasterProtection {
+                if value.masterPasswordVerifier == nil && !requiresSharingProtection { store.masterPassword = nil; store.encryptedStorage = false }
+                else if store.requiresMasterProtection || oldStorageMaster != nil { store.masterPassword = storageMaster ?? oldStorageMaster }
+            }
             var normalized = PasswordVault.shared.currentCredentials(in: value)
             var migrated: CredentialRotation?
             if !updatingMasterProtection {
@@ -292,13 +317,30 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
             try normalized.sessionDefaults.validate()
             normalized.sessionLinks.normalize(profiles: normalized.profiles)
             normalized.normalizeSessionLinkDirectories()
-            try store.save(normalized); configuration = normalized; configurationRevision += 1
+            if requiresSharingProtection { try SharingProtection.require(normalized) }
+            var mergedSharedChanges = false
+            do { try store.save(normalized) }
+            catch let conflict as SharedConfigurationConflict {
+                guard !updatingMasterProtection, migrated == nil else { throw ModelError.invalid("共享配置已变化，请重新载入后再修改主密码。") }
+                guard let resolved = try resolveSharedDraft(.init(base: conflict.base, local: normalized)) else { return false }
+                normalized = resolved; mergedSharedChanges = true
+                PasswordVault.shared.acceptSharedConfiguration(normalized)
+            }
             if let migrated, let master = PasswordVault.shared.cachedMaster { PasswordVault.shared.acceptRotation(migrated, master: master) }
-            PasswordVault.shared.configureProtection(configuration); refreshMasterWarning()
-            rebuildQuickLinks(); rebuildCommandMenu(); applyHighlightConfiguration(); sessionManager?.reload(); refreshQuickSendBar(); ShortcutRuntime.install(configuration.preferences.keyboardShortcuts)
-            windowCoordinator?.publish(configuration, from: self)
+            acceptSavedConfiguration(normalized, applyPreferences: mergedSharedChanges)
+            committed = true
             return true
         } catch { Dialogs.message("保存配置失败：\(error.localizedDescription)"); return false }
+    }
+    func acceptSavedConfiguration(_ value: Configuration, applyPreferences: Bool = false) {
+        PasswordVault.shared.configureProtection(value)
+        receiveConfiguration(value)
+        ShortcutRuntime.install(value.preferences.keyboardShortcuts)
+        windowCoordinator?.publish(value, from: self)
+        if applyPreferences {
+            ApplicationAppearance.apply(value.preferences.interfaceTheme)
+            try? appUpdater.configure()
+        }
     }
     private func persist() { _ = saveConfiguration(configuration) }
     @objc func showSessionManager() {
@@ -307,6 +349,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     }
     func showSessionDirectory(_ directory: String) {
         showSessionManager(); sessionManager?.revealDirectory(directory)
+    }
+    func showSessionManagerSelection(_ profile: SessionProfile) {
+        showSessionManager(); sessionManager?.reveal(profile)
     }
     func showFileSessions(selection: @escaping (SessionProfile) -> Void) {
         if sessionManager == nil { sessionManager = SessionManager(workspace: self) }
@@ -402,7 +447,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     @objc func newLocal() { open(configuration.profiles.first(where: { $0.kind == .local }) ?? .local) }
     private func makePane(_ profile: SessionProfile, oneTimePassword: String? = nil, terminalType: String? = nil, connectionGroup: SSHConnectionGroup? = nil, reuseConnection: Bool = false, blank: Bool = false) -> TerminalPane {
         idleMemoryReclaimer.cancel()
-        let knownHosts = store.url.deletingLastPathComponent().appendingPathComponent("known_hosts")
+        let knownHosts = knownHostsURL
         try? FileManager.default.createDirectory(at: knownHosts.deletingLastPathComponent(), withIntermediateDirectories: true)
         let pane = TerminalPane(profile: profile, preferences: configuration.preferences, knownHostsFile: knownHosts, oneTimePassword: oneTimePassword, terminalType: terminalType, connectionGroup: connectionGroup, reuseConnection: reuseConnection, blank: blank)
         bindPane(pane)
@@ -639,15 +684,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     @objc func showPreferences() { editPreferences(appearanceSelected: false) }
     @objc func showAppearancePreferences() { editPreferences(appearanceSelected: true) }
     func editPreferences(appearanceSelected: Bool, updatesSelected: Bool = false) {
-        guard let preferences = Dialogs.preferences(configuration.preferences, appearanceSelected: appearanceSelected, updatesSelected: updatesSelected) else { return }
+        let storageView = StorageSettingsView(workspace: self)
+        guard let preferences = Dialogs.preferences(configuration.preferences, appearanceSelected: appearanceSelected, updatesSelected: updatesSelected, storageView: storageView) else { return }
         if appUpdater.isBusy && preferences.updateRepository != configuration.preferences.updateRepository { Dialogs.message("更新正在进行，请完成或取消后再修改更新仓库。"); return }
         var value = configuration; value.preferences = preferences
         guard saveConfiguration(value) else { return }
         do { try appUpdater.configure() } catch { Dialogs.message(error.localizedDescription) }
-        ApplicationAppearance.apply(preferences.interfaceTheme)
-        tabs.flatMap { $0.layout.panes }.forEach { $0.apply(preferences) }; refreshSelection()
+        let applied = configuration.preferences
+        ApplicationAppearance.apply(applied.interfaceTheme)
+        tabs.flatMap { $0.layout.panes }.forEach { $0.apply(applied) }; refreshSelection()
+        do { try storageView.applySelection() } catch { Dialogs.message("目录选择未保存：" + error.localizedDescription) }
     }
-    @objc func lockPasswords() { PasswordVault.shared.lock() }
+    @objc func syncWebDAVNow() { windowCoordinator?.webDAV.sync(interactive: true) }
+    @objc func reloadSharedConfiguration() { windowCoordinator?.reloadSharedConfiguration(interactive: true) }
+    @objc func lockPasswords() { windowCoordinator?.webDAV.cancel(); store.masterPassword = nil; PasswordVault.shared.lock() }
     @discardableResult func selectTab(number: Int) -> Bool {
         let candidates = numberedTabs
         guard isSecurityUnlocked, window?.attachedSheet == nil, NSApp.modalWindow == nil,

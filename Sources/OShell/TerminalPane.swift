@@ -12,6 +12,13 @@ final class OShellTerminal: LocalProcessTerminalView {
     override func keyDown(with event: NSEvent) { userInputDepth += 1; defer { userInputDepth -= 1 }; super.keyDown(with: event) }
     override func keyUp(with event: NSEvent) { userInputDepth += 1; defer { userInputDepth -= 1 }; super.keyUp(with: event) }
     override func insertText(_ string: Any, replacementRange: NSRange) { userInputDepth += 1; defer { userInputDepth -= 1 }; super.insertText(string, replacementRange: replacementRange) }
+    override func copy(_ sender: Any) { copySelectionToPasteboard() }
+    private func copySelectionToPasteboard() {
+        let selected = selection.getSelectedText()
+        let text = owner?.textForCopy(selected) ?? selected
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
     override func paste(_ sender: Any) { if let text = NSPasteboard.general.string(forType: .string), let owner { owner.onPaste?(owner, text) } }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func scrollWheel(with event: NSEvent) {
@@ -46,7 +53,7 @@ final class OShellTerminal: LocalProcessTerminalView {
     private func copySelectedTextIfEnabled() {
         if owner?.copyOnSelect == true, selection.active {
             let text = selection.getSelectedText()
-            if !text.isEmpty { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
+            if !text.isEmpty { copySelectionToPasteboard() }
         }
     }
     override func rightMouseDown(with event: NSEvent) {
@@ -158,6 +165,9 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     var onFilesDropped: ((TerminalPane, [URL]) -> Void)?
     private(set) var remoteDirectory = "."
     var copyOnSelect: Bool { preferences.copyOnSelect }
+    func textForCopy(_ text: String) -> String {
+        InputText.copied(text, trimLeading: preferences.copyTrimLeadingWhitespace, trimTrailing: preferences.copyTrimTrailingWhitespace)
+    }
     var rightClickPaste: Bool { preferences.rightClickPaste }
     var acceptsManagedInput: Bool {
         !isShutdown && !blocksManagedToolInput && (ended || (started && terminal.process.running && !isTransferring && (profile.kind == .local || sessionReady)))

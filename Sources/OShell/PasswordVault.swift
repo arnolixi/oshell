@@ -10,6 +10,9 @@ final class PasswordVault {
     var cachedMaster: String? { master }
     private(set) var masterProtectionEnabled = false
     private var verifier: EncryptedPassword?
+    func acceptSharedConfiguration(_ configuration: Configuration) {
+        generation += 1; replacements.removeAll(); configureProtection(configuration)
+    }
     func configureProtection(_ configuration: Configuration) {
         masterProtectionEnabled = configuration.hasMasterPassword; verifier = configuration.masterPasswordVerifier
     }

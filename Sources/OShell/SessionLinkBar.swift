@@ -103,7 +103,7 @@ final class SessionLinkBar: NSView {
         let button = LinkButton(frame: NSRect(x: 0, y: 0, width: min(420, max(180, (title as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 0)]).width + 24)), height: 28))
         button.bar = self; button.generation = generation; button.destination = target
         button.title = title; button.font = .menuFont(ofSize: 0); button.isBordered = false
-        button.autoresizingMask = [.width]; button.toolTip = detail + "\n按住拖动到链接栏可移动快捷引用"
+        button.autoresizingMask = [.width]; button.toolTip = detail + "\n按住拖动到链接栏可移动此项目"
         button.setAccessibilityLabel(title); button.target = button; button.action = #selector(LinkButton.activate)
         button.clicked = { [weak button] in
             button?.closeMenu(); open()
@@ -158,8 +158,9 @@ final class SessionLinkBar: NSView {
         for entry in entries {
             let button = LinkButton(); button.bar = self; button.generation = generation; button.destination = entry.target; button.title = entry.title
             button.isBordered = false; button.font = .systemFont(ofSize: 12); button.lineBreakMode = .byTruncatingTail
-            let folder: Bool; if case .folder = entry.target { folder = true } else { folder = false }
-            button.image = NSImage(oshellSymbolName: folder ? "folder" : "terminal", accessibilityDescription: nil)
+            let symbol: String
+            switch entry.target { case .folder: symbol = "folder"; case .link: symbol = "link"; case .session: symbol = "terminal" }
+            button.image = NSImage(oshellSymbolName: symbol, accessibilityDescription: nil)
             button.imagePosition = .imageLeading; button.imageScaling = .scaleProportionallyDown
             button.toolTip = entry.detail; button.setAccessibilityLabel(entry.title)
             button.target = button; button.action = #selector(LinkButton.activate)
@@ -180,7 +181,8 @@ final class SessionLinkBar: NSView {
         guard canvas.visibleRect.contains(point) else { return nil }
         if let index = buttons.firstIndex(where: { $0.frame.contains(point) }) {
             let button = buttons[index], fraction = (point.x - button.frame.minX) / button.frame.width
-            if case .link = target, case .folder(let path) = button.destination!, fraction > 0.2 && fraction < 0.8 {
+            let leaf: Bool; if case .folder = target { leaf = false } else { leaf = true }
+            if leaf, case .folder(let path) = button.destination!, fraction > 0.2 && fraction < 0.8 {
                 return (target, .folder(path), button.frame.insetBy(dx: 1, dy: 2))
             }
             let before = fraction < 0.5 ? index : index + 1

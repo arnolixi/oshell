@@ -52,7 +52,7 @@ extension WorkspaceController {
         }) else { return false }
         let rotation = try result.get()
         guard revision == configurationRevision else { throw ModelError.invalid("处理期间配置已变化，请重试。") }
-        guard saveConfiguration(rotation.configuration, updatingMasterProtection: true) else { return false }
+        guard saveConfiguration(rotation.configuration, updatingMasterProtection: true, storageMaster: password) else { return false }
         PasswordVault.shared.acceptRotation(rotation, master: password)
         return true
     }
@@ -86,6 +86,17 @@ extension WorkspaceController {
             Dialogs.message("配置文件无法读取，无法确认主密码保护状态。为保护已有数据，本次启动将退出。请检查：\(store.url.path)")
             completeStartupUnlock(false); return false
         }
+        if store.requiresMasterProtection && !configuration.hasMasterPassword {
+            NSApp.activate(ignoringOtherApps: true)
+            guard let password = PasswordVault.promptMaster(title: "共享数据必须设置主密码", creating: true) else { return false }
+            do { guard try enableMasterProtection(password) else { return false }; completeStartupUnlock(true); return true }
+            catch { Dialogs.message(error.localizedDescription); return false }
+        }
+        if let password = store.masterPassword, (try? MasterPasswordProtection.verifyStartup(configuration, password: password)) != nil {
+            PasswordVault.shared.acceptMaster(password)
+            if store.requiresMasterProtection && !store.encryptedStorage, !saveConfiguration(configuration) { return false }
+            completeStartupUnlock(true); return true
+        }
         let alert = PopupAlert(); alert.messageText = "解锁 OShell"
         alert.informativeText = "请输入主密码以打开工作区。取消或按 Esc 将退出程序。"
         alert.addButton(withTitle: "解锁"); alert.addButton(withTitle: "退出")
@@ -107,6 +118,10 @@ extension WorkspaceController {
                 if snapshot.masterPasswordVerifier == nil || ConfigurationCredentials.profiles(in: snapshot).contains(where: { $0.encryptedPassword?.localKeyID != nil }) {
                     guard try enableMasterProtection(candidate) else { break }
                 } else { PasswordVault.shared.acceptMaster(candidate) }
+                if store.requiresMasterProtection {
+                    store.masterPassword = candidate
+                    guard saveConfiguration(configuration) else { break }
+                }
                 completeStartupUnlock(true); return true
             } catch let failure { error.stringValue = "解锁失败：\(failure.localizedDescription)" }
         }

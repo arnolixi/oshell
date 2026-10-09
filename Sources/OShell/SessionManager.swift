@@ -203,6 +203,8 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         if table.selectedRowIndexes.count > 1 {
             add("连接（\(selectedProfiles.count)）", #selector(connect), enabled: !selectedProfiles.isEmpty)
             add("移动到…", #selector(move), enabled: selectedMoveRows.count == table.selectedRowIndexes.count)
+            add("移动实际会话到…", #selector(moveActual), enabled: selectedMoveRows.count == table.selectedRowIndexes.count && selectedMoveRows.allSatisfy { $0.profileID != nil })
+            add("删除所选（\(table.selectedRowIndexes.count)）…", #selector(removeSelected), enabled: workspace?.isSecurityUnlocked == true && selectedMoveRows.count == table.selectedRowIndexes.count)
             return menu
         }
         if rows.indices.contains(row) {
@@ -219,6 +221,7 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
                 add("属性…", #selector(edit), enabled: profile.kind != .local)
                 add("复制会话", #selector(duplicateSession), enabled: profile.kind != .local)
                 add("添加到快捷链接…", #selector(addSavedLink))
+                add("移动实际会话到…", #selector(moveActual))
             case .link(_, let profile):
                 add("连接", #selector(connect), enabled: !filesOnly || profile.kind != .local)
                 if profile.kind.usesSSH { add("打开 SFTP 文件", #selector(openFiles)) }
@@ -236,11 +239,10 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         }
         if SessionLinks.containsDirectory(currentDirectory) {
             add("添加已有会话链接…", #selector(addSavedLink), enabled: !sourceProfiles.isEmpty)
-        } else {
-            add("新建 SSH 会话…", #selector(newSession))
-            add("新建 SFTP 会话…", #selector(newSFTP))
-            add("新建 FTP 会话…", #selector(newFTP))
         }
+        add("新建 SSH 会话…", #selector(newSession))
+        add("新建 SFTP 会话…", #selector(newSFTP))
+        add("新建 FTP 会话…", #selector(newFTP))
         add("新建目录…", #selector(newDirectory))
         add("会话默认属性…", #selector(showSessionDefaults))
         menu.addItem(.separator())
@@ -408,6 +410,7 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         cell.icon.image = identifier.rawValue == "name" ? symbol.flatMap { NSImage(oshellSymbolName: $0, accessibilityDescription: nil) } : nil
         if case .parent = rows[row] { cell.toolTip = "点击返回上一级目录" }
         else if case .link(_, let source) = rows[row] { cell.toolTip = "快捷引用 → " + SessionDirectory.display(source.group) + "/" + source.name + "\n" + text }
+        else if case .session = rows[row] { cell.toolTip = "实际会话\n" + text }
         else { cell.toolTip = text }
         return cell
     }
@@ -554,15 +557,66 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         for index in config.profiles.indices { config.profiles[index].group = remap(config.profiles[index].group) }
         if workspace.saveConfiguration(config) { reload() }
     }
-    @objc private func move() {
+    @objc private func move() { moveSelection(createReferences: true) }
+    @objc private func moveActual() {
+        guard selectedMoveRows.allSatisfy({ $0.profileID != nil }) else { return }
+        moveSelection(createReferences: false)
+    }
+    private func moveSelection(createReferences: Bool) {
         guard let workspace else { return }
         let selection = selectedMoveRows
         guard !selection.isEmpty, selection.count == table.selectedRowIndexes.count,
-              let destination = SessionDirectoryTree.choose(directories: SessionDirectory.all(workspace.configuration), selected: currentDirectory, excluded: selection.compactMap(\.directory), title: "移动到目录") else { return }
+              let destination = SessionDirectoryTree.choose(directories: SessionDirectory.all(workspace.configuration), selected: currentDirectory, excluded: selection.compactMap(\.directory), title: createReferences ? "移动到目录" : "移动实际会话到目录") else { return }
         do {
-            guard let value = try SessionDirectory.moving(workspace.configuration, profileIDs: selection.compactMap(\.profileID), directories: selection.compactMap(\.directory), linkIDs: selection.compactMap(\.linkID), to: destination) else { return }
+            guard let value = try SessionDirectory.moving(workspace.configuration, profileIDs: selection.compactMap(\.profileID), directories: selection.compactMap(\.directory), linkIDs: selection.compactMap(\.linkID), to: destination, createReferences: createReferences) else { return }
             if workspace.saveConfiguration(value) { reload() }
         } catch { Dialogs.message(error.localizedDescription) }
+    }
+    @objc private func removeSelected() {
+        guard let workspace, workspace.isSecurityUnlocked else { return }
+        let selection = selectedMoveRows
+        guard selection.count > 1, selection.count == table.selectedRowIndexes.count else { return }
+        let revision = workspace.configurationRevision, original = workspace.configuration
+        let profileIDs = Set(selection.compactMap(\.profileID)), linkIDs = Set(selection.compactMap(\.linkID))
+        let directories = Set(selection.compactMap(\.directory))
+        do {
+            guard profileIDs.isSubset(of: Set(original.profiles.map(\.id))),
+                  linkIDs.isSubset(of: Set(original.sessionLinks.entries.map(\.id))),
+                  directories.isSubset(of: Set(SessionDirectory.all(original))) else {
+                throw ModelError.invalid("所选项目已变化，请刷新后重新选择。")
+            }
+            var value = original
+            // Search results may include both an ancestor and its descendants.
+            // Delete each subtree once and persist the complete batch atomically.
+            let roots = directories.filter { path in !directories.contains { $0 != path && SessionDirectory.contains(path, in: $0) } }.sorted()
+            for directory in roots { value = try SessionDirectory.deleting(value, directory: directory).configuration }
+            let retainedPaths = SessionDirectory.all(value)
+            value.profiles.removeAll { profileIDs.contains($0.id) }
+            let removedProfiles = Set(original.profiles.map(\.id)).subtracting(value.profiles.map(\.id))
+            value.sessionLinks.entries.removeAll { linkIDs.contains($0.id) || removedProfiles.contains($0.profileID) }
+            // Removing the last session/reference does not implicitly delete its folder.
+            value.directories = retainedPaths.filter { !SessionLinks.containsDirectory($0) }
+            value.sessionLinks.folders = retainedPaths.compactMap { SessionLinks.folder(for: $0) }.filter { !$0.isEmpty }
+            value.sessionLinks.normalize(profiles: value.profiles); value.normalizeSessionLinkDirectories()
+            let directoryCount = Set(SessionDirectory.all(original)).subtracting(SessionDirectory.all(value)).count
+            let linkCount = original.sessionLinks.entries.count - value.sessionLinks.entries.count
+            let names = table.selectedRowIndexes.compactMap { index -> String? in
+                guard rows.indices.contains(index) else { return nil }
+                switch rows[index] {
+                case .session(let profile): return "会话：" + profile.name
+                case .link(let link, _): return "快捷引用：" + link.name
+                case .directory(let path): return "目录：" + SessionDirectory.display(path)
+                case .parent: return nil
+                }
+            }
+            let list = names.prefix(10).joined(separator: "\n") + (names.count > 10 ? "\n另有 \(names.count - 10) 项…" : "")
+            let detail = "\(list)\n\n将删除 \(removedProfiles.count) 个会话配置（含已保存密码）、\(directoryCount) 个目录、\(linkCount) 个快捷引用。目录会递归删除；其他位置指向被删会话的引用也会移除。\n\n仅删除快捷引用时，原会话会保留。已打开的连接继续运行，不会删除服务器文件。此操作无法撤销。"
+            guard Dialogs.confirm("删除所选 \(selection.count) 项？", text: detail, action: "删除所选") else { return }
+            guard workspace.configurationRevision == revision else {
+                throw ModelError.invalid("确认期间会话配置已变化，请重新选择并确认删除。")
+            }
+            if workspace.saveConfiguration(value) { reload() }
+        } catch { reload(); Dialogs.message(error.localizedDescription) }
     }
     @objc private func remove() {
         guard let workspace, rows.indices.contains(table.selectedRow) else { return }

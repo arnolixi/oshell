@@ -22,9 +22,41 @@ enum MultiWindowTest {
             }
             RunLoop.main.add(timer, forMode: .common); RunLoop.main.add(timer, forMode: .modalPanel)
         }
+        guard let delegate = NSApp.delegate as? AppDelegate else { fatalError("Missing application delegate") }
+        func dockAction() -> NSMenuItem {
+            delegate.applicationDockMenu(NSApp)!.items.first { $0.title == "新建窗口" }!
+        }
+        let aboutTimer = Timer(timeInterval: 0.15, repeats: false) { _ in
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            guard let root = NSApp.modalWindow?.contentView,
+                  let tabs = descendants(root).compactMap({ $0 as? NSTabView }).first else { checks["aboutSettingsOpened"] = false; NSApp.abortModal(); return }
+            tabs.selectTabViewItem(withIdentifier: "about"); root.layoutSubtreeIfNeeded()
+            checks["aboutTabSelectable"] = tabs.selectedTabViewItem?.label == "关于"
+            if let page = tabs.selectedTabViewItem?.view as? AboutSettingsView {
+                let views = descendants(page)
+                let version = views.compactMap { $0 as? NSTextField }.first { $0.identifier?.rawValue == "about.version" }
+                let expected = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as! String
+                let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as! String
+                checks["aboutUsesBundleVersion"] = version?.stringValue == "\(expected)（构建 \(build)）"
+                checks["aboutContentsFitPage"] = views.filter { $0 is NSButton || $0 is NSTextField || $0 is NSImageView }.allSatisfy { page.bounds.contains($0.convert($0.bounds, to: page)) && $0.bounds.height > 0 }
+                checks["aboutHasThreeResourceActions"] = views.compactMap { $0 as? NSButton }.filter { $0.identifier?.rawValue.hasPrefix("about.open.") == true }.count == 3
+                checks["aboutBundledLicensesExist"] = Bundle.main.url(forResource: "OShell-LICENSE", withExtension: "txt") != nil && Bundle.main.url(forResource: "THIRD_PARTY_NOTICES", withExtension: "txt") != nil
+            } else { checks["aboutSettingsOpened"] = false }
+            checks["dockDisabledDuringModal"] = !dockAction().isEnabled
+            if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) }
+        }
+        RunLoop.main.add(aboutTimer, forMode: .common); RunLoop.main.add(aboutTimer, forMode: .modalPanel)
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        let beforeSettings = try? encoder.encode(first.configuration.preferences)
+        first.showPreferences()
+        checks["aboutEscapePreservesSettings"] = (try? encoder.encode(first.configuration.preferences)) == beforeSettings
         first.newLocal()
         let original = first.selectedTab!, pane = original.activePane
-        var second: WorkspaceController? = windows.newWindow()
+        let dock = dockAction()
+        checks["dockTargetsApplication"] = dock.target as? AppDelegate === delegate && dock.isEnabled
+        checks["dockNewWindowActionHandled"] = NSApp.sendAction(dock.action!, to: dock.target, from: dock)
+        var second: WorkspaceController? = windows.active
+        checks["dockCreatesIndependentWindow"] = windows.workspaces.count == 2 && second !== first && second?.window?.isVisible == true
         weak var weakSecond = second
         checks["newWindowStartsEmpty"] = second!.tabs.isEmpty && first.tabs.count == 1
         checks["sharedUpdater"] = first.appUpdater === second!.appUpdater
@@ -66,7 +98,11 @@ enum MultiWindowTest {
             checks["externalLaunchFollowsRemainingWindow"] = windows.externalWorkspace() === first
             first.shutdown(); first.window?.close()
             checks["lastWindowCanCloseWithoutQuitting"] = windows.workspaces.isEmpty
-            let reopened = windows.newWindow()
+            let reopen = dockAction()
+            checks["dockEnabledWithoutWindows"] = reopen.isEnabled
+            _ = NSApp.sendAction(reopen.action!, to: reopen.target, from: reopen)
+            let reopened = windows.active!
+            checks["dockReopensAfterLastWindowClosed"] = windows.workspaces.count == 1
             checks["newWindowAfterLastClosed"] = reopened.isSecurityUnlocked && reopened.window?.isVisible == true
             let reopenedBlank = action(#selector(WorkspaceController.newBlankTab))
             checks["menuRetargetsAfterAllWindowsClosed"] = reopenedBlank.target as? WorkspaceController === reopened

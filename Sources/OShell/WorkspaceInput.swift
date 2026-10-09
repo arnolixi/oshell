@@ -52,7 +52,13 @@ extension WorkspaceController {
         let names = panes.map { "\($0.title)（\($0.profile.name)）" }.joined(separator: "、")
         var content = text
         if configuration.preferences.confirmMultilinePaste && InputText.isMultiline(content) {
-            guard let approved = InputDialogs.previewPaste(content, destinations: names) else { return }; content = approved
+            guard let approved = InputDialogs.previewPaste(content, destinations: names) else { return }
+            content = approved.text
+            if approved.disableFuturePreview {
+                var updated = configuration
+                updated.preferences.confirmMultilinePaste = false
+                guard saveConfiguration(updated) else { return }
+            }
         }
         if source.blocksManagedToolInput, ids == [source.id], !source.isShutdown {
             source.handleEndedInput(InputText.bytes(content, bracketed: source.terminal.getTerminal().bracketedPasteMode)[...]); return

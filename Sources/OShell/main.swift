@@ -19,10 +19,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Load the bundled brand explicitly instead of a stale LaunchServices icon.
         if let url = Bundle.main.url(forResource: "OShell", withExtension: "icns"), let icon = NSImage(contentsOf: url) { NSApp.applicationIconImage = icon }
         PopupKeyboard.install()
+        if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.install() }
         let directory: URL
+        var openingMaster: String?
         if let override = ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] { directory = URL(fileURLWithPath: override) }
-        else { directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("OShell") }
-        controller = WorkspaceController(store: ConfigurationStore(directory: directory))
+        else {
+            let location = StorageLocation()
+            do {
+                if (try location.pending()) != nil {
+                    NSApp.activate(ignoringOtherApps: true)
+                    guard let password = PasswordVault.promptMaster(title: "输入主密码以切换数据目录", creating: false) else { NSApp.terminate(nil); return }
+                    openingMaster = password
+                }
+                directory = try location.activatePending(master: openingMaster)
+            }
+            catch {
+                let alert = PopupAlert(); alert.messageText = "无法打开数据目录"; alert.informativeText = error.localizedDescription
+                if (try? location.pending()) != nil {
+                    alert.addButton(withTitle: "取消切换，使用原目录"); alert.addButton(withTitle: "退出")
+                    guard alert.runModal() == .alertFirstButtonReturn else { NSApp.terminate(nil); return }
+                    do { try location.schedule(nil); directory = try location.activeDirectory() }
+                    catch { Dialogs.message(error.localizedDescription); NSApp.terminate(nil); return }
+                } else {
+                    alert.informativeText += "\n\n可返回迁移时保留的默认本地副本；共享目录中的文件不会删除。"
+                    alert.addButton(withTitle: "退出"); alert.addButton(withTitle: "返回默认本地目录")
+                    guard alert.runModal() == .alertSecondButtonReturn else { NSApp.terminate(nil); return }
+                    do { directory = try location.restoreDefaultDirectory(); openingMaster = nil }
+                    catch { Dialogs.message(error.localizedDescription); NSApp.terminate(nil); return }
+                }
+            }
+        }
+        let harness = ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] != nil && (CommandLine.arguments.contains(where: { $0.hasSuffix("-test") || $0.hasPrefix("--memory-") }) || ProcessInfo.processInfo.environment.keys.contains { $0.hasSuffix("_TEST_ROOT") })
+        let shared = !harness && (directory.standardizedFileURL != StorageLocation.defaultDirectory.standardizedFileURL || FileManager.default.fileExists(atPath: WebDAVSync.settingsURL.path))
+        let store = ConfigurationStore(directory: directory, masterPassword: openingMaster, requiresMasterProtection: shared)
+        if let data = try? SharedDataFile.readIfPresent(store.url), SharedVault.isEncrypted(data) {
+            while true {
+                if let password = store.masterPassword, (try? store.load()).flatMap({ try? MasterPasswordProtection.verifyStartup($0, password: password) }) != nil { break }
+                NSApp.activate(ignoringOtherApps: true)
+                guard let password = PasswordVault.promptMaster(title: "解锁 OShell 加密数据", creating: false) else { NSApp.terminate(nil); return }
+                store.masterPassword = password
+                do { let config = try store.load(); try MasterPasswordProtection.verifyStartup(config, password: password); break }
+                catch { store.masterPassword = nil; Dialogs.message(error.localizedDescription) }
+            }
+        }
+        controller = WorkspaceController(store: store)
         do { launchServer = try ExternalLaunchServer(workspace: controller) }
         catch {
             if CommandLine.arguments.contains("--external-launch-service") { NSApp.terminate(nil); return }
@@ -34,12 +74,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         launchServer?.workspaceProvider = { [weak self] in self?.windows?.externalWorkspace() }
         buildMenu()
         windows.activate(controller)
+        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-test") }) { windows.webDAV.schedule() }
         if !CommandLine.arguments.contains(where: { $0.hasSuffix("-test") }) { do { try controller.appUpdater.configure() } catch { Dialogs.message(error.localizedDescription) } }
         if !backgroundTransferTest { controller.show(); NSApp.activate(ignoringOtherApps: true) }
+        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-test") }), SharedConflictDrafts.exists(for: controller.store) {
+            DispatchQueue.main.async {
+                if NSApp.modalWindow == nil { Dialogs.message("本机有尚未处理的同步草稿，请通过“会话 → 处理同步冲突…”选择保留的版本。草稿处理前不会自动载入或覆盖共享数据。") }
+            }
+        }
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_SFTP_REUSE_TEST_ROOT"] != nil { SFTPReuseTest.run(controller) }
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_ZOC_CLONE_TEST_ROOT"] != nil { SSHCloneTest.run(controller) }
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_ZOC_TEST_ROOT"] != nil { ZOCLaunchTest.run(controller) }
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
+        if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.complete(controller) }
+        if CommandLine.arguments.contains("--command-input-test") { CommandInputTest.run(controller) }
+        if CommandLine.arguments.contains("--webdav-test") { WebDAVFeatureTest.run(controller) }
+        if CommandLine.arguments.contains("--shared-conflict-test") { SharedConflictTest.run(controller) }
+        if CommandLine.arguments.contains("--storage-sync-test") { StorageSyncTest.run(controller) }
         if CommandLine.arguments.contains("--multi-window-test") { MultiWindowTest.run(controller) }
         if CommandLine.arguments.contains("--named-tab-groups-test") { NamedTabGroupsTest.run(controller) }
         if CommandLine.arguments.contains("--links-catalog-test") { LinksCatalogTest.run(controller) }
@@ -97,6 +148,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--filetabs-integration-test") { FileTabsIntegrationTest.run(controller) }
         if CommandLine.arguments.contains("--layout-test") { LayoutTest.run(controller) }
     }
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard !CommandLine.arguments.contains(where: { $0.hasSuffix("-test") }) else { return }
+        windows?.reloadSharedConfiguration(interactive: false)
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard windows?.canQuit() ?? true else { return .terminateCancel }
         controller?.completeStartupUnlock(false); launchServer?.stop(); return .terminateNow
@@ -104,7 +159,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) { launchServer?.stop(); SSHConnectionGroup.finishCleanup() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { windows?.externalWorkspace()?.show(); return true }
-    @objc func newWindow() { windows?.newWindow() }
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu(); menu.autoenablesItems = false
+        let item = menu.addItem(withTitle: "新建窗口", action: #selector(newWindow), keyEquivalent: "")
+        // Target the app, so this remains usable after the last workspace closes.
+        item.target = self; item.isEnabled = windows != nil && NSApp.modalWindow == nil
+        return menu
+    }
+    @objc func newWindow() {
+        guard let windows, NSApp.modalWindow == nil else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        windows.newWindow()
+    }
     private func buildMenu() {
         let root = NSMenu()
         func menu(_ title: String) -> NSMenu {
@@ -130,6 +196,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let file = menu("会话")
         add(file, "新建窗口", #selector(WorkspaceController.newWindow), "n", [.command, .shift], target: self)
         add(file, "会话管理…", #selector(WorkspaceController.showSessionManager), "o", [.command, .shift])
+        add(file, "立即同步 WebDAV", #selector(WorkspaceController.syncWebDAVNow))
+        add(file, "处理同步冲突…", #selector(WorkspaceController.resolvePendingSharedConflicts))
+        add(file, "放弃本机同步草稿…", #selector(WorkspaceController.discardPendingSharedConflicts))
+        add(file, "重新载入共享数据", #selector(WorkspaceController.reloadSharedConfiguration))
         add(file, "导入会话…", #selector(WorkspaceController.importSessions))
         add(file, "导出全部会话…", #selector(WorkspaceController.exportSessions))
         add(file, "会话默认属性…", #selector(WorkspaceController.showSessionDefaults))

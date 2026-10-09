@@ -9,7 +9,7 @@ struct QuickSendEntry: Equatable {
     var appendReturn: Bool
 }
 
-private final class QuickSendEditor: NSTextView {
+private final class QuickSendEditor: CommandTextView {
     var onMultiline: ((String) -> Void)?
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         let text = (insertString as? NSAttributedString)?.string ?? (insertString as? String)
@@ -24,7 +24,7 @@ private final class QuickSendEditor: NSTextView {
 
 private final class QuickSendCell: NSTextFieldCell {
     private lazy var editor: QuickSendEditor = {
-        let value = QuickSendEditor(); value.isFieldEditor = true; value.isRichText = false; value.importsGraphics = false; return value
+        let value = QuickSendEditor(frame: .zero, textContainer: nil); value.isFieldEditor = true; value.isRichText = false; value.importsGraphics = false; return value
     }()
     override func fieldEditor(for controlView: NSView) -> NSTextView? {
         editor.onMultiline = { [weak controlView] text in (controlView as? QuickSendField)?.onMultiline?(text) }

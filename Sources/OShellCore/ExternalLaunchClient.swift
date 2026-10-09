@@ -15,7 +15,7 @@ public enum ExternalLaunchClient {
     }
     public static func send(_ request: ExternalLaunchRequest) throws {
         try request.validate()
-        let directory = try LaunchEndpoint.directory(for: LaunchEndpoint.configurationDirectory)
+        var directory = try LaunchEndpoint.directory(for: LaunchEndpoint.configurationDirectory)
         let lockFD = try LaunchEndpoint.lock("launch.lock", directory: directory)
         defer { close(lockFD) }
         var client = try? LaunchEndpoint.connect(directory: directory)
@@ -34,9 +34,13 @@ public enum ExternalLaunchClient {
             let app = Process(); app.executableURL = appExecutable; app.arguments = ["--external-launch-service"]
             app.standardInput = FileHandle.nullDevice; app.standardOutput = FileHandle.nullDevice; app.standardError = FileHandle.nullDevice
             try app.run()
-            let deadline = Date().addingTimeInterval(12)
-            while client == nil && Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.1); client = try? LaunchEndpoint.connect(directory: directory)
+            // Encrypted shared data can require an interactive master-password unlock.
+            let deadline = Date().addingTimeInterval(300)
+            while client == nil && app.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.1)
+                // The launched app may have activated a pending data-directory change.
+                directory = try LaunchEndpoint.directory(for: LaunchEndpoint.configurationDirectory)
+                client = try? LaunchEndpoint.connect(directory: directory)
             }
         }
         guard let fd = client else { throw ModelError.invalid("OShell 启动服务未就绪，请退出旧版 OShell 后重试。") }

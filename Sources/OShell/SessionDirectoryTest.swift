@@ -163,6 +163,63 @@ enum SessionDirectoryTest {
         checks["directoryDeletionPersistsAfterReload"] = (try? workspace.store.load().profiles.contains { $0.id == disposable.id }) == false && (try? workspace.store.load().directories.contains("删除测试/含会话/空子目录")) == false
         manager.revealDirectory("")
         checks["linksRootDeleteDisabled"] = manager.contextMenu(for: row("Links")).items.first { $0.title == "删除…" }?.isEnabled == false
+        // Batch deletion uses the real selection/context menu and one save.
+        let batchA = SessionProfile(name: "batch-a", group: "批量测试", kind: .local)
+        let batchB = SessionProfile(name: "batch-b", group: "批量测试", kind: .ftp, host: "batch.example.test", port: 21)
+        let keep = SessionProfile(name: "keep", group: "批量测试", host: "keep.example.test")
+        var batch = workspace.configuration; batch.profiles += [batchA, batchB, keep]
+        batch.sessionLinks.add(profileID: batchA.id, name: "外部引用", folder: "批量引用")
+        _ = workspace.saveConfiguration(batch)
+        workspace.open(batchA); let batchLive = workspace.selectedTab!.activePane
+        manager.reveal(batchA)
+        func batchMenu(_ names: [String]) -> NSMenuItem {
+            let indexes = names.map(row)
+            table.selectRowIndexes(IndexSet(indexes), byExtendingSelection: false)
+            return manager.contextMenu(for: indexes[0]).items.first { $0.title.hasPrefix("删除所选") }!
+        }
+        func invoke(_ item: NSMenuItem) { _ = NSApp.sendAction(item.action!, to: item.target, from: item) }
+        let beforeBatch = workspace.configurationRevision
+        let deleteBatch = batchMenu([batchA.name, batchB.name])
+        checks["batchDeleteMenuPreservesSelection"] = deleteBatch.isEnabled && table.selectedRowIndexes.count == 2 && deleteBatch.title.contains("2")
+        nextModal { root in
+            let text = descendants(root).compactMap { $0 as? NSTextField }.map(\.stringValue).joined(separator: " ")
+            checks["batchConfirmationShowsImpact"] = text.contains("2 个会话配置") && text.contains("1 个快捷引用") && text.contains(batchA.name) && text.contains(batchB.name)
+            if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) }
+        }
+        invoke(deleteBatch)
+        checks["cancelBatchLeavesConfiguration"] = workspace.configurationRevision == beforeBatch && workspace.configuration.profiles.contains { $0.id == batchA.id }
+        nextModal { root in press(root, "删除所选") }
+        invoke(deleteBatch)
+        checks["batchDeletesOnce"] = workspace.configurationRevision == beforeBatch + 1 && !workspace.configuration.profiles.contains { [batchA.id, batchB.id].contains($0.id) }
+        checks["batchKeepsUnselectedAndDirectory"] = workspace.configuration.profiles.contains { $0.id == keep.id } && SessionDirectory.all(workspace.configuration).contains("批量测试")
+        checks["batchRemovesExternalReferences"] = !workspace.configuration.sessionLinks.entries.contains { $0.profileID == batchA.id }
+        checks["batchLeavesLiveSessionRunning"] = !batchLive.isShutdown && workspace.tabs.contains { $0.layout.panes.contains { $0 === batchLive } }
+        checks["batchPersistsOnDisk"] = (try? workspace.store.load().profiles.contains { [batchA.id, batchB.id].contains($0.id) }) == false
+
+        var links = workspace.configuration
+        links.sessionLinks.add(profileID: keep.id, name: "批量引用一", folder: "批量引用")
+        links.sessionLinks.add(profileID: keep.id, name: "批量引用二", folder: "批量引用/子目录")
+        _ = workspace.saveConfiguration(links)
+        manager.revealDirectory(SessionLinks.directory(for: "批量引用"))
+        let mixed = batchMenu(["批量引用一", "子目录"])
+        nextModal { root in press(root, "删除所选") }; invoke(mixed)
+        checks["mixedFolderAndReferenceDeleteKeepsSource"] = workspace.configuration.profiles.contains { $0.id == keep.id } && !workspace.configuration.sessionLinks.entries.contains { $0.name.hasPrefix("批量引用") }
+        checks["mixedDeleteRecursesAndKeepsParent"] = !SessionDirectory.all(workspace.configuration).contains(SessionLinks.directory(for: "批量引用/子目录")) && SessionDirectory.all(workspace.configuration).contains(SessionLinks.directory(for: "批量引用"))
+        manager.revealDirectory("")
+        checks["batchProtectsLinksRoot"] = !batchMenu(["Links", "批量测试"]).isEnabled
+        manager.reveal(keep)
+        checks["batchProtectsParentRow"] = !batchMenu(["../", keep.name]).isEnabled
+        var changed = workspace.configuration; changed.profiles += [batchA, batchB]; _ = workspace.saveConfiguration(changed)
+        manager.reveal(batchA)
+        let stale = batchMenu([batchA.name, batchB.name])
+        nextModal { root in
+            var concurrent = workspace.configuration; concurrent.profiles.append(SessionProfile(name: "concurrent", host: "concurrent.example.test"))
+            _ = workspace.saveConfiguration(concurrent)
+            nextModal { _ in if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) } }
+            press(root, "删除所选")
+        }
+        invoke(stale)
+        checks["batchRejectsStaleConfirmation"] = workspace.configuration.profiles.contains { $0.id == batchA.id } && workspace.configuration.profiles.contains { $0.name == "concurrent" }
         let report: [String: Any] = ["passed": checks.values.allSatisfy { $0 }, "checks": checks]
         if let path = ProcessInfo.processInfo.environment["OSHELL_DIRECTORY_OUTPUT"] { try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: path)) }
         print("Directory checks: \(checks.count), failed: \(checks.filter { !$0.value }.keys.sorted())")

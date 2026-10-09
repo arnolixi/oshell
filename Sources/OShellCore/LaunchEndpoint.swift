@@ -7,8 +7,7 @@ import Darwin
 
 public enum LaunchEndpoint {
     public static var configurationDirectory: URL {
-        if let override = ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] { return URL(fileURLWithPath: override) }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("OShell")
+        get throws { try StorageLocation.resolvedDirectory() }
     }
     public static func directory(for configuration: URL) throws -> URL {
         let digest = PlatformDigest.sha256(Data(configuration.standardizedFileURL.path.utf8)).prefix(10).map { String(format: "%02x", $0) }.joined()

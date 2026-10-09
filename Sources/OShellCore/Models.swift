@@ -143,6 +143,8 @@ public struct Preferences: Codable {
     public var metal: Bool = true
     public var autoZmodem: Bool = true
     public var copyOnSelect = true
+    public var copyTrimLeadingWhitespace = false
+    public var copyTrimTrailingWhitespace = false
     public var rightClickPaste = true
     public var confirmMultilinePaste = true
     public var updateRepository = ""
@@ -153,7 +155,7 @@ public struct Preferences: Codable {
     public var keyboardShortcuts = KeyboardShortcuts()
     public var highlightSetID: UUID? = HighlightSet.standardID
     public init() {}
-    private enum CodingKeys: String, CodingKey { case keyboardShortcuts, fontName, fontSize, scrollback, darkTheme, metal, autoZmodem, copyOnSelect, rightClickPaste, confirmMultilinePaste, updateRepository, automaticUpdateChecks, masterWarningAcknowledged, quickSendBarVisible, quickSendScope, highlightSetID, interfaceTheme, colorSchemeID, customColorSchemes }
+    private enum CodingKeys: String, CodingKey { case keyboardShortcuts, fontName, fontSize, scrollback, darkTheme, metal, autoZmodem, copyOnSelect, copyTrimLeadingWhitespace, copyTrimTrailingWhitespace, rightClickPaste, confirmMultilinePaste, updateRepository, automaticUpdateChecks, masterWarningAcknowledged, quickSendBarVisible, quickSendScope, highlightSetID, interfaceTheme, colorSchemeID, customColorSchemes }
     public init(from decoder: Decoder) throws {
         self.init()
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -168,6 +170,8 @@ public struct Preferences: Codable {
         metal = try values.decodeIfPresent(Bool.self, forKey: .metal) ?? true
         autoZmodem = try values.decodeIfPresent(Bool.self, forKey: .autoZmodem) ?? true
         copyOnSelect = try values.decodeIfPresent(Bool.self, forKey: .copyOnSelect) ?? true
+        copyTrimLeadingWhitespace = try values.decodeIfPresent(Bool.self, forKey: .copyTrimLeadingWhitespace) ?? false
+        copyTrimTrailingWhitespace = try values.decodeIfPresent(Bool.self, forKey: .copyTrimTrailingWhitespace) ?? false
         rightClickPaste = try values.decodeIfPresent(Bool.self, forKey: .rightClickPaste) ?? true
         confirmMultilinePaste = try values.decodeIfPresent(Bool.self, forKey: .confirmMultilinePaste) ?? true
         updateRepository = try values.decodeIfPresent(String.self, forKey: .updateRepository) ?? ""
@@ -185,6 +189,8 @@ public struct Preferences: Codable {
         try values.encode(scrollback, forKey: .scrollback); try values.encode(darkTheme, forKey: .darkTheme)
         try values.encode(metal, forKey: .metal); try values.encode(autoZmodem, forKey: .autoZmodem)
         try values.encode(copyOnSelect, forKey: .copyOnSelect); try values.encode(rightClickPaste, forKey: .rightClickPaste)
+        try values.encode(copyTrimLeadingWhitespace, forKey: .copyTrimLeadingWhitespace)
+        try values.encode(copyTrimTrailingWhitespace, forKey: .copyTrimTrailingWhitespace)
         try values.encode(confirmMultilinePaste, forKey: .confirmMultilinePaste)
         try values.encode(updateRepository, forKey: .updateRepository)
         try values.encode(automaticUpdateChecks, forKey: .automaticUpdateChecks)
@@ -247,10 +253,39 @@ public struct Configuration: Codable {
 }
 public final class ConfigurationStore {
     public let url: URL
-    public init(directory: URL) { url = directory.appendingPathComponent("configuration.json") }
+    public var encryptedStorage = false
+    public var masterPassword: String?
+    public var requiresMasterProtection: Bool
+    private var observed = false
+    private var digest: Data?
+    private var baseline: Configuration?
+    public init(directory: URL, masterPassword: String? = nil, requiresMasterProtection: Bool = false) {
+        url = directory.appendingPathComponent("configuration.json"); self.masterPassword = masterPassword; self.requiresMasterProtection = requiresMasterProtection
+    }
+    private func fingerprint(_ data: Data?) -> Data? { data.map { Data(PlatformDigest.sha256($0)) } }
+    private func readData() throws -> Data? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return try SharedDataFile.readIfPresent(url) }
+        var error: NSError?, result: Result<Data?, Error>?
+        NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &error) { actual in result = Result { try SharedDataFile.readIfPresent(actual) } }
+        if let result { return try result.get() }
+        throw error ?? ModelError.invalid("无法协调读取共享配置。") as NSError
+    }
     public func load() throws -> Configuration {
-        guard FileManager.default.fileExists(atPath: url.path) else { return Configuration() }
-        var config = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: url))
+        let data = try readData()
+        if observed && digest != nil && data == nil { throw ModelError.invalid("数据文件已被移动或删除，已停止创建空配置。") }
+        let config = try data.map(decode) ?? Configuration()
+        if !observed { digest = fingerprint(data); baseline = config; observed = true }
+        return config
+    }
+    private func decode(_ data: Data) throws -> Configuration {
+        let plaintext: Data
+        if SharedVault.isEncrypted(data) {
+            encryptedStorage = true
+            guard let masterPassword else { throw ModelError.invalid("请先输入主密码解锁共享数据。") }
+            plaintext = try SharedVault.open(data, password: masterPassword)
+        } else { plaintext = data }
+        var config = try JSONDecoder().decode(Configuration.self, from: plaintext)
+        if requiresMasterProtection { try SharingProtection.require(config) }
         try config.migrateFileSessions()
         config.sessionLinks.normalize(profiles: config.profiles)
         config.preferences.clamp()
@@ -264,9 +299,44 @@ public final class ConfigurationStore {
         }
         return config
     }
-    public func save(_ config: Configuration) throws {
+    public func reloadIfChanged(validating: (Configuration) throws -> Void) throws -> Configuration? {
+        let data = try readData()
+        guard fingerprint(data) != digest else { return nil }
+        guard let data else { throw ModelError.invalid("共享数据文件暂不可用，保留当前会话，请等待同步或恢复文件。") }
+        let config = try decode(data)
+        try validating(config)
+        digest = fingerprint(data); baseline = config; observed = true
+        return config
+    }
+    public func sharedSnapshot() throws -> SharedConfigurationSnapshot {
+        guard let data = try readData(), let fingerprint = fingerprint(data) else { throw ModelError.invalid("共享数据文件暂不可用，请等待同步完成。") }
+        return SharedConfigurationSnapshot(configuration: try decode(data), fingerprint: fingerprint)
+    }
+    public func save(_ config: Configuration) throws { try write(config, expected: digest) }
+    public func saveResolved(_ config: Configuration, expected: Data) throws { try write(config, expected: expected) }
+    private func write(_ config: Configuration, expected: Data?) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try PrivateFile.write(encoder.encode(config), to: url)
+        let data: Data
+        if requiresMasterProtection || encryptedStorage || masterPassword != nil {
+            guard let masterPassword else { throw ModelError.invalid("共享数据已锁定，无法保存。") }
+            data = try SharedVault.encode(config, password: masterPassword)
+        } else { data = try encoder.encode(config) }
+        var error: NSError?, result: Result<Void, Error>?
+        NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &error) { actual in
+            result = Result {
+                let current = try SharedDataFile.readIfPresent(actual)
+                guard (observed || current == nil), fingerprint(current) == expected else {
+                    if let baseline, let current, let stamp = fingerprint(current) {
+                        throw SharedConfigurationConflict(base: baseline, remote: try decode(current), fingerprint: stamp)
+                    }
+                    throw ModelError.invalid("共享配置已改变或暂不可用，未覆盖现有数据。")
+                }
+                try PrivateFile.write(data, to: actual)
+                digest = fingerprint(data); baseline = config; observed = true; encryptedStorage = SharedVault.isEncrypted(data)
+            }
+        }
+        if let result { try result.get(); return }
+        throw error ?? ModelError.invalid("无法协调写入共享配置。") as NSError
     }
 }

@@ -29,6 +29,7 @@ final class MasterPasswordDialog {
 
 extension WorkspaceController {
     @objc func changeMasterPassword() {
+        guard windowCoordinator?.webDAV.enabled != true else { Dialogs.message("请先停用 WebDAV 同步再修改主密码；之后使用新的远端目录重新建立同步，原远端数据保持原密码保护。"); return }
         let count = ConfigurationCredentials.count(in: configuration)
         guard configuration.hasMasterPassword else { setupMasterPassword(); return }
         let dialog = MasterPasswordDialog(count: count); defer { dialog.clear() }
@@ -40,7 +41,7 @@ extension WorkspaceController {
                 }) else { return }
                 let rotation = try result.get()
                 guard revision == configurationRevision else { throw ModelError.invalid("处理期间配置已变化，请重试。"); }
-                guard saveConfiguration(rotation.configuration, updatingMasterProtection: true) else { return }
+                guard saveConfiguration(rotation.configuration, updatingMasterProtection: true, storageMaster: values.next) else { return }
                 PasswordVault.shared.acceptRotation(rotation, master: values.next)
                 Dialogs.message("主密码已修改，使用主密码保护的密码已重新加密，本机自动加密未改变。"); return
             } catch { Dialogs.message(error.localizedDescription) }
@@ -51,6 +52,7 @@ extension WorkspaceController {
 
 extension WorkspaceController {
     @discardableResult func disableMasterProtection(_ password: String) throws -> Bool {
+        guard !requiresSharingProtection else { throw ModelError.invalid("使用 iCloud、WebDAV 或自定义数据目录期间不能清除主密码。请先停用同步并切回默认本地目录。") }
         guard isSecurityUnlocked, configuration.hasMasterPassword else { return false }
         let snapshot = configuration, revision = configurationRevision
         let localStore = LocalCredentialStore(directory: store.url.deletingLastPathComponent())
@@ -67,6 +69,7 @@ extension WorkspaceController {
         return true
     }
     @objc func clearMasterPassword() {
+        guard !requiresSharingProtection else { Dialogs.message("共享或自定义数据目录强制使用主密码，不能清除。请先停用同步并切回默认本地目录。"); return }
         guard isSecurityUnlocked, configuration.hasMasterPassword else { return }
         let alert = PopupAlert(); alert.alertStyle = .warning; alert.messageText = "清除主密码"
         alert.informativeText = "清除后，启动 OShell 不再要求主密码。保存的会话及代理密码将转为 OShell 本机自动加密，不使用系统钥匙串；已连接会话不受影响。\n\n本机密钥与密文同存于 OShell 数据目录，保护强度会降低。请输入当前主密码确认。"

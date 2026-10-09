@@ -74,6 +74,20 @@ public final class HighlightMatcher {
     }
 }
 public enum InputText {
+    /// Trim only the selection's outer boundaries; preserve indentation inside it.
+    public static func copied(_ text: String, trimLeading: Bool, trimTrailing: Bool) -> String {
+        let scalars = text.unicodeScalars
+        var start = scalars.startIndex, end = scalars.endIndex
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        if trimLeading {
+            while start < end && whitespace.contains(scalars[start]) { start = scalars.index(after: start) }
+        }
+        if trimTrailing {
+            while end > start && whitespace.contains(scalars[scalars.index(before: end)]) { end = scalars.index(before: end) }
+        }
+        return String(scalars[start..<end])
+    }
+
     public static func normalized(_ text: String) -> String { text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n") }
     public static func isMultiline(_ text: String) -> Bool { normalized(text).contains("\n") }
     public static func bytes(_ text: String, bracketed: Bool, appendReturn: Bool = false) -> [UInt8] {

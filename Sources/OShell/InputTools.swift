@@ -8,7 +8,7 @@ func operatorButton(_ title: String, target: AnyObject?, action: Selector?) -> N
     let button = NSButton(title: title, target: target, action: action); button.bezelStyle = .rounded; return button
 }
 func textEditor(_ text: String, editable: Bool = true) -> (NSScrollView, NSTextView) {
-    let view = NSTextView(); view.isRichText = false; view.isEditable = editable; view.font = .oshellMonospacedSystemFont(ofSize: 12, weight: .regular)
+    let view = CommandTextView(frame: .zero, textContainer: nil); view.isRichText = false; view.isEditable = editable; view.font = .oshellMonospacedSystemFont(ofSize: 12, weight: .regular)
     view.string = text; view.isVerticallyResizable = true; view.isHorizontallyResizable = false
     view.autoresizingMask = [.width]; view.textContainer?.widthTracksTextView = true; view.textContainerInset = NSSize(width: 8, height: 8)
     let scroll = NSScrollView(); scroll.documentView = view; scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
@@ -55,11 +55,24 @@ enum InputDialogs {
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
         return Set(controls.filter { $0.1.state == .on && $0.1.isEnabled }.map { $0.0.id })
     }
-    static func previewPaste(_ text: String, destinations: String) -> String? {
+    struct PastePreview {
+        let text: String
+        let disableFuturePreview: Bool
+    }
+    static func previewPaste(_ text: String, destinations: String) -> PastePreview? {
         let alert = PopupAlert(); alert.messageText = "多行粘贴预览"; alert.informativeText = "发送到：\(destinations)\n换行可能执行命令；可编辑内容后再粘贴。"
         alert.addButton(withTitle: "粘贴"); alert.addButton(withTitle: "取消")
-        let (scroll, editor) = textEditor(text); scroll.frame = NSRect(x: 0, y: 0, width: 640, height: 300); alert.accessoryView = scroll
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }; return editor.string
+        let (scroll, editor) = textEditor(text)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 334))
+        scroll.frame = NSRect(x: 0, y: 34, width: 640, height: 300)
+        let disablePreview = NSButton(checkboxWithTitle: "下次不再使用预览", target: nil, action: nil)
+        disablePreview.identifier = .init("paste.disablePreview")
+        disablePreview.toolTip = "点击粘贴后生效；可在设置 → 常规中重新开启多行粘贴预览。"
+        disablePreview.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        container.addSubview(scroll); container.addSubview(disablePreview); alert.accessoryView = container
+        alert.window.initialFirstResponder = editor
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return PastePreview(text: editor.string, disableFuturePreview: disablePreview.state == .on)
     }
 }
 
