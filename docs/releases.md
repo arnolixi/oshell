@@ -101,3 +101,17 @@ python3 scripts/export-public-source.py --ref HEAD --output dist/source/OShell-s
 打开 DMG 后，`OShell.app` 旁边提供 `release-manifest.json` 和 `SHA256SUMS.txt`。前者记录该包的版本、构建号、系统目标、架构、源码提交和签名状态；后者校验包内应用、安装说明及清单文件。它不校验自身或外层 DMG，避免循环依赖。可在挂载卷根目录运行 `shasum -a 256 -c SHA256SUMS.txt`。
 
 流水线仍计算外层 DMG、源码包的校验值用于发布前验证，但这些流程内部文件不展示为 Release 附件。更新客户端从 Release 说明读取签名信息并使用 DMG；包内清单不替代更新签名或 Apple 公证。
+
+## 静态更新站点（GitHub Pages）
+
+客户端读取 `https://<owner>.github.io/<repository>/updates/latest.json`，不调用 GitHub Releases REST API，不需要用户 Token。用户站点仓库 `<owner>.github.io` 使用根目录下的 `/updates/latest.json`。仓库地址仍在 OShell 更新设置中填写，应用自动推导标准 Pages 地址；当前不支持重定向到自定义 Pages 域名。
+
+管理员首次在仓库 Settings → Pages 将发布来源设为 GitHub Actions。`.github/workflows/update-pages.yml` 可以手动执行，用最新已公开的正式 Release 初始化或修复更新站点，无需重建安装包或重新签名。正式发布流水线在 Release 上传校验并公开成功后调用它；只编译模式不部署 Pages。
+
+部署任务使用 Actions 的短期 `GITHUB_TOKEN` 读取最新 Release，验证四份更新元数据的 Ed25519 签名、版本一致性、DMG 名称和大小，然后生成站点。它不读取发布私钥，也不向 Pages 上传源码、配置或安装包。权限为 `contents: read`、`pages: write`、`id-token: write`；站点环境为 `github-pages`。部署串行执行，每次读取最新正式版本，避免旧构建任务拿自己的旧版本覆盖更新源。仓库如限制部署分支，需要允许主分支及发布标签。
+
+Pages 只有首页和 `updates/latest.json` 等静态文件。JSON 按四种平台包装原有签名数据，不改变签名覆盖的字节；客户端仍由 Sparkle 验证更新信息与 DMG。Releases 保留原有签名注释供 0.2.61–0.2.63 客户端升级一次使用，不增加 XML、update ZIP 或额外 JSON 附件。
+
+客户端缓存成功检查结果五分钟；请求失败至少等待一分钟，服务端提供 Retry-After 时遵循其等待时间。过期缓存不会伪装成新的成功检查。Pages 暂不可用时明确报错，不回退到匿名 API。仍使用旧通道的客户端需要升级一次；被 API 限流时可等额度恢复或手动安装新版。
+
+如果 Release 已发布但 Pages 部署失败，旧站点不被替换。修复原因后单独重跑“Publish static update site”，不要覆盖已有正式 Release。默认 GitHub Pages 的域名与地域可达性仍受网络条件影响，此方案解决 REST API 匿名额度问题，不保证所有网络均能访问。

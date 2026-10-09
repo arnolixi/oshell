@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (c) 2026 OShell contributors
+name: Publish static update site
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: oshell-update-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Validate static-site generation
+        run: |
+          python3 -m venv work/pages-tools
+          work/pages-tools/bin/python -m pip install -r scripts/requirements-release.txt
+          work/pages-tools/bin/python scripts/test-update-pages.py
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Fetch the latest published Release and verify its signed metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          # Only Actions calls the API, with its short-lived token. Clients read static HTTPS.
+          gh api "repos/$RELEASE_REPOSITORY/releases/latest" > work/latest-release.json
+          work/pages-tools/bin/python scripts/build-update-pages.py \
+            --release work/latest-release.json --repository "$RELEASE_REPOSITORY" --output work/update-site
+      - name: Upload the generated site only
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: work/update-site
+      - name: Deploy the update site
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

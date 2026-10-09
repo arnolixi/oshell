@@ -189,3 +189,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci-release.py publish --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --output dist/github-release
+
+  update-pages:
+    needs: [metadata, release]
+    if: needs.metadata.outputs.publish == 'true'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/update-pages.yml
