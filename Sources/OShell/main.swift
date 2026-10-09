@@ -88,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
         if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.complete(controller) }
         if CommandLine.arguments.contains("--command-input-test") { CommandInputTest.run(controller) }
+        if CommandLine.arguments.contains("--pane-close-test") { PaneCloseTest.run(controller) }
         if CommandLine.arguments.contains("--proxy-catalog-test") { ProxyCatalogTest.run(controller) }
         if CommandLine.arguments.contains("--directory-sync-test") { DirectorySyncTest.run(controller) }
         if CommandLine.arguments.contains("--webdav-test") { WebDAVFeatureTest.run(controller) }

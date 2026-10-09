@@ -115,12 +115,19 @@ final class OShellTerminal: LocalProcessTerminalView {
     override func clipboardRead(source: TerminalView) -> Data? { nil }
 }
 
+final class PaneCloseButton: NSButton {
+    // Borderless header controls must fit their 22-point hit area; AppKit's
+    // default push-button alignment insets otherwise extend beyond the row.
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0) }
+}
+
 final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     let id = UUID()
     private(set) var profile: SessionProfile
     let terminal: OShellTerminal
     let view = NSView()
     private let header = NSTextField(labelWithString: "")
+    let closeButton = PaneCloseButton()
     let transferProgress = ZmodemProgressView()
     let searchPanel = TerminalSearchPanel()
     private var detector = ZmodemDetector()
@@ -327,12 +334,26 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         searchPanel.terminal = terminal; searchPanel.onClose = { [weak self] in self?.searchPanel.hide() }
         terminal.getTerminal().registerOscHandler(code: 777) { [weak self] bytes in self?.receiveShellIdentity(bytes) }
         transferProgress.cancelButton.target = self; transferProgress.cancelButton.action = #selector(cancelAction)
-        let headerBar = NSStackView(views: [header])
-        headerBar.detachesHiddenViews = true
-        headerBar.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(focusHeader)))
-        headerBar.orientation = .horizontal; headerBar.spacing = 8
+        closeButton.isBordered = false; closeButton.isHidden = true
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        closeButton.image = NSImage(oshellSymbolName: "xmark", accessibilityDescription: "关闭此分屏会话")
+        closeButton.imageScaling = .scaleProportionallyDown
+        closeButton.toolTip = "关闭此分屏会话，保留其他分屏"
+        closeButton.setAccessibilityLabel("关闭此分屏会话")
+        closeButton.target = self; closeButton.action = #selector(closeAction)
+        closeButton.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        closeButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        let headerBar = NSView()
+        header.translatesAutoresizingMaskIntoConstraints = false
+        headerBar.addSubview(header); headerBar.addSubview(closeButton)
+        header.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(focusHeader)))
         [headerBar, searchPanel, terminal, transferProgress].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         NSLayoutConstraint.activate([
+            header.leadingAnchor.constraint(equalTo: headerBar.leadingAnchor),
+            header.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
+            header.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8),
+            closeButton.trailingAnchor.constraint(equalTo: headerBar.trailingAnchor),
+            closeButton.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
             headerBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
             headerBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
             headerBar.topAnchor.constraint(equalTo: view.topAnchor), headerBar.heightAnchor.constraint(equalToConstant: 22),
@@ -364,6 +385,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         view.layer?.backgroundColor = NSColor(hex: scheme.background)!.cgColor
         header.textColor = NSColor(hex: scheme.foreground)!.withAlphaComponent(0.75)
         transferProgress.appearance = NSAppearance(named: scheme.isDark ? .oshellDark : .aqua)
+        closeButton.appearance = transferProgress.appearance
         searchPanel.appearance = transferProgress.appearance
         if !prefs.metal || terminal.window != nil { try? terminal.setUseMetal(prefs.metal) }
     }
@@ -377,6 +399,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         view.layer?.borderColor = NSColor.oshellAccentColor.cgColor
     }
     @objc private func focusHeader() { activate() }
+    @objc private func closeAction() { if !isShutdown { onCloseRequested?(self) } }
     func prepareForDisplay() {
         guard !isShutdown else { return }
         if preferences.metal, !terminal.isUsingMetalRenderer {
@@ -430,7 +453,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         guard endedInput == nil else { return }
         endedInput = EndedSessionInput(allowsLocalTools: true)
         // Clear style and show a cursor even if the remote application hid it.
-        terminal.feed(byteArray: Array("\u{1b}[0m\u{1b}[?25h\r\n本机网络工具：help 查看分类，tools 查看安装状态和路径。\r\n输入 exit 或 quit 并回车关闭标签页；⇧⌘R 重连原会话。\r\n\(EndedSessionInput.prompt)".utf8)[...])
+        terminal.feed(byteArray: Array("\u{1b}[0m\u{1b}[?25h\r\n本机网络工具：help 查看分类，tools 查看安装状态和路径。\r\n输入 exit 或 quit 并回车关闭当前会话（最后一个会话关闭标签页）；⇧⌘R 重连原会话。\r\n\(EndedSessionInput.prompt)".utf8)[...])
     }
     func handleEndedInput(_ bytes: ArraySlice<UInt8>, queueIfExited: Bool = true) {
         guard ended, !isShutdown else { return }

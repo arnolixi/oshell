@@ -482,13 +482,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         pane.onState = { [weak self] in self?.refreshSelection() }
         pane.onOutput = { [weak self] pane in self?.recordTerminalOutput(pane) }
         pane.onCloseRequested = { [weak self] pane in
-            guard let self, pane.ended,
-                  let tab = self.tabs.first(where: { $0.layout.panes.contains(where: { $0 === pane }) }) else { return }
-            // An ended terminal can close synchronously during a quick-send
-            // broadcast. Advance terminal focus only if a terminal owned it;
-            // text fields/composers must keep their current field editor.
-            let focusTerminal = self.inputPanes.contains { self.window?.firstResponder === $0.terminal }
-            self.close(tab, focusRemainingTerminal: focusTerminal)
+            self?.closeSessionPane(pane)
         }
         pane.onUserInput = { [weak self] pane, bytes in self?.routeKeyboard(pane, bytes: bytes) ?? false }
         pane.onPaste = { [weak self] pane, text in self?.pasteText(text, from: pane) }
@@ -545,7 +539,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         refreshSessionLinkAddButton(); refreshToolbarActions()
         if isObservingSelectedTab { selectedTab?.markOutputRead() }
         for tab in tabs {
-            for pane in tab.layout.panes { pane.setSelected(tab === selectedTab && pane === tab.activePane) }
+            let panes = tab.layout.panes
+            for pane in panes {
+                pane.closeButton.isHidden = panes.count < 2
+                pane.setSelected(tab === selectedTab && pane === tab.activePane)
+            }
         }
         refreshTabTitles(); refreshStatus()
     }
@@ -631,13 +629,29 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     @objc func closeTab() { if let tab = selectedTab { close(tab) } }
     @objc func closePane() {
         guard let tab = selectedTab else { window?.performClose(nil); return }
-        guard tab.layout.panes.count > 1 else { close(tab); return }
-        let pane = tab.activePane
-        if pane.hasActiveProcess, !Dialogs.confirm("关闭当前分屏？", text: "当前连接、本机工具与传输会结束。", action: "关闭") { return }
+        closeSessionPane(tab.activePane)
+    }
+    func closeSessionPane(_ pane: TerminalPane) {
+        guard let tab = tabs.first(where: { $0.layout.panes.contains(where: { $0 === pane }) }) else { return }
+        // Capture focus before confirmation/rebuilding. A quick-send broadcast
+        // may synchronously close several ended panes while editing the bar.
+        let focusedPane = inputPanes.first { window?.firstResponder === $0.terminal }
+        let panes = tab.layout.panes
+        guard panes.count > 1 else { close(tab, focusRemainingTerminal: focusedPane != nil); return }
+        if pane.hasActiveProcess, !Dialogs.confirm("关闭此分屏会话？", text: "此分屏中的连接、本机工具与文件传输会结束，其他分屏保持连接。", action: "关闭") { return }
+        guard let index = panes.firstIndex(where: { $0 === pane }), let layout = tab.layout.removing(pane.id) else { return }
         pane.shutdown()
-        if let layout = tab.layout.removing(pane.id) {
-            tab.layout = layout; tab.activePane = layout.panes[0]; rebuildWorkspace(); select(tab)
+        tab.layout = layout
+        if tab.activePane === pane { tab.activePane = layout.panes[min(index, layout.panes.count - 1)] }
+        rebuildWorkspace()
+        if let focusedPane {
+            if !focusedPane.isShutdown { focusedPane.activate() }
+            else { selectedTab?.activePane.activate() }
         }
+    }
+    @objc func closePaneFromTabMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID, let tab = tabs.first(where: { $0.id == id }) else { return }
+        closeSessionPane(tab.activePane)
     }
     @objc func splitVertical() { split(vertical: true) }
     @objc func splitHorizontal() { split(vertical: false) }

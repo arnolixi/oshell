@@ -129,6 +129,12 @@ extension WorkspaceController {
             item.state = customTabLayout == nil && arrangement == mode ? .on : .off
         }
         arrangementItem.submenu = arrangements
+        if let tab, tab.layout.panes.count > 1 {
+            menu.addItem(.separator())
+            let close = menu.addItem(withTitle: "关闭当前分屏会话", action: #selector(closePaneFromTabMenu(_:)), keyEquivalent: "")
+            close.target = self; close.representedObject = id
+            close.toolTip = "关闭此标签中选中的分屏，保留其他会话"
+        }
         return menu
     }
     @objc private func addTabSessionLink(_ sender: NSMenuItem) {

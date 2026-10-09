@@ -113,6 +113,16 @@ def collect_updates(meta, artifacts, repository, installers):
         notes.append(f"<!-- oshell-update-v1:{TARGETS[flavor].suffix}:{record['signedFeed']} -->")
     return notes
 
+def release_changes(version):
+    """Publish only this version's curated notes, not the full changelog."""
+    path = ROOT/'CHANGELOG.md'
+    if not path.is_file(): raise ValueError('CHANGELOG.md is required for release notes')
+    sections = re.split(r'^##[ \t]+(.+?)[ \t]*$', path.read_text(encoding='utf-8'), flags=re.MULTILINE)
+    matches = [sections[index + 1].strip() for index in range(1, len(sections), 2) if sections[index].strip() == version]
+    if len(matches) != 1 or not matches[0]:
+        raise ValueError(f'CHANGELOG.md must contain one non-empty section for {version}')
+    return matches[0]
+
 def collect(meta, artifacts, source, output, updates_artifacts=None, repository=""):
     expected_dirs = {'dmg-' + flavor for flavor in RELEASE_FLAVORS}
     if {path.name for path in artifacts.iterdir()} != expected_dirs:
@@ -139,6 +149,7 @@ def collect(meta, artifacts, source, output, updates_artifacts=None, repository=
     if source.name != f"OShell-{meta['version']}-source.tar.gz" or not source.is_file() or source.is_symlink():
         raise ValueError('Expected the audited source archive for this version')
     updates = collect_updates(meta, updates_artifacts, repository, records) if updates_artifacts else []
+    changes = release_changes(meta['version'])
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise ValueError('Release output must be empty')
@@ -154,6 +165,12 @@ def collect(meta, artifacts, source, output, updates_artifacts=None, repository=
     rows = '\n'.join(f"| {TARGETS[flavor].minimum}+ | {', '.join(TARGETS[flavor].architectures)} | `{artifact_name(meta['version'], flavor)}` |" for flavor in RELEASE_FLAVORS)
     notes = f"""<!-- oshell-release:{meta['commit']} -->
 OShell {meta['version']}（build {meta['build']}）
+
+## 本次变更
+
+{changes}
+
+## 安装包
 
 | 最低 macOS | 架构 | DMG |
 | --- | --- | --- |

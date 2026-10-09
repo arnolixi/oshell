@@ -30,6 +30,8 @@ class ReleaseTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='oshell-ci-test-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        (self.root/'CHANGELOG.md').write_text('# 变更日志\n\n## 1.2.3\n\n- 修复分屏独立关闭。\n\n## 1.2.2\n\n- 旧版本记录。\n', encoding='utf-8')
+        root_patch = patch.object(CI, 'ROOT', self.root); root_patch.start(); self.addCleanup(root_patch.stop)
         self.incoming = self.root/'incoming'; self.incoming.mkdir()
         self.source = self.root/'OShell-1.2.3-source.tar.gz'; self.source.write_bytes(b'audited source fixture')
         self.output = self.root/'release'
@@ -152,6 +154,25 @@ class ReleaseTests(unittest.TestCase):
         for line in (self.output/'SHA256SUMS.txt').read_text().splitlines():
             expected, name = line.split('  ', 1); self.assertEqual(CI.sha256(self.output/name), expected)
         self.assertIn('ad-hoc', (self.output/'RELEASE_NOTES.md').read_text())
+
+    def test_release_notes_include_only_matching_version_changes(self):
+        self.collect()
+        notes = (self.output/'RELEASE_NOTES.md').read_text()
+        self.assertIn('## 本次变更\n\n- 修复分屏独立关闭。', notes)
+        self.assertNotIn('旧版本记录', notes)
+        self.assertLess(notes.index('## 本次变更'), notes.index('## 安装包'))
+
+    def test_missing_changelog_prevents_collection(self):
+        (self.root/'CHANGELOG.md').unlink()
+        with self.assertRaisesRegex(ValueError, 'CHANGELOG.md'): self.collect()
+        self.assertFalse(self.output.exists())
+
+    def test_missing_empty_or_duplicate_version_notes_rejected(self):
+        for content in ['## 1.2.2\n- older\n', '## 1.2.3\n\n## 1.2.2\n- older\n', '## 1.2.3\n- first\n## 1.2.3\n- second\n']:
+            with self.subTest(content=content):
+                (self.root/'CHANGELOG.md').write_text(content)
+                with self.assertRaisesRegex(ValueError, 'non-empty section'): self.collect()
+                self.assertFalse(self.output.exists())
 
     def test_missing_build_prevents_release(self):
         import shutil
