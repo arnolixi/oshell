@@ -26,6 +26,8 @@ final class CoreTests {
         let source = try UpdateSource("https://github.com/example-org/OShell.git")
         XCTAssertEqual(source.repository, "example-org/OShell")
         XCTAssertEqual(source.latestReleaseURL.absoluteString, "https://api.github.com/repos/example-org/OShell/releases/latest")
+        XCTAssertEqual(source.staticMetadataURL.absoluteString, "https://example-org.github.io/OShell/updates/latest.json")
+        XCTAssertEqual(try UpdateSource("Example/Example.github.io").staticMetadataURL.absoluteString, "https://example.github.io/updates/latest.json")
         XCTAssertEqual(UpdateFlavor.select(appleSilicon: true, majorOS: 13), .arm64)
         XCTAssertEqual(UpdateFlavor.select(appleSilicon: true, majorOS: 12), .universal)
         XCTAssertEqual(UpdateFlavor.select(appleSilicon: false, majorOS: 26), .intelModern)
@@ -68,6 +70,37 @@ final class CoreTests {
         XCTAssertThrowsError(try read(release(), .intel))
         XCTAssertThrowsError(try GitHubReleaseUpdate.read(Data(repeating: 65, count: 1_048_577), source: source, flavor: .arm64))
         XCTAssertTrue(!source.acceptsArchive(URL(string: "https://github.com/example-org/OShell/releases/download/v1.2.3/OShell-1.2.3-macOS13-arm64-update.zip")!, flavor: .arm64))
+        func site(_ flavor: UpdateFlavor = .arm64) throws -> [String: Any] {
+            let update = try read(release(flavor), flavor)
+            let feed = update.signedFeed + Data("<!-- sparkle-signatures: fixture -->".utf8)
+            return ["format":"OShell.static-updates.v1", "repository":source.repository, "version":"1.2.3", "build":"45",
+                    "platforms":[flavor.rawValue:["file":update.archiveURL.lastPathComponent,"size":1234,"signedFeed":feed.base64EncodedString()]]]
+        }
+        func readSite(_ object: [String: Any], _ flavor: UpdateFlavor = .arm64) throws -> GitHubReleaseUpdate {
+            try GitHubReleaseUpdate.readStatic(JSONSerialization.data(withJSONObject: object), source: source, flavor: flavor)
+        }
+        for flavor in [UpdateFlavor.arm64, .intel, .intelModern, .universal] {
+            let result = try readSite(site(flavor), flavor)
+            XCTAssertEqual(result.version, "1.2.3"); XCTAssertEqual(result.build, "45")
+            XCTAssertEqual(result.signedFeed, try read(release(flavor), flavor).signedFeed + Data("<!-- sparkle-signatures: fixture -->".utf8))
+        }
+        for (field, value) in [("format","other"),("repository","other/project"),("version","9.9.9"),("build","999")] {
+            var bad = try site(); bad[field] = value; XCTAssertThrowsError(try readSite(bad))
+        }
+        XCTAssertThrowsError(try readSite(site(), .intel))
+        var invalidSite = try site(); invalidSite["platforms"] = [:]; XCTAssertThrowsError(try readSite(invalidSite))
+        XCTAssertThrowsError(try GitHubReleaseUpdate.readStatic(Data("<html>404</html>".utf8), source: source, flavor: .arm64))
+        var instant = Date(timeIntervalSince1970: 0), requests = 0
+        let cache = UpdateMetadataCache(clock: { instant })
+        func fetch() -> Data { requests += 1; return Data("unchanged signed bytes".utf8) }
+        XCTAssertEqual(try cache.value(load: fetch), try cache.value(load: fetch)); XCTAssertEqual(requests, 1)
+        instant = instant.addingTimeInterval(301)
+        XCTAssertThrowsError(try cache.value { requests += 1; throw StaticUpdateRequestError(status: 429, retryAt: instant.addingTimeInterval(120)) })
+        instant = instant.addingTimeInterval(61)
+        XCTAssertThrowsError(try cache.value(load: fetch)); XCTAssertEqual(requests, 2)
+        instant = instant.addingTimeInterval(60)
+        XCTAssertEqual(try cache.value(load: fetch), Data("unchanged signed bytes".utf8)); XCTAssertEqual(requests, 3)
+
     }
     func testMasterStartupProtection() throws {
         let master = "startup-master-fixture", next = "changed-master-fixture"

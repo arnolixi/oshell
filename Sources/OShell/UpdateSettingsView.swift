@@ -12,12 +12,12 @@ final class UpdateSettingsView: NSView {
         repository.stringValue = preferences.updateRepository.isEmpty ? (Bundle.main.object(forInfoDictionaryKey: "OShellUpdateRepository") as? String ?? "") : preferences.updateRepository
         repository.placeholderString = "owner/repo 或 https://github.com/owner/repo"
         automatic.state = preferences.automaticUpdateChecks ? .on : .off
-        let title = NSTextField(labelWithString: "GitHub Releases 更新")
+        let title = NSTextField(labelWithString: "GitHub Pages 更新")
         title.font = .systemFont(ofSize: 17, weight: .semibold)
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
-        let current = NSTextField(labelWithString: "当前版本：\(version) · 更新版本：\(UpdateFlavor.current.rawValue)")
+        let current = NSTextField(labelWithString: "当前版本：\(version) · 安装包类型：\(UpdateFlavor.current.rawValue)")
         current.textColor = .secondaryLabelColor
-        let help = NSTextField(wrappingLabelWithString: "使用公开 GitHub 仓库的最新正式版本；留空则不检查更新。\n\n下载后会验证更新文件。安装前确认关闭活动会话，完成后自动重启。会话配置与已保存的密码会保留。")
+        let help = NSTextField(wrappingLabelWithString: "从对应仓库的 GitHub Pages 获取签名更新信息，不调用 GitHub API，无需登录或 Token；留空则不检查更新。\n\n维护者需启用 Pages 更新站点。安装包仍从 Releases 下载，下载后会验证签名。安装前确认关闭活动会话，完成后自动重启。会话配置与已保存的密码会保留。")
         let stack = NSStackView(views: [title, current, NSTextField(labelWithString: "更新仓库"), repository, automatic, help])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false; addSubview(stack)

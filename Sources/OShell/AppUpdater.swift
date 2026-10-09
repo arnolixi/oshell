@@ -12,10 +12,11 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
     private var source: UpdateSource?
     private var releaseBridge: ReleaseUpdateBridge?
     private var pendingInstall: (() -> Void)?
+    private var preflighting = false
     private(set) var started = false
     var hasPendingInstallation: Bool { pendingInstall != nil }
-    var canCheck: Bool { pendingInstall != nil || standard?.updater.sessionInProgress != true }
-    var isBusy: Bool { standard?.updater.sessionInProgress == true || pendingInstall != nil }
+    var canCheck: Bool { pendingInstall != nil || (!preflighting && standard?.updater.sessionInProgress != true) }
+    var isBusy: Bool { preflighting || standard?.updater.sessionInProgress == true || pendingInstall != nil }
     init(workspace: WorkspaceController) { self.workspace = workspace; super.init() }
     func useWorkspace(_ workspace: WorkspaceController?) { self.workspace = workspace }
     private var configuredRepository: String {
@@ -36,7 +37,7 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
         guard let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String, Data(base64Encoded: publicKey)?.count == 32 else { throw ModelError.invalid("应用缺少更新校验公钥，请使用完整的 OShell 发布版本。") }
         if standard == nil { standard = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: self, userDriverDelegate: nil) }
         guard let updater = standard?.updater else { return }
-        if !started { try updater.start(); started = true }
+        if !started { _ = updater.clearFeedURLFromUserDefaults(); try updater.start(); started = true }
         if updater.automaticallyChecksForUpdates != workspace.configuration.preferences.automaticUpdateChecks { updater.automaticallyChecksForUpdates = workspace.configuration.preferences.automaticUpdateChecks }
         if updater.automaticallyDownloadsUpdates { updater.automaticallyDownloadsUpdates = false }
         updater.resetUpdateCycleAfterShortDelay()
@@ -48,8 +49,19 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
         guard !configuredRepository.isEmpty else { return }
         do {
             try configure()
-            guard let standard, standard.updater.canCheckForUpdates else { return }
-            standard.checkForUpdates(nil)
+            guard !preflighting, let standard, standard.updater.canCheckForUpdates, let bridge = releaseBridge else { return }
+            preflighting = true
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let result = Result { try bridge.prefetch() }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }; self.preflighting = false
+                    guard self.workspace?.isSecurityUnlocked == true else { return }
+                    switch result {
+                    case .success: if standard.updater.canCheckForUpdates { standard.checkForUpdates(nil) }
+                    case .failure(let error): Dialogs.message("无法检查更新：\(error.localizedDescription)")
+                    }
+                }
+            }
         } catch { Dialogs.message("无法检查更新：\(error.localizedDescription)") }
     }
     func feedURLString(for updater: SPUUpdater) -> String? { releaseBridge?.url.absoluteString }

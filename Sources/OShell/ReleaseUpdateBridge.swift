@@ -6,14 +6,17 @@ import Darwin
 import OShellCore
 
 /// A process-private adapter for Sparkle's HTTP feed interface. Nothing is
-/// published as XML: signed bytes are read from the GitHub Release body.
+/// published as XML: signed bytes are read from a static GitHub Pages document.
 final class ReleaseUpdateBridge {
     let url: URL
     private var listener: DispatchSourceRead?
     private let queue = DispatchQueue(label: "OShell.update.bridge")
     private let pending = DispatchSemaphore(value: 2)
     private let path: String
+    private let load: () throws -> Data
+    func prefetch() throws { _ = try load() }
     init(load: @escaping () throws -> Data) throws {
+        self.load = load
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw ModelError.invalid("无法创建本机更新通道。") }
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC); _ = fcntl(fd, F_SETFL, O_NONBLOCK)
@@ -54,7 +57,8 @@ final class ReleaseUpdateBridge {
         source.setCancelHandler { close(fd) }; source.resume(); listener = source
     }
     convenience init(source: UpdateSource, flavor: UpdateFlavor) throws {
-        try self.init { try GitHubReleaseUpdate.read(GitHubReleaseRequest.fetch(source.latestReleaseURL), source: source, flavor: flavor).signedFeed }
+        let cache = UpdateMetadataCache()
+        try self.init { try cache.value { try GitHubReleaseUpdate.readStatic(StaticUpdateRequest.fetch(source.staticMetadataURL), source: source, flavor: flavor).signedFeed } }
     }
     private static func respond(_ fd: Int32, status: String, data: Data) {
         let response = Data("HTTP/1.1 \(status)\r\nContent-Type: application/xml; charset=utf-8\r\nContent-Length: \(data.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n".utf8) + data
@@ -71,24 +75,27 @@ final class ReleaseUpdateBridge {
     deinit { stop() }
 }
 
-private final class GitHubReleaseRequest: NSObject, URLSessionDataDelegate {
+private final class StaticUpdateRequest: NSObject, URLSessionDataDelegate {
     private let done = DispatchSemaphore(value: 0), lock = NSLock()
     private var data = Data(), response: HTTPURLResponse?, failure: Error?
     static func fetch(_ url: URL) throws -> Data {
-        let request = GitHubReleaseRequest(), config = URLSessionConfiguration.ephemeral
+        let request = StaticUpdateRequest(), config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 20; config.timeoutIntervalForResource = 25; config.urlCache = nil
         config.httpCookieStorage = nil; config.urlCredentialStorage = nil
         let session = URLSession(configuration: config, delegate: request, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         var input = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
-        input.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        input.setValue("application/json", forHTTPHeaderField: "Accept")
         input.setValue("OShell-Update", forHTTPHeaderField: "User-Agent")
-        input.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
         session.dataTask(with: input).resume()
-        guard request.done.wait(timeout: .now() + 28) == .success else { throw ModelError.invalid("GitHub 更新请求超时，请稍后重试。") }
+        guard request.done.wait(timeout: .now() + 28) == .success else { throw ModelError.invalid("连接更新站点超时，请检查网络或代理后重试。") }
         request.lock.lock(); defer { request.lock.unlock() }
         if let error = request.failure { throw error }
-        guard request.response?.statusCode == 200 else { throw ModelError.invalid("无法读取 GitHub 最新正式版本（HTTP \(request.response?.statusCode ?? 0)），请检查仓库地址或稍后重试。") }
+        guard request.response?.statusCode == 200 else {
+            let response = request.response
+            let retry = response?.allHeaderFields.first(where: { String(describing: $0.key).lowercased() == "retry-after" }).map { String(describing: $0.value) }.flatMap(TimeInterval.init).map { Date().addingTimeInterval(min(86_400, max(0, $0))) }
+            throw StaticUpdateRequestError(status: response?.statusCode ?? 0, retryAt: retry)
+        }
         return request.data
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
@@ -98,7 +105,7 @@ private final class GitHubReleaseRequest: NSObject, URLSessionDataDelegate {
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive chunk: Data) {
         lock.lock(); defer { lock.unlock() }
-        if data.count + chunk.count > 1_048_576 { failure = ModelError.invalid("GitHub 更新信息过大。"); dataTask.cancel() }
+        if data.count + chunk.count > 1_048_576 { failure = ModelError.invalid("静态更新信息过大。"); dataTask.cancel() }
         else { data.append(chunk) }
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {

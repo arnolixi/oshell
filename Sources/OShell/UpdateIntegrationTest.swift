@@ -38,7 +38,10 @@ final class UpdateIntegrationTest: NSObject, SPUUserDriver, SPUUpdaterDelegate {
                 let file = URL(fileURLWithPath: path).standardizedFileURL
                 guard file.path.hasPrefix(root.path + "/") else { finish("invalid-fixture"); return }
                 let source = try UpdateSource("example-org/OShell")
-                bridge = try ReleaseUpdateBridge { try GitHubReleaseUpdate.read(Data(contentsOf: file), source: source, flavor: .arm64).signedFeed }
+                bridge = try ReleaseUpdateBridge {
+                    let data = try Data(contentsOf: file)
+                    return try (self.mode == "static-no-update" || self.mode == "static-tampered" ? GitHubReleaseUpdate.readStatic(data, source: source, flavor: .arm64) : GitHubReleaseUpdate.read(data, source: source, flavor: .arm64)).signedFeed
+                }
             } else if let path = ProcessInfo.processInfo.environment["OSHELL_UPDATE_INTEGRATION_FEED_FILE"] {
                 let file = URL(fileURLWithPath: path).standardizedFileURL
                 guard file.path.hasPrefix(root.path + "/") else { finish("invalid-fixture"); return }
@@ -46,7 +49,12 @@ final class UpdateIntegrationTest: NSObject, SPUUserDriver, SPUUpdaterDelegate {
             }
         } catch { status["error"] = error.localizedDescription; finish("bridge-error"); return }
         updater = SPUUpdater(hostBundle: .main, applicationBundle: .main, userDriver: self, delegate: self)
-        do { try updater.start(); updater.automaticallyChecksForUpdates = false; updater.checkForUpdates() }
+        do {
+            if mode == "static-no-update" { UserDefaults.standard.set("https://example.invalid/old-feed.xml", forKey: "SUFeedURL") }
+            try updater.start(); updater.automaticallyChecksForUpdates = false
+            status["usesBridgeDespiteOldFeed"] = updater.feedURL == bridge?.url
+            updater.checkForUpdates()
+        }
         catch { status["error"] = error.localizedDescription; finish("start-error") }
         DispatchQueue.main.asyncAfter(deadline: .now()+70) { [weak self] in self?.finish("timeout") }
         if mode == "install" {

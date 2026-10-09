@@ -10,6 +10,26 @@ public struct GitHubReleaseUpdate {
     public let archiveURL: URL
     public let version: String
     public let build: String
+    /// The JSON is a transport envelope only. Sparkle must still verify the original signed feed bytes.
+    public static func readStatic(_ data: Data, source: UpdateSource, flavor: UpdateFlavor) throws -> GitHubReleaseUpdate {
+        struct Platform: Decodable { let file: String; let size: Int; let signedFeed: String }
+        struct Document: Decodable { let format: String; let repository: String; let version: String; let build: String; let platforms: [String: Platform] }
+        guard data.count <= 1_048_576 else { throw ModelError.invalid("静态更新信息过大。") }
+        let value: Document
+        do { value = try JSONDecoder().decode(Document.self, from: data) }
+        catch { throw ModelError.invalid("静态更新信息格式无效，请联系维护者。") }
+        guard value.format == "OShell.static-updates.v1", value.repository.lowercased() == source.repository.lowercased(),
+              let platform = value.platforms[flavor.rawValue], platform.size > 0,
+              let signed = Data(base64Encoded: platform.signedFeed), signed.count <= 32_768,
+              signed.range(of: Data("<!-- sparkle-signatures:".utf8)) != nil else { throw ModelError.invalid("静态更新信息缺少当前系统的签名数据，或仓库不匹配。") }
+        let url = "https://github.com/\(value.repository)/releases/download/v\(value.version)/\(platform.file)"
+        let compatible: [String: Any] = ["draft":false, "prerelease":false, "tag_name":"v" + value.version,
+            "body":"<!-- oshell-update-v1:" + flavor.rawValue + ":" + platform.signedFeed + " -->",
+            "assets":[["name":platform.file, "size":platform.size, "state":"uploaded", "browser_download_url":url]]]
+        let result = try read(JSONSerialization.data(withJSONObject: compatible), source: source, flavor: flavor)
+        guard result.build == value.build else { throw ModelError.invalid("静态更新信息与签名版本不一致。") }
+        return result
+    }
     public static func read(_ data: Data, source: UpdateSource, flavor: UpdateFlavor) throws -> GitHubReleaseUpdate {
         struct Asset: Decodable { let name: String; let size: Int; let state: String; let browser_download_url: URL }
         struct Release: Decodable { let draft: Bool; let prerelease: Bool; let tag_name: String; let body: String; let assets: [Asset] }

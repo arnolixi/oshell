@@ -33,6 +33,12 @@ public struct UpdateSource: Equatable {
               pieces[1] != ".", pieces[1] != ".." else { throw ModelError.invalid("仓库格式应为 owner/repo，或对应的 GitHub HTTPS 地址。") }
         repository = value
     }
+    public var staticMetadataURL: URL {
+        let parts = repository.split(separator: "/")
+        let owner = parts[0].lowercased(), name = String(parts[1])
+        let prefix = name.lowercased() == owner + ".github.io" ? "" : "/" + name
+        return URL(string: "https://\(owner).github.io\(prefix)/updates/latest.json")!
+    }
     public var latestReleaseURL: URL { URL(string: "https://api.github.com/repos/\(repository)/releases/latest")! }
     public func acceptsArchive(_ url: URL, flavor: UpdateFlavor) -> Bool {
         guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false), parts.scheme == "https", parts.host?.lowercased() == "github.com",
