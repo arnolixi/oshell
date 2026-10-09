@@ -126,9 +126,9 @@ final class WebDAVFeatureTest {
     private func offline() {
         let before = try? Data(contentsOf: workspace.store.url)
         sync.makeClient = { [weak self] _ in try self!.client("offline") }
-        wait("offlineErrorVisible", condition: { NSApp.modalWindow != nil }) { if let modal = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: modal) } }
         sync.sync(interactive: false)
         wait("offlineCompletesWithoutOverwrite", condition: { !self.sync.busy && self.sync.status.contains("503") }) { [self] in
+            checks["offlineDoesNotInterruptWithPopup"] = NSApp.modalWindow == nil
             checks["offlineRetainsEncryptedCache"] = (try? Data(contentsOf: workspace.store.url)) == before
             checks["terminalNeverRestarted"] = pane?.terminal.process.shellPid == pid && pane?.isShutdown == false
             workspace.lockPasswords(); checks["lockingForgetsStorageMaster"] = workspace.store.masterPassword == nil && PasswordVault.shared.cachedMaster == nil

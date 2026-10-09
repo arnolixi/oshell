@@ -116,6 +116,41 @@ enum AppearanceFeatureTest {
             checks["systemFontKeepsConnections"] = panes.map { $0.terminal.process.shellPid } == pids
             checks["systemFontKeepsSymbolFallback"] = panes.allSatisfy { $0.terminal.privateUseFallbackFont != nil }
         }
+        modal { root in
+            guard let history = descendants(root).compactMap({ $0 as? ScrollbackSettingsControl }).first else { checks["customHistoryControl"] = false; NSApp.abortModal(); return }
+            history.picker.selectItem(withTitle: "自定义…"); history.custom.stringValue = "45000"; history.selectionChanged()
+            checks["customHistoryVisible"] = !history.custom.isHidden
+            checks["largeHistoryRiskVisible"] = history.warning.stringValue.contains("内存不足") && history.warning.textColor == .systemOrange
+            root.layoutSubtreeIfNeeded()
+            if let page = descendants(root).first(where: { $0 is GeneralSettingsView }) {
+                checks["customHistoryControlsFit"] = descendants(page).filter { ($0 is NSButton || $0 is NSTextField) && !$0.isHidden }.allSatisfy { page.bounds.contains($0.convert($0.bounds, to: page)) }
+            }
+            descendants(root).compactMap { $0 as? NSButton }.first { $0.title == "应用" }?.performClick(nil)
+        }
+        controller.showPreferences()
+        checks["customHistorySaved"] = controller.configuration.preferences.scrollback == 45000 && (try? controller.store.load().preferences.scrollback) == 45000
+        checks["customHistoryAppliesWithoutReconnect"] = panes.allSatisfy { $0.terminal.getTerminal().options.scrollback == 45000 } && panes.map { $0.terminal.process.shellPid } == pids
+        modal { root in
+            guard let history = descendants(root).compactMap({ $0 as? ScrollbackSettingsControl }).first else { checks["customHistoryRestored"] = false; NSApp.abortModal(); return }
+            checks["customHistoryRestored"] = history.picker.titleOfSelectedItem == "自定义…" && history.custom.stringValue == "45000"
+            history.custom.stringValue = "100001"; history.selectionChanged()
+            modal { errorRoot in
+                checks["invalidHistoryBlocked"] = descendants(errorRoot).compactMap { ($0 as? NSTextField)?.stringValue }.contains { $0.contains("500～100000") }
+                if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) }
+                modal { _ in if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) } }
+            }
+            descendants(root).compactMap { $0 as? NSButton }.first { $0.title == "应用" }?.performClick(nil)
+        }
+        controller.showPreferences()
+        checks["invalidAndCancelledHistoryNotSaved"] = controller.configuration.preferences.scrollback == 45000 && (try? controller.store.load().preferences.scrollback) == 45000
+        modal { root in
+            guard let history = descendants(root).compactMap({ $0 as? ScrollbackSettingsControl }).first else { checks["presetHistoryControl"] = false; NSApp.abortModal(); return }
+            history.picker.selectItem(withTitle: "3000"); history.selectionChanged()
+            checks["presetHidesCustomInput"] = history.custom.isHidden
+            descendants(root).compactMap { $0 as? NSButton }.first { $0.title == "应用" }?.performClick(nil)
+        }
+        controller.showPreferences()
+        checks["presetHistoryStillWorks"] = controller.configuration.preferences.scrollback == 3000 && panes.allSatisfy { $0.terminal.getTerminal().options.scrollback == 3000 }
         let popup = PopupWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
         popup.isReleasedWhenClosed = false; popup.makeKeyAndOrderFront(nil); popup.orderOut(nil)
         checks["newPopupUsesTheme"] = popup.appearance?.name == .oshellDark; popup.close()

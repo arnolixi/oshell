@@ -76,7 +76,7 @@ final class WorkspaceWindows {
     func publish(_ configuration: Configuration, from source: WorkspaceController) {
         sharedConfiguration = configuration
         for workspace in workspaces where workspace !== source { workspace.receiveConfiguration(configuration) }
-        webDAV.schedule()
+        webDAV.schedule(localChanges: true)
     }
     func reloadSharedConfiguration(interactive: Bool) {
         guard !quitting, NSApp.modalWindow == nil, !workspaces.contains(where: { $0.window?.attachedSheet != nil }) else { return }
@@ -84,7 +84,7 @@ final class WorkspaceWindows {
             guard interactive, let master = PasswordVault.shared.masterForImport(hasSavedPasswords: true) else { return }
             store.masterPassword = master
         }
-        if webDAV.enabled { webDAV.sync(interactive: interactive); return }
+        if webDAV.syncEnabled { webDAV.sync(interactive: interactive); return }
         if SharedConflictDrafts.exists(for: store) {
             if interactive { active?.resolvePendingSharedConflicts() }
             return

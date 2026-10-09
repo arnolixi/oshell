@@ -128,6 +128,14 @@ public enum ModelError: LocalizedError {
 public struct Preferences: Codable {
     public var fontName: String = ""
     public var fontSize: Double = 13
+    public static let scrollbackRange = 500...100_000
+    public static func parseScrollback(_ raw: String) throws -> Int {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.utf8.allSatisfy({ (48...57).contains($0) }), let value = Int(text), scrollbackRange.contains(value) else {
+            throw ModelError.invalid("历史行数请输入 500～100000 范围内的整数。")
+        }
+        return value
+    }
     public var scrollback: Int = 3000
     public var interfaceTheme: InterfaceTheme = .system
     public var colorSchemeID = "oshell-dark"
@@ -206,7 +214,7 @@ public struct Preferences: Codable {
         customColorSchemes = Array(customColorSchemes.filter { (try? $0.validate()) != nil && ids.insert($0.id).inserted }.prefix(64))
         if !colorSchemes.contains(where: { $0.id == colorSchemeID }) { colorSchemeID = "oshell-dark" }
         fontSize = fontSize.isFinite ? min(26, max(10, fontSize)) : 13
-        scrollback = min(20_000, max(500, scrollback))
+        scrollback = min(Self.scrollbackRange.upperBound, max(Self.scrollbackRange.lowerBound, scrollback))
     }
 }
 public struct Configuration: Codable {

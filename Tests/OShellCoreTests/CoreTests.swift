@@ -1279,7 +1279,12 @@ final class CoreTests {
         let lock = try LaunchEndpoint.lock("server.lock", directory: endpoint, nonblocking: true)
         XCTAssertThrowsError(try location.activatePending(master: master)); close(lock)
         config.profiles[0].name = "latest-before-restart"; try initial.save(config)
-        XCTAssertEqual(try location.activatePending(master: master).path, target.path)
+        XCTAssertEqual(try location.activatePending(master: master).path, source.path)
+        XCTAssertEqual(try location.syncDirectory()?.path, target.path)
+        initial.masterPassword = master
+        let transport = DirectorySyncClient(directory: target)
+        XCTAssertNil(try transport.fetch())
+        try transport.put(Data(contentsOf: source.appendingPathComponent("configuration.json")), matching: nil)
         XCTAssertEqual(try location.pending(), nil)
         XCTAssertEqual(try ConfigurationStore(directory: target, masterPassword: master, requiresMasterProtection: true).load().profiles, config.profiles)
         XCTAssertEqual(try initial.load().profiles, config.profiles)
@@ -1294,8 +1299,12 @@ final class CoreTests {
         XCTAssertThrowsError(try SharedVault.decode(sealed, password: "wrong-master"))
         XCTAssertEqual(try SessionCipher.decrypt(config.profiles[0].encryptedPassword!, master: master, profile: config.profiles[0]), "fixture-secret")
         let otherLocation = StorageLocation(base: second)
+        var otherConfig = config; otherConfig.profiles[0].name = "device-b-local"
+        try ConfigurationStore(directory: second, masterPassword: master).save(otherConfig)
         try otherLocation.schedule(.init(path: target.path, mode: .existing), master: master)
-        XCTAssertEqual(try otherLocation.activatePending(master: master).path, target.path)
+        XCTAssertEqual(try otherLocation.activatePending(master: master).path, second.path)
+        XCTAssertEqual(try ConfigurationStore(directory: second, masterPassword: master).load().profiles, otherConfig.profiles)
+        XCTAssertEqual(try otherLocation.allowsInitialUpload(), false)
         let a = ConfigurationStore(directory: target, masterPassword: master, requiresMasterProtection: true), b = ConfigurationStore(directory: target, masterPassword: master, requiresMasterProtection: true)
         var first = try a.load(), stale = try b.load()
         first.profiles.append(SessionProfile(name: "from-a", host: "a.example.test")); try a.save(first)
@@ -1329,7 +1338,98 @@ final class CoreTests {
         let remaining = try FileManager.default.contentsOfDirectory(atPath: empty.path)
         XCTAssertTrue(remaining.isEmpty)
     }
+    func testDirectoryReplicaMigrationAndOffline() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("replica-fixture-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let local = root.appendingPathComponent("local"), remote = root.appendingPathComponent("shared"), offline = root.appendingPathComponent("offline")
+        for url in [local, remote] { try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true) }
+        let master = "replica-master-fixture"
+        var config = Configuration(profiles: [SessionProfile(name: "remote-newer", host: "replica.example.test")])
+        config.masterPasswordVerifier = try MasterPasswordProtection.createVerifier(master)
+        let remoteData = try SharedVault.encode(config, password: master)
+        try PrivateFile.write(remoteData, to: remote.appendingPathComponent("configuration.json"))
+        var old = config; old.profiles[0].name = "local-older"
+        let prior = try SharedVault.encode(old, password: master)
+        try PrivateFile.write(prior, to: local.appendingPathComponent("configuration.json"))
+        // Version 0.2.63 persisted only current/pending; migrate from that exact shape.
+        try PrivateFile.write(JSONSerialization.data(withJSONObject: ["current": remote.path]), to: local.appendingPathComponent("storage-location.json"))
+        let location = StorageLocation(base: local)
+        XCTAssertEqual(try location.needsActivation(), true)
+        XCTAssertThrowsError(try location.activatePending(master: "wrong"))
+        XCTAssertEqual(try Data(contentsOf: local.appendingPathComponent("configuration.json")), prior)
+        XCTAssertEqual(try location.activatePending(master: master).resolvingSymlinksInPath().path, local.resolvingSymlinksInPath().path)
+        XCTAssertEqual(try location.needsActivation(), false)
+        XCTAssertEqual(try ConfigurationStore(directory: local, masterPassword: master).load().profiles, config.profiles)
+        XCTAssertEqual(try Data(contentsOf: remote.appendingPathComponent("configuration.json")), remoteData)
+        let backups = try FileManager.default.contentsOfDirectory(at: local.appendingPathComponent("storage-backups"), includingPropertiesForKeys: nil)
+        XCTAssertEqual(backups.count, 1); XCTAssertEqual(try Data(contentsOf: backups[0]), prior)
+        XCTAssertEqual(try SharedVault.decode(Data(contentsOf: location.baselineURL(for: remote)), password: master).profiles, config.profiles)
+        try FileManager.default.moveItem(at: remote, to: offline)
+        XCTAssertEqual(try location.activatePending().resolvingSymlinksInPath().path, local.resolvingSymlinksInPath().path)
+        let store = ConfigurationStore(directory: local, masterPassword: master, requiresMasterProtection: true)
+        var edited = try store.load(); edited.profiles[0].username = "offline-edit"; try store.save(edited)
+        let transport = DirectorySyncClient(directory: remote)
+        XCTAssertThrowsError(try transport.fetch())
+        XCTAssertThrowsError(try transport.put(remoteData, matching: nil))
+        XCTAssertEqual(try store.load().profiles[0].username, "offline-edit")
+        try FileManager.default.moveItem(at: offline, to: remote)
+        let object = try transport.fetch()!
+        XCTAssertThrowsError(try transport.put(remoteData, matching: nil))
+        let update = try SharedVault.encode(edited, password: master)
+        try transport.put(update, matching: object.etag)
+        XCTAssertThrowsError(try transport.put(remoteData, matching: object.etag))
+        XCTAssertEqual(try transport.fetch()?.data, update)
+        XCTAssertThrowsError(try transport.put(Data("{}".utf8), matching: try transport.fetch()?.etag))
+        try FileManager.default.removeItem(at: transport.url)
+        try Data().write(to: remote.appendingPathComponent(".configuration.json.icloud"))
+        XCTAssertThrowsError(try transport.fetch())
+        XCTAssertThrowsError(try transport.put(update, matching: nil))
+        XCTAssertTrue(!FileManager.default.fileExists(atPath: transport.url.path))
+        try location.disableSync()
+        XCTAssertNil(try location.syncDirectory())
+        XCTAssertEqual(try store.load().profiles, edited.profiles)
+    }
+    func testSyncDiagnosticsPrivacyAndRetention() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sync-log-fixture-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var now = Date(timeIntervalSince1970: 1_700_000_000)
+        let logs = SyncDiagnostics(directory: root, maximumEntries: 5, clock: { now })
+        let sensitive = "fixture-secret https://account:password@private.example.test/custom/path"
+        logs.record(.failed, backend: .webDAV, error: ModelError.invalid(sensitive))
+        logs.record(.failed, backend: .webDAV, error: WebDAVFailure.status(503))
+        let export = String(decoding: try logs.export(), as: UTF8.self)
+        XCTAssertTrue(!export.contains("fixture-secret") && !export.contains("private.example.test") && !export.contains("account"))
+        XCTAssertTrue(export.contains("503"))
+        var summary = SyncDiagnostics.Summary(scope: "private-endpoint-hash")
+        summary.lastSuccess = now; summary.localFingerprint = "private-local-file-hash"; summary.outcome = .completed
+        logs.saveSummary(summary)
+        XCTAssertEqual(logs.summary(for: summary.scope)?.lastSuccess, now)
+        let shareable = String(decoding: try logs.export(), as: UTF8.self)
+        XCTAssertTrue(!shareable.contains(summary.scope) && !shareable.contains("private-local-file-hash"))
+        for _ in 0..<15 { logs.record(.started, backend: .directory) }
+        XCTAssertEqual(logs.entries().count, 5)
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: logs.url.path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let restored = SyncDiagnostics(directory: root, clock: { now })
+        XCTAssertEqual(restored.summary(for: summary.scope)?.lastSuccess, now)
+        XCTAssertNil(restored.summary(for: "another-endpoint"))
+        now = now.addingTimeInterval(8 * 86400)
+        XCTAssertEqual(logs.entries().count, 0)
+        logs.record(.completed, backend: .webDAV); logs.clear()
+        XCTAssertEqual(logs.entries().count, 0)
+        XCTAssertEqual(logs.summary(for: summary.scope)?.lastSuccess, summary.lastSuccess)
+        let blocked = root.appendingPathComponent("blocked")
+        try Data("fixture".utf8).write(to: blocked)
+        let memory = SyncDiagnostics(directory: blocked)
+        memory.record(.failed, backend: .directory, error: NSError(domain: NSCocoaErrorDomain, code: 513))
+        XCTAssertEqual(memory.entries().count, 1)
+        XCTAssertTrue(memory.writeIssue != nil)
+    }
     func testConfigurationRoundTripAndPermissions() throws {
+        for value in [500, 4321, 45000, 100000] { XCTAssertEqual(try Preferences.parseScrollback(" \(value) "), value) }
+        for text in ["", "0", "499", "100001", "-1000", "1.5", "10,000", "1e4", "99999999999999999999999"] { XCTAssertThrowsError(try Preferences.parseScrollback(text)) }
+        var custom = Preferences(); custom.scrollback = 45000; custom.clamp()
+        XCTAssertEqual(try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(custom)).scrollback, 45000)
+
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
         let store = ConfigurationStore(directory: folder)
@@ -1338,7 +1438,7 @@ final class CoreTests {
         try store.save(config)
         let restored = try store.load()
         XCTAssertEqual(restored.profiles, config.profiles)
-        XCTAssertEqual(restored.preferences.scrollback, 20000)
+        XCTAssertEqual(restored.preferences.scrollback, 100000)
         XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: store.url.path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
         var legacy = try JSONSerialization.jsonObject(with: Data(contentsOf: store.url)) as! [String: Any]
         var oldPreferences = legacy["preferences"] as! [String: Any]
@@ -1805,13 +1905,15 @@ extension CoreTests {
         try tests.testSharedSessionConflictMerge()
         try tests.testWebDAVAndSharingProtection()
         try tests.testStorageLocationAndSharedWrites()
+        try tests.testDirectoryReplicaMigrationAndOffline()
+        try tests.testSyncDiagnosticsPrivacyAndRetention()
         try tests.testConfigurationRoundTripAndPermissions()
         tests.testSplitANSISequencesAndUTF8ArePreserved()
         tests.testZmodemDetectionAcrossEveryBoundary()
         tests.testInvalidZmodemHeadersRemainOrdinaryOutput()
         try tests.testLoggerFlushesEveryAcceptedChunk()
         tests.testCancellationDropsInFlightBytesAcrossEveryBoundary()
-        if failures.isEmpty { print("PASS: 64 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
+        if failures.isEmpty { print("PASS: 66 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
         else { failures.forEach { print("FAIL: \($0)") }; exit(1) }
     }
 }

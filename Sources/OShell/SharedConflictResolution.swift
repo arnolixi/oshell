@@ -116,7 +116,11 @@ extension WorkspaceController {
     }
     @objc func resolvePendingSharedConflicts() {
         do {
-            guard let draft = try SharedConflictDrafts.load(for: store) else { Dialogs.message("没有待处理的同步冲突。"); return }
+            guard let draft = try SharedConflictDrafts.load(for: store) else {
+                if windowCoordinator?.webDAV.syncEnabled == true { windowCoordinator?.webDAV.sync(interactive: true) }
+                else { Dialogs.message("没有待处理的同步冲突。") }
+                return
+            }
             guard let resolved = try resolveSharedDraft(draft) else { return }
             PasswordVault.shared.acceptSharedConfiguration(resolved)
             acceptSavedConfiguration(resolved, applyPreferences: true)

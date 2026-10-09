@@ -276,7 +276,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     private func showWelcome() { install(welcome) }
     private var selectedProfile: SessionProfile? { sessionManager?.selectedProfile }
     var requiresSharingProtection: Bool {
-        store.requiresMasterProtection || windowCoordinator?.webDAV.enabled == true || (ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] == nil && (try? StorageLocation().pending()) != nil)
+        store.requiresMasterProtection || windowCoordinator?.webDAV.syncEnabled == true || (ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] == nil && (try? StorageLocation().pending()) != nil)
     }
     var knownHostsURL: URL {
         if !store.requiresMasterProtection { return store.url.deletingLastPathComponent().appendingPathComponent("known_hosts") }
@@ -697,7 +697,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     }
     @objc func syncWebDAVNow() { windowCoordinator?.webDAV.sync(interactive: true) }
     @objc func reloadSharedConfiguration() { windowCoordinator?.reloadSharedConfiguration(interactive: true) }
-    @objc func lockPasswords() { windowCoordinator?.webDAV.cancel(); store.masterPassword = nil; PasswordVault.shared.lock() }
+    @objc func lockPasswords() { windowCoordinator?.webDAV.cancel(); store.masterPassword = nil; PasswordVault.shared.lock(); windowCoordinator?.webDAV.readinessChanged() }
     @discardableResult func selectTab(number: Int) -> Bool {
         let candidates = numberedTabs
         guard isSecurityUnlocked, window?.attachedSheet == nil, NSApp.modalWindow == nil,

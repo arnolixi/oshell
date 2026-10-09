@@ -54,7 +54,7 @@ final class GeneralSettingsView: NSView {
             : "非等宽字体：终端仍按字符网格显示，部分字符或表格可能不齐。"
         fontHint.textColor = TerminalFontCatalog.isMonospaced(font) ? .secondaryLabelColor : .systemOrange
     }
-    init(font: NSPopUpButton, size: NSPopUpButton, history: NSPopUpButton, gpu: NSButton, input: [NSView]) {
+    init(font: NSPopUpButton, size: NSPopUpButton, history: ScrollbackSettingsControl, gpu: NSButton, input: [NSView]) {
         super.init(frame: NSRect(x: 0, y: 0, width: 820, height: 520))
         func heading(_ title: String) -> NSTextField {
             let label = NSTextField(labelWithString: title); label.font = .systemFont(ofSize: 13, weight: .semibold); return label
@@ -67,10 +67,7 @@ final class GeneralSettingsView: NSView {
             stack.heightAnchor.constraint(equalToConstant: 28).isActive = true
             return stack
         }
-        func note(_ text: String) -> NSTextField {
-            let label = NSTextField(labelWithString: text); label.font = .systemFont(ofSize: 11); label.textColor = .secondaryLabelColor; return label
-        }
-        let display = NSStackView(views: [row("终端字体", control: font, width: 300), row("字号", control: size, width: 92), row("历史行数", control: history, width: 120)])
+        let display = NSStackView(views: [row("终端字体", control: font, width: 300), row("字号", control: size, width: 92), row("历史行数", control: history, width: 300)])
         display.orientation = .vertical; display.alignment = .leading; display.spacing = 8
         font.target = self; font.action = #selector(fontChanged(_:))
         fontHint.font = .systemFont(ofSize: 11)
@@ -81,13 +78,14 @@ final class GeneralSettingsView: NSView {
         fontChanged(font)
         let separator = NSBox(); separator.boxType = .separator
         let behavior = NSStackView(views: input); behavior.orientation = .vertical; behavior.alignment = .leading; behavior.spacing = 8
-        let stack = NSStackView(views: [heading("终端显示"), display, preview, gpu, note("历史记录按终端分别保留，行数越多，占用内存越大。"), separator, heading("输入与传输"), behavior])
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 16
+        let stack = NSStackView(views: [heading("终端显示"), display, history.warning, preview, gpu, separator, heading("输入与传输"), behavior])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false; addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 24),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
+            history.warning.widthAnchor.constraint(equalTo: stack.widthAnchor),
             preview.widthAnchor.constraint(equalTo: stack.widthAnchor), fontPreview.widthAnchor.constraint(equalTo: preview.widthAnchor),
             separator.widthAnchor.constraint(equalTo: stack.widthAnchor), separator.heightAnchor.constraint(equalToConstant: 1)
         ])

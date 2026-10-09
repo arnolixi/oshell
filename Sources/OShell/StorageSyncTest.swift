@@ -49,8 +49,14 @@ enum StorageSyncTest {
                       let scroll = descendants(storage).compactMap({ $0 as? NSScrollView }).first, let document = scroll.documentView else { checks["storageTab"] = false; NSApp.abortModal(); return }
                 storage.layoutSubtreeIfNeeded(); document.layoutSubtreeIfNeeded()
                 checks["storageTab"] = true
+                checks["liveStatusCardPresent"] = descendants(storage).contains { $0 is SyncStatusView }
+                checks["diagnosticButtonsPresent"] = ["sync.status.logs", "sync.status.export", "sync.status.run"].allSatisfy { id in descendants(storage).contains { $0.identifier?.rawValue == id } }
+                if let preview = ProcessInfo.processInfo.environment["OSHELL_STORAGE_PREVIEW"], let bitmap = root.bitmapImageRepForCachingDisplay(in: root.bounds) {
+                    root.cacheDisplay(in: root.bounds, to: bitmap)
+                    try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: preview))
+                }
                 checks["storageControlsFitScrollablePage"] = descendants(document).filter { $0 is NSTextField || $0 is NSButton }.allSatisfy { document.bounds.contains($0.convert($0.bounds, to: document)) }
-                checks["testDirectoryOverrideCannotBeChanged"] = descendants(storage).compactMap { $0 as? NSButton }.filter { ["迁移当前数据到…", "使用已有数据目录…"].contains($0.title) }.allSatisfy { !$0.isEnabled }
+                checks["testDirectoryOverrideCannotBeChanged"] = descendants(storage).compactMap { $0 as? NSButton }.filter { ["新建同步目录…", "连接已有同步目录…"].contains($0.title) }.allSatisfy { !$0.isEnabled }
                 _ = PopupKeyboard.dismiss(window: NSApp.modalWindow!)
             }
             workspace.showPreferences()

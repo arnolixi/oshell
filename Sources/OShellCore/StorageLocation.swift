@@ -4,7 +4,7 @@
 import Foundation
 import Darwin
 
-/// Bootstrap stays on this Mac. Only portable application data enters the shared directory.
+/// The active database is always local. `current` is now only a sync destination.
 public final class StorageLocation {
     public enum Mode: String, Codable { case migrate, existing }
     public struct Pending: Codable, Equatable {
@@ -12,7 +12,7 @@ public final class StorageLocation {
         public let mode: Mode
         public init(path: String, mode: Mode) { self.path = path; self.mode = mode }
     }
-    private struct State: Codable { var current: String?; var pending: Pending? }
+    private struct State: Codable { var current: String?; var pending: Pending?; var replicaVersion: Int?; var allowCreate: Bool? }
     public static var defaultDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("OShell")
     }
@@ -24,7 +24,7 @@ public final class StorageLocation {
     }
     public static func resolvedDirectory() throws -> URL {
         if let override = ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] { return URL(fileURLWithPath: override) }
-        return try StorageLocation().activeDirectory()
+        return defaultDirectory
     }
     public let base: URL
     private var stateURL: URL { base.appendingPathComponent("storage-location.json") }
@@ -37,36 +37,38 @@ public final class StorageLocation {
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try PrivateFile.write(JSONEncoder().encode(state), to: stateURL)
     }
-    public func activeDirectory() throws -> URL {
+    public func activeDirectory() throws -> URL { base }
+    public func syncDirectory() throws -> URL? { try read().current.map { URL(fileURLWithPath: $0).standardizedFileURL } }
+    public func allowsInitialUpload() throws -> Bool { try read().allowCreate == true }
+    public func needsActivation() throws -> Bool {
         let state = try read()
-        guard let path = state.current else { return base }
-        let url = URL(fileURLWithPath: path).standardizedFileURL
-        guard FileManager.default.fileExists(atPath: url.path) else { throw ModelError.invalid("自定义数据目录不可用，请先恢复目录或等待 iCloud 下载完成：\(url.path)") }
-        // Never create a new, empty configuration over a missing cloud database.
-        guard try SharedDataFile.readIfPresent(url.appendingPathComponent("configuration.json")) != nil else { throw ModelError.invalid("自定义目录缺少 configuration.json，已停止启动以保护现有数据。") }
-        guard !FileManager.default.fileExists(atPath: url.appendingPathComponent("local-credential-key.json").path) else { throw ModelError.invalid("共享目录含有本机解密密钥，已阻止加载。请在本地用主密码转换后迁移到新的空目录。") }
-        return url
+        return state.pending != nil || (state.current != nil && (state.replicaVersion != 2 || !FileManager.default.fileExists(atPath: base.appendingPathComponent("configuration.json").path)))
     }
+    public func baselineURL(for directory: URL) -> URL {
+        let key = PlatformDigest.sha256(Data(directory.standardizedFileURL.path.utf8)).map { String(format: "%02x", $0) }.joined()
+        return base.appendingPathComponent("directory-sync").appendingPathComponent(key + ".json")
+    }
+    public func disableSync() throws { try write(State(current: nil, pending: nil, replicaVersion: 2)) }
     public func restoreDefaultDirectory() throws -> URL {
-        guard try SharedDataFile.readIfPresent(base.appendingPathComponent("configuration.json")) != nil else { throw ModelError.invalid("默认本地目录没有可恢复的配置。") }
-        try write(State(current: nil, pending: nil)); return base
+        guard try SharedDataFile.readIfPresent(base.appendingPathComponent("configuration.json")) != nil else { throw ModelError.invalid("没有可恢复的本地配置。") }
+        try disableSync(); return base
     }
     public func pending() throws -> Pending? { try read().pending }
     public func validate(_ choice: Pending, master: String? = nil) throws {
-        guard master != nil else { throw ModelError.invalid("使用共享或自定义目录必须先解锁主密码。") }
-        let source = try activeDirectory().resolvingSymlinksInPath()
+        guard let master else { throw ModelError.invalid("使用共享或自定义目录必须先解锁主密码。") }
+        let source = base.resolvingSymlinksInPath()
         let target = URL(fileURLWithPath: choice.path).standardizedFileURL.resolvingSymlinksInPath()
-        guard source.path != target.path else { throw ModelError.invalid("目标已经是当前数据目录。") }
-        guard !target.path.hasPrefix(source.path + "/"), !source.path.hasPrefix(target.path + "/") else { throw ModelError.invalid("请选择独立的数据目录，不能选择当前目录的子目录或上级目录。") }
+        guard source.path != target.path, !target.path.hasPrefix(source.path + "/"), !source.path.hasPrefix(target.path + "/") else { throw ModelError.invalid("请选择与本地数据目录相互独立的同步文件夹。") }
+        guard target.path != (try syncDirectory())?.resolvingSymlinksInPath().path else { throw ModelError.invalid("该目录已经用于同步。") }
         var directory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: target.path, isDirectory: &directory), directory.boolValue else { throw ModelError.invalid("请选择已经存在的文件夹。") }
+        guard !FileManager.default.fileExists(atPath: target.appendingPathComponent("local-credential-key.json").path) else { throw ModelError.invalid("同步目录不能包含本机解密密钥。") }
         if choice.mode == .migrate {
-            let config = try Self.validateData(at: source, master: master)
-            try SharingProtection.require(config)
+            _ = try Self.validateData(at: source, master: master)
             let names = try FileManager.default.contentsOfDirectory(atPath: target.path).filter { $0 != ".DS_Store" }
-            guard names.isEmpty else { throw ModelError.invalid("迁移目标必须是空文件夹，不会覆盖已有数据。若要共用另一台 Mac 的数据，请选择“使用已有数据目录”。") }
+            guard names.isEmpty else { throw ModelError.invalid("新同步目录必须为空；已有加密数据请使用“连接已有同步目录”。") }
         } else {
-            guard target.path == base.resolvingSymlinksInPath().path || !FileManager.default.fileExists(atPath: target.appendingPathComponent("local-credential-key.json").path) else { throw ModelError.invalid("目标共享目录包含本机解密密钥，请迁移到新的加密目录。") }
+            guard let data = try SharedDataFile.readIfPresent(target.appendingPathComponent("configuration.json")), SharedVault.isEncrypted(data) else { throw ModelError.invalid("请选择包含完整加密同步数据的目录。") }
             _ = try Self.validateData(at: target, master: master)
         }
     }
@@ -81,35 +83,44 @@ public final class StorageLocation {
         if let master { try MasterPasswordProtection.verifyStartup(configuration, password: master) }
         return configuration
     }
-    /// Called only on launch, while neither source nor destination is in use locally.
+    /// Before any workspace opens: upgrade old direct-directory use, then enable a pending sync destination.
+    /// Existing local data is backed up before adopting the old active database; remote files are untouched.
     public func activatePending(master: String? = nil) throws -> URL {
         var state = try read()
-        guard let choice = state.pending else { return try activeDirectory() }
-        try validate(choice, master: master)
-        let source = try activeDirectory(), target = URL(fileURLWithPath: choice.path).standardizedFileURL.resolvingSymlinksInPath()
-        var locks = [Int32]()
-        defer { locks.forEach { close($0) } }
-        for directory in [source, target] {
-            locks.append(try LaunchEndpoint.lock("server.lock", directory: LaunchEndpoint.directory(for: directory), nonblocking: true))
-        }
-        var created = [(URL, Data)]()
-        do {
-            if choice.mode == .migrate {
-                // Source remains intact, including when the copy or bootstrap commit fails.
-                guard let master else { throw ModelError.invalid("迁移共享数据必须输入主密码。") }
-                let config = try Self.validateData(at: source, master: master)
-                let data = try SharedVault.encode(config, password: master), destination = target.appendingPathComponent("configuration.json")
-                try SharedDataFile.create(data, at: destination); created.append((destination, data))
-                _ = try Self.validateData(at: target, master: master)
+        guard try needsActivation() else { return base }
+        guard let master else { throw ModelError.invalid("请先输入主密码以启用本地加密副本。") }
+        let endpoint = try LaunchEndpoint.directory(for: base)
+        let fd = try LaunchEndpoint.lock("server.lock", directory: endpoint, nonblocking: true)
+        defer { close(fd) }
+        if let path = state.current, state.replicaVersion != 2 || !FileManager.default.fileExists(atPath: base.appendingPathComponent("configuration.json").path) {
+            let old = URL(fileURLWithPath: path).standardizedFileURL
+            guard old.resolvingSymlinksInPath().path != base.resolvingSymlinksInPath().path else { throw ModelError.invalid("旧共享目录指向本地目录，请先停用旧目录设置。") }
+            let oldFD = try LaunchEndpoint.lock("server.lock", directory: LaunchEndpoint.directory(for: old), nonblocking: true)
+            defer { close(oldFD) }
+            guard !FileManager.default.fileExists(atPath: old.appendingPathComponent("local-credential-key.json").path) else { throw ModelError.invalid("旧共享目录包含本机密钥，已停止迁移。") }
+            let config = try Self.validateData(at: old, master: master)
+            let encrypted = try SharedVault.encode(config, password: master)
+            if let prior = try SharedDataFile.readIfPresent(base.appendingPathComponent("configuration.json")) {
+                let backup = base.appendingPathComponent("storage-backups").appendingPathComponent(UUID().uuidString + ".json")
+                try FileManager.default.createDirectory(at: backup.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                try PrivateFile.write(prior, to: backup)
             }
-            state.current = target.path == base.path ? nil : target.path; state.pending = nil
-            try write(state)
-            return target
-        } catch {
-            // Roll back only files this operation created and that remain unchanged.
-            for (url, data) in created.reversed() where (try? SharedDataFile.readIfPresent(url)) == data { try? FileManager.default.removeItem(at: url) }
-            throw error
+            try FileManager.default.createDirectory(at: baselineURL(for: old).deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try PrivateFile.write(encrypted, to: base.appendingPathComponent("configuration.json"))
+            try PrivateFile.write(encrypted, to: baselineURL(for: old))
+            state.replicaVersion = 2; state.allowCreate = false; try write(state)
         }
+        if let choice = state.pending {
+            try validate(choice, master: master)
+            let local = try Self.validateData(at: base, master: master)
+            let target = URL(fileURLWithPath: choice.path).standardizedFileURL.resolvingSymlinksInPath()
+            // Enable only after encryption succeeds. First sync creates/merges the remote data.
+            try PrivateFile.write(SharedVault.encode(local, password: master), to: base.appendingPathComponent("configuration.json"))
+            let baseline = baselineURL(for: target)
+            if FileManager.default.fileExists(atPath: baseline.path) { try FileManager.default.removeItem(at: baseline) }
+            state.current = target.path; state.pending = nil; state.replicaVersion = 2; state.allowCreate = choice.mode == .migrate; try write(state)
+        }
+        return base
     }
 }
 

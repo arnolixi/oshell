@@ -26,9 +26,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else {
             let location = StorageLocation()
             do {
-                if (try location.pending()) != nil {
+                if try location.needsActivation() {
                     NSApp.activate(ignoringOtherApps: true)
-                    guard let password = PasswordVault.promptMaster(title: "输入主密码以切换数据目录", creating: false) else { NSApp.terminate(nil); return }
+                    guard let password = PasswordVault.promptMaster(title: "输入主密码以启用本地加密副本", creating: false) else { NSApp.terminate(nil); return }
                     openingMaster = password
                 }
                 directory = try location.activatePending(master: openingMaster)
@@ -50,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         let harness = ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] != nil && (CommandLine.arguments.contains(where: { $0.hasSuffix("-test") || $0.hasPrefix("--memory-") }) || ProcessInfo.processInfo.environment.keys.contains { $0.hasSuffix("_TEST_ROOT") })
-        let shared = !harness && (directory.standardizedFileURL != StorageLocation.defaultDirectory.standardizedFileURL || FileManager.default.fileExists(atPath: WebDAVSync.settingsURL.path))
+        let shared = !harness && ((try? StorageLocation().syncDirectory()) != nil || FileManager.default.fileExists(atPath: WebDAVSync.settingsURL.path))
         let store = ConfigurationStore(directory: directory, masterPassword: openingMaster, requiresMasterProtection: shared)
         if let data = try? SharedDataFile.readIfPresent(store.url), SharedVault.isEncrypted(data) {
             while true {
@@ -88,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
         if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.complete(controller) }
         if CommandLine.arguments.contains("--command-input-test") { CommandInputTest.run(controller) }
+        if CommandLine.arguments.contains("--directory-sync-test") { DirectorySyncTest.run(controller) }
         if CommandLine.arguments.contains("--webdav-test") { WebDAVFeatureTest.run(controller) }
         if CommandLine.arguments.contains("--shared-conflict-test") { SharedConflictTest.run(controller) }
         if CommandLine.arguments.contains("--storage-sync-test") { StorageSyncTest.run(controller) }
@@ -156,7 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard windows?.canQuit() ?? true else { return .terminateCancel }
         controller?.completeStartupUnlock(false); launchServer?.stop(); return .terminateNow
     }
-    func applicationWillTerminate(_ notification: Notification) { launchServer?.stop(); SSHConnectionGroup.finishCleanup() }
+    func applicationWillTerminate(_ notification: Notification) { windows?.webDAV.diagnostics.flush(); launchServer?.stop(); SSHConnectionGroup.finishCleanup() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { windows?.externalWorkspace()?.show(); return true }
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
@@ -196,10 +197,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let file = menu("会话")
         add(file, "新建窗口", #selector(WorkspaceController.newWindow), "n", [.command, .shift], target: self)
         add(file, "会话管理…", #selector(WorkspaceController.showSessionManager), "o", [.command, .shift])
-        add(file, "立即同步 WebDAV", #selector(WorkspaceController.syncWebDAVNow))
+        add(file, "立即同步共享数据", #selector(WorkspaceController.syncWebDAVNow))
         add(file, "处理同步冲突…", #selector(WorkspaceController.resolvePendingSharedConflicts))
         add(file, "放弃本机同步草稿…", #selector(WorkspaceController.discardPendingSharedConflicts))
-        add(file, "重新载入共享数据", #selector(WorkspaceController.reloadSharedConfiguration))
+        add(file, "刷新本地 / 共享数据", #selector(WorkspaceController.reloadSharedConfiguration))
         add(file, "导入会话…", #selector(WorkspaceController.importSessions))
         add(file, "导出全部会话…", #selector(WorkspaceController.exportSessions))
         add(file, "会话默认属性…", #selector(WorkspaceController.showSessionDefaults))

@@ -13,8 +13,7 @@ enum Dialogs {
         TerminalFontCatalog.populate(font, selected: current.fontName)
         let size = NSPopUpButton(); [11, 12, 13, 14, 15, 16, 18, 20, 24, 26].forEach { size.addItem(withTitle: String($0)) }
         size.selectItem(withTitle: String(Int(current.fontSize)))
-        let history = NSPopUpButton(); [500, 1000, 3000, 5000, 10000, 20000].forEach { history.addItem(withTitle: String($0)) }
-        history.selectItem(withTitle: String(current.scrollback))
+        let history = ScrollbackSettingsControl(value: current.scrollback)
         let gpu = NSButton(checkboxWithTitle: "启用 GPU 加速", target: nil, action: nil); gpu.state = current.metal ? .on : .off
         #if OSHELL_LEGACY
         gpu.state = .off; gpu.isEnabled = false; gpu.title = "旧系统使用标准终端渲染"
@@ -50,12 +49,11 @@ enum Dialogs {
         var prefs = current
         while true {
             guard dialog.runModal() == .OK else { return nil }
-            do { prefs = try updatesView.values(updating: appearanceView.values(updating: current)); prefs.keyboardShortcuts = try shortcutView.values(); try storageView?.validateSelection(); break }
+            do { prefs = try updatesView.values(updating: appearanceView.values(updating: current)); prefs.keyboardShortcuts = try shortcutView.values(); prefs.scrollback = try history.value(); try storageView?.validateSelection(); break }
             catch { Dialogs.message(error.localizedDescription) }
         }
         prefs.fontName = font.selectedItem?.representedObject as? String ?? ""
         prefs.fontSize = Double(size.titleOfSelectedItem ?? "13") ?? 13
-        prefs.scrollback = Int(history.titleOfSelectedItem ?? "3000") ?? 3000
         prefs.metal = gpu.state == .on; prefs.autoZmodem = zmodem.state == .on
         #if OSHELL_LEGACY
         prefs.metal = current.metal
