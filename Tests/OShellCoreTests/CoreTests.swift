@@ -1639,10 +1639,59 @@ extension CoreTests {
         var corrupted = decoded; corrupted.profiles[0].proxy.host = "changed.example.test"
         XCTAssertThrowsError(try corrupted.merging(into: destination, includePasswords: true, sourceMaster: "old-master-123", destinationMaster: "local-master-789"))
     }
+    func testSharedProxyCatalogAndCredentials() throws {
+        let master = "proxy-catalog-master", nextMaster = "proxy-catalog-next"
+        var proxy = ProxySettings(); proxy.kind = .jump; proxy.host = "127.0.0.1"; proxy.port = 2222; proxy.username = "jump-user"; proxy.sshAuthentication = .password
+        proxy.encryptedPassword = try SessionCipher.encrypt("proxy-fixture-secret", master: master, profile: proxy.credentialProfile, identity: SSHIdentity(host: proxy.host, user: proxy.username, port: proxy.port))
+        var session = SessionProfile(name: "proxy-session", host: "target.example.test", username: "target-user"); session.proxy = proxy
+        var config = Configuration(profiles: [session]); config.masterPasswordVerifier = try MasterPasswordProtection.createVerifier(master)
+        try config.migrateProxyCatalog()
+        XCTAssertEqual(config.proxies.count, 1); XCTAssertEqual(config.profiles[0].proxyID, proxy.id); XCTAssertEqual(config.profiles[0].proxy.kind, .none)
+        let repeated = try JSONDecoder().decode(Configuration.self, from: JSONEncoder().encode(config)); XCTAssertEqual(repeated.proxies, config.proxies)
+        var other = session; other.id = UUID(); other.proxyID = proxy.id; other.proxy = ProxySettings(); config.profiles.append(other)
+        var inner = ProxySettings(); inner.kind = .socks5; inner.host = "inner.example.test"
+        config.proxies.append(ProxyProfile(name: "inner", settings: inner, upstreamID: proxy.id)); config.profiles[0].proxyID = inner.id
+        let resolved = try config.resolvingProxy(config.profiles[0]); XCTAssertEqual(resolved.runtimeProxyRoute.map(\.id), [proxy.id, inner.id])
+        XCTAssertEqual(try config.resolvingProxy(config.profiles[1]).runtimeProxyRoute.count, 1)
+        let arguments = try resolved.sshArguments(proxyHelper: URL(fileURLWithPath: "/tmp/helper with spaces"))
+        XCTAssertTrue(arguments.joined().contains("--route-index")); XCTAssertTrue(!arguments.joined().contains("proxy-fixture-secret")); XCTAssertTrue(!arguments.joined().contains(proxy.encryptedPassword!.ciphertext))
+        let encodedProfile = try JSONEncoder().encode(resolved)
+        XCTAssertEqual(try JSONDecoder().decode(SessionProfile.self, from: encodedProfile).runtimeProxyRoute, [])
+        let encodedObject = try JSONSerialization.jsonObject(with: encodedProfile) as! [String: Any]
+        let referenceMarker = try JSONSerialization.data(withJSONObject: encodedObject["proxy"]!)
+        XCTAssertThrowsError(try JSONDecoder().decode(ProxySettings.self, from: referenceMarker))
+        XCTAssertTrue(String(decoding: encodedProfile, as: UTF8.self).contains("shared-reference"))
+        XCTAssertThrowsError(try config.profiles[0].sshArguments(proxyHelper: URL(fileURLWithPath: "/tmp/helper")))
+        let unresolved = try config.profiles[0].sshArguments()
+        XCTAssertTrue(unresolved.contains("ProxyCommand=/usr/bin/false"))
+        var bad = config; bad.proxies[0].upstreamID = inner.id; XCTAssertThrowsError(try ProxyCatalog.validate(bad.proxies, sessions: bad.profiles))
+        bad = config; bad.proxies.removeFirst(); XCTAssertThrowsError(try ProxyCatalog.validate(bad.proxies, sessions: bad.profiles))
+        var long = [ProxyProfile](); for index in 0..<9 { var p = ProxySettings(); p.kind = .http; p.host = "hop.example.test"; long.append(ProxyProfile(name: "hop-\(index)", settings: p, upstreamID: long.last?.id)) }
+        XCTAssertThrowsError(try ProxyCatalog.route(long.last!.id, in: long))
+        let rotated = try ConfigurationCredentials.rotate(config, oldMaster: master, newMaster: nextMaster).configuration
+        XCTAssertEqual(try SessionCipher.decrypt(rotated.proxies[0].settings.encryptedPassword!, master: nextMaster, profile: rotated.proxies[0].settings.credentialProfile), "proxy-fixture-secret")
+        let key = LocalCredentialKey(secret: Data(repeating: 4, count: 32).base64EncodedString())
+        let local = try MasterPasswordProtection.disabling(rotated, password: nextMaster, localKey: { key }).configuration
+        XCTAssertEqual(local.proxies[0].settings.encryptedPassword?.localKeyID, key.id)
+        let protected = try MasterPasswordProtection.enabling(local, password: master, credentialKey: { _ in key.secret }).configuration
+        XCTAssertNil(protected.proxies[0].settings.encryptedPassword?.localKeyID)
+        let archive = SessionArchive(profiles: config.profiles, directories: [], includePasswords: true, proxies: config.proxies)
+        XCTAssertEqual(archive.version, 4); XCTAssertEqual(archive.passwordCount, 1)
+        let decoded = try SessionArchive.decode(archive.encoded())
+        let imported = try decoded.merging(into: Configuration(profiles: []), includePasswords: true, sourceMaster: master, destinationMaster: nextMaster)
+        XCTAssertEqual(imported.proxies.count, 2); XCTAssertTrue(imported.proxies[0].id != proxy.id)
+        XCTAssertEqual(imported.profiles[1].proxyID, imported.proxies[0].id)
+        XCTAssertEqual(try imported.resolvingProxy(imported.profiles[0]).runtimeProxyRoute.count, 2)
+        XCTAssertEqual(try SessionCipher.decrypt(imported.proxies[0].settings.encryptedPassword!, master: nextMaster, profile: imported.proxies[0].settings.credentialProfile), "proxy-fixture-secret")
+        let stripped = SessionArchive(profiles: config.profiles, directories: [], includePasswords: false, proxies: config.proxies)
+        XCTAssertEqual(stripped.passwordCount, 0)
+        let portable = try SessionArchive(profiles: local.profiles, directories: [], includePasswords: true, proxies: local.proxies).protectedForExport(password: master, credentialKey: { _ in key.secret })
+        XCTAssertNil(portable.proxies[0].settings.encryptedPassword?.localKeyID)
+    }
     func testArchiveValidationLimits() throws {
         let config = Configuration()
         let archive = SessionArchive(profiles: config.profiles, directories: [], includePasswords: false)
-        var newer = archive; newer.version = 4; XCTAssertThrowsError(try newer.encoded())
+        var newer = archive; newer.version = 5; XCTAssertThrowsError(try newer.encoded())
         var duplicate = archive; duplicate.profiles += archive.profiles; XCTAssertThrowsError(try duplicate.encoded())
         var invalid = archive; invalid.directories = ["../escaped"]; XCTAssertThrowsError(try invalid.encoded())
         XCTAssertThrowsError(try SessionArchive.decode(Data("{}".utf8)))
@@ -1884,6 +1933,7 @@ extension CoreTests {
         try tests.testRotationFailureAndCancellation()
         try tests.testArchiveWithoutPasswordsAndMergeCopies()
         try tests.testEncryptedArchiveRebindingAndFailures()
+        try tests.testSharedProxyCatalogAndCredentials()
         try tests.testArchiveValidationLimits()
         try tests.testPrivateAtomicFileAndFailedWrite()
         try tests.testOperatorPreferencesAndCommandsRoundTrip()
@@ -1913,7 +1963,7 @@ extension CoreTests {
         tests.testInvalidZmodemHeadersRemainOrdinaryOutput()
         try tests.testLoggerFlushesEveryAcceptedChunk()
         tests.testCancellationDropsInFlightBytesAcrossEveryBoundary()
-        if failures.isEmpty { print("PASS: 66 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
+        if failures.isEmpty { print("PASS: 67 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
         else { failures.forEach { print("FAIL: \($0)") }; exit(1) }
     }
 }

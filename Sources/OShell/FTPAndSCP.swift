@@ -147,7 +147,7 @@ final class SCPTransfer {
         lock.lock(); self.broker = broker; lock.unlock()
         defer { DispatchQueue.main.async { broker?.stop() } }
         let shared = try lease?.group.arguments(for: profile, clone: true) ?? []
-        var sourceArgs = shared + (try FileSSH.arguments(profile, knownHosts: knownHosts)), args = (OpenSSHCapabilities.current.needsSCPLegacyFlag ? ["-O"] : []) + ["-r"]
+        var sourceArgs = shared + (try FileSSH.arguments(profile, knownHosts: knownHosts, reusingConnection: lease != nil)), args = (OpenSSHCapabilities.current.needsSCPLegacyFlag ? ["-O"] : []) + ["-r"]
         while !sourceArgs.isEmpty {
             let option = sourceArgs.removeFirst()
             if option == "-p" { args += ["-P", sourceArgs.removeFirst()] }

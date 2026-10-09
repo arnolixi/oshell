@@ -45,19 +45,35 @@ public struct ProxySettings: Codable, Equatable {
     public var port = 1080
     public var username = ""
     public var encryptedPassword: EncryptedPassword?
+    public var identityFile = ""
+    public var sshAuthentication: ProxySSHAuthentication = .automatic
     public init() {}
+    private enum CodingKeys: String, CodingKey { case id, kind, host, port, username, encryptedPassword, identityFile, sshAuthentication }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        kind = try c.decodeIfPresent(ProxyKind.self, forKey: .kind) ?? .none
+        host = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
+        port = try c.decodeIfPresent(Int.self, forKey: .port) ?? 1080
+        username = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
+        encryptedPassword = try c.decodeIfPresent(EncryptedPassword.self, forKey: .encryptedPassword)
+        identityFile = try c.decodeIfPresent(String.self, forKey: .identityFile) ?? ""
+        sshAuthentication = try c.decodeIfPresent(ProxySSHAuthentication.self, forKey: .sshAuthentication) ?? .automatic
+    }
     public var needsHelper: Bool { kind != .none && kind != .jump }
-    public var supportsPassword: Bool { kind == .socks5 || kind == .http }
+    public var supportsPassword: Bool { kind == .socks5 || kind == .http || kind == .jump }
     public func validate() throws {
         guard kind != .none else { return }
-        guard ConnectionValidation.host(host), (1...65535).contains(port) else { throw ModelError.invalid("代理主机或端口无效。") }
+        guard host.utf8.count <= 255, ConnectionValidation.host(host), (1...65535).contains(port) else { throw ModelError.invalid("代理主机或端口无效。") }
         guard !username.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }), username.utf8.count <= 255,
               kind != .http || !username.contains(":") else { throw ModelError.invalid("代理用户名无效或过长。") }
+        guard identityFile.utf8.count <= 1024, !identityFile.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { throw ModelError.invalid("代理私钥路径无效或过长。") }
+        if kind == .jump && sshAuthentication == .privateKey && identityFile.isEmpty { throw ModelError.invalid("请选择跳板机私钥文件。") }
         if kind == .jump, !username.isEmpty, !ConnectionValidation.user(username) { throw ModelError.invalid("跳板机用户名无效。") }
     }
     public var credentialProfile: SessionProfile {
         var value = SessionProfile(id: id, name: "代理 \(host)", host: host, port: port, username: username)
-        value.encryptedPassword = encryptedPassword
+        value.encryptedPassword = encryptedPassword; value.identityFile = identityFile
         return value
     }
     public func command(helper: URL, tcpKeepAlive: Bool = true) -> String {

@@ -262,18 +262,18 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         guard let workspace, rows.indices.contains(table.selectedRow) else { return }
         switch rows[table.selectedRow] {
         case .parent: return
-        case .session(let profile): SessionTransfer.export(profiles: [profile], directories: profile.group.isEmpty ? [] : [profile.group])
-        case .link(let link, let profile): SessionTransfer.export(profiles: [profile], directories: [SessionLinks.directory(for: link.folder)], links: [link])
+        case .session(let profile): SessionTransfer.export(profiles: [profile], directories: profile.group.isEmpty ? [] : [profile.group], proxies: workspace.configuration.proxies)
+        case .link(let link, let profile): SessionTransfer.export(profiles: [profile], directories: [SessionLinks.directory(for: link.folder)], links: [link], proxies: workspace.configuration.proxies)
         case .directory(let directory):
             let links = workspace.configuration.sessionLinks.entries.filter { SessionDirectory.contains(SessionLinks.directory(for: $0.folder), in: directory) }
             let linkedIDs = Set(links.map(\.profileID))
             SessionTransfer.export(profiles: workspace.configuration.profiles.filter { SessionDirectory.contains($0.group, in: directory) || linkedIDs.contains($0.id) },
-                                   directories: SessionDirectory.all(workspace.configuration).filter { SessionDirectory.contains($0, in: directory) }, links: links)
+                                   directories: SessionDirectory.all(workspace.configuration).filter { SessionDirectory.contains($0, in: directory) }, links: links, proxies: workspace.configuration.proxies)
         }
     }
     @objc func exportAll() {
         guard let workspace else { return }
-        SessionTransfer.export(profiles: workspace.configuration.profiles, directories: SessionDirectory.all(workspace.configuration), links: workspace.configuration.sessionLinks.entries)
+        SessionTransfer.export(profiles: workspace.configuration.profiles, directories: SessionDirectory.all(workspace.configuration), links: workspace.configuration.sessionLinks.entries, proxies: workspace.configuration.proxies)
     }
     @objc func importSessions() {
         guard let workspace else { return }

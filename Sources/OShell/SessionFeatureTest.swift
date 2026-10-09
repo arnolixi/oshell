@@ -23,11 +23,13 @@ enum SessionFeatureTest {
                 var rule = TunnelRule(); rule.kind = kind; rule.listenPort = port(field); rule.destinationHost = "127.0.0.1"; rule.destinationPort = port("echoPort"); profile.tunnels.append(rule)
             }
             controller.configuration.profiles = [profile]; controller.configuration.directories = ["测试/空目录"]
+            try controller.configuration.migrateProxyCatalog()
+            profile = controller.configuration.profiles[0]
             try controller.store.save(controller.configuration)
             try Data(contentsOf: root.appendingPathComponent("known_hosts")).write(to: controller.store.url.deletingLastPathComponent().appendingPathComponent("known_hosts"))
             PasswordVault.shared.unlockForTesting(master)
             // Control: secure defaults must not silently negotiate obsolete algorithms.
-            var control = profile; control.legacySSH = false; control.tunnels = []; control.proxy = ProxySettings(); control.encryptedPassword = nil
+            var control = profile; control.proxyID = nil; control.proxy = ProxySettings(); control.legacySSH = false; control.tunnels = []; control.proxy = ProxySettings(); control.encryptedPassword = nil
             controller.open(control); let controlPane = controller.selectedTab!.activePane
             controller.open(profile); let originalTab = controller.selectedTab!, pane = originalTab.activePane
             try pane.startLogging(to: root.appendingPathComponent("session.log"))
@@ -42,6 +44,11 @@ enum SessionFeatureTest {
                     results["secureDefaultsRejectLegacy"] = controlPane.ended
                     results["automaticHostname"] = (pane.title == "centos6-fixture" && pane.remoteAddress == "10.6.0.6")
                     results["sessionReady"] = pane.sessionReady
+                    if controller.canCopySSHChannel(originalTab) {
+                        let item = NSMenuItem(); item.representedObject = originalTab.id
+                        controller.copyTabSSHChannel(item)
+                        results["channelClonePreservesProxyReference"] = controller.selectedTab?.activePane.profile.proxyID == profile.proxyID && profile.proxyID != nil
+                    } else { results["channelClonePreservesProxyReference"] = false }
                     let report: [String: Any] = ["passed": results.values.allSatisfy { $0 }, "checks": results]
                     try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: root.appendingPathComponent("client-result.json"))
                     controller.shutdown(); PasswordVault.shared.lock(); NSApp.terminate(nil)

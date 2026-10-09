@@ -88,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
         if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.complete(controller) }
         if CommandLine.arguments.contains("--command-input-test") { CommandInputTest.run(controller) }
+        if CommandLine.arguments.contains("--proxy-catalog-test") { ProxyCatalogTest.run(controller) }
         if CommandLine.arguments.contains("--directory-sync-test") { DirectorySyncTest.run(controller) }
         if CommandLine.arguments.contains("--webdav-test") { WebDAVFeatureTest.run(controller) }
         if CommandLine.arguments.contains("--shared-conflict-test") { SharedConflictTest.run(controller) }
@@ -196,6 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(app, "退出 OShell", #selector(NSApplication.terminate(_:)), "q", target: NSApp)
         let file = menu("会话")
         add(file, "新建窗口", #selector(WorkspaceController.newWindow), "n", [.command, .shift], target: self)
+        add(file, "代理管理…", #selector(WorkspaceController.showProxyManager))
         add(file, "会话管理…", #selector(WorkspaceController.showSessionManager), "o", [.command, .shift])
         add(file, "立即同步共享数据", #selector(WorkspaceController.syncWebDAVNow))
         add(file, "处理同步冲突…", #selector(WorkspaceController.resolvePendingSharedConflicts))

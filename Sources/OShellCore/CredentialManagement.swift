@@ -11,7 +11,7 @@ public struct CredentialRotation {
 
 public enum ConfigurationCredentials {
     public static func profiles(in configuration: Configuration) -> [SessionProfile] {
-        configuration.profiles + configuration.profiles.map { $0.proxy.credentialProfile } + configuration.ftpProfiles.map(\.credentialProfile)
+        configuration.profiles + configuration.profiles.map { $0.proxy.credentialProfile } + configuration.ftpProfiles.map(\.credentialProfile) + configuration.proxies.map { $0.settings.credentialProfile }
     }
     /// Counts only user-master-protected credentials; local encryption is independent.
     public static func count(in configuration: Configuration) -> Int { profiles(in: configuration).filter { $0.encryptedPassword != nil && $0.encryptedPassword?.localKeyID == nil }.count }
@@ -46,6 +46,7 @@ public enum ConfigurationCredentials {
             result.profiles[index].proxy.encryptedPassword = try change(configuration.profiles[index].proxy.credentialProfile)
         }
         for index in result.ftpProfiles.indices { result.ftpProfiles[index].encryptedPassword = try change(configuration.ftpProfiles[index].credentialProfile) }
+        for index in result.proxies.indices { result.proxies[index].settings.encryptedPassword = try change(configuration.proxies[index].settings.credentialProfile) }
         result.masterPasswordVerifier = try MasterPasswordProtection.createVerifier(newMaster)
         try check()
         return CredentialRotation(configuration: result, replacements: replacements)

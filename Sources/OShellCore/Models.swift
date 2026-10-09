@@ -22,6 +22,9 @@ public struct SessionProfile: Codable, Equatable, Identifiable {
     public var encryptedPassword: EncryptedPassword?
     public var tunnels: [TunnelRule] = []
     public var proxy = ProxySettings()
+    public var proxyID: UUID?
+    /// Resolved once per connection; credentials stay in the in-memory broker, never SSH argv.
+    public var runtimeProxyRoute: [ProxySettings] = []
     public var keepAlive = KeepAliveSettings()
     public var legacySSH = false
     public var titleMode: HostTitleMode = .shellIntegration
@@ -38,7 +41,7 @@ public struct SessionProfile: Codable, Equatable, Identifiable {
         self.port = port; self.username = username; self.identityFile = identityFile; self.jumpHost = jumpHost
         self.encryptedPassword = nil
     }
-    private enum CodingKeys: String, CodingKey { case id, name, group, kind, host, port, username, identityFile, jumpHost, encryptedPassword, tunnels, proxy, keepAlive, legacySSH, titleMode, quickConnect, initialDirectory }
+    private enum CodingKeys: String, CodingKey { case id, name, group, kind, host, port, username, identityFile, jumpHost, encryptedPassword, tunnels, proxy, proxyID, keepAlive, legacySSH, titleMode, quickConnect, initialDirectory }
     private enum LegacyCodingKeys: String, CodingKey { case activeHostProbe }
     public init(from decoder: Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
@@ -49,7 +52,12 @@ public struct SessionProfile: Codable, Equatable, Identifiable {
                   jumpHost: try fields.decode(String.self, forKey: .jumpHost))
         encryptedPassword = try fields.decodeIfPresent(EncryptedPassword.self, forKey: .encryptedPassword)
         tunnels = try fields.decodeIfPresent([TunnelRule].self, forKey: .tunnels) ?? []
-        proxy = try fields.decodeIfPresent(ProxySettings.self, forKey: .proxy) ?? ProxySettings()
+        proxyID = try fields.decodeIfPresent(UUID.self, forKey: .proxyID)
+        if let marker = try? fields.nestedContainer(keyedBy: ProxyReferenceKeys.self, forKey: .proxy),
+           (try? marker.decode(String.self, forKey: .kind)) == "shared-reference" {
+            guard proxyID != nil else { throw ModelError.invalid("共享代理引用缺少 ID。") }
+            proxy = ProxySettings(); proxy.id = try marker.decode(UUID.self, forKey: .id)
+        } else { proxy = try fields.decodeIfPresent(ProxySettings.self, forKey: .proxy) ?? ProxySettings() }
         keepAlive = try fields.decodeIfPresent(KeepAliveSettings.self, forKey: .keepAlive) ?? KeepAliveSettings()
         legacySSH = try fields.decodeIfPresent(Bool.self, forKey: .legacySSH) ?? false
         let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
@@ -57,6 +65,21 @@ public struct SessionProfile: Codable, Equatable, Identifiable {
             ?? ((try legacy.decodeIfPresent(Bool.self, forKey: .activeHostProbe) ?? false) ? .activeProbe : .shellIntegration)
         quickConnect = try fields.decodeIfPresent(Bool.self, forKey: .quickConnect) ?? true
         initialDirectory = try fields.decodeIfPresent(String.self, forKey: .initialDirectory) ?? (kind == .ftp ? "/" : ".")
+    }
+    private enum ProxyReferenceKeys: String, CodingKey { case id, kind }
+    private struct ProxyReferenceMarker: Encodable { let id: UUID; let kind = "shared-reference" }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id); try c.encode(name, forKey: .name); try c.encode(group, forKey: .group)
+        try c.encode(kind, forKey: .kind); try c.encode(host, forKey: .host); try c.encode(port, forKey: .port)
+        try c.encode(username, forKey: .username); try c.encode(identityFile, forKey: .identityFile); try c.encode(jumpHost, forKey: .jumpHost)
+        try c.encodeIfPresent(encryptedPassword, forKey: .encryptedPassword); try c.encode(tunnels, forKey: .tunnels)
+        try c.encodeIfPresent(proxyID, forKey: .proxyID)
+        // Older clients reject this discriminator instead of silently ignoring proxyID and connecting directly.
+        if proxyID != nil { try c.encode(ProxyReferenceMarker(id: proxy.id), forKey: .proxy) }
+        else { try c.encode(proxy, forKey: .proxy) }
+        try c.encode(keepAlive, forKey: .keepAlive); try c.encode(legacySSH, forKey: .legacySSH)
+        try c.encode(titleMode, forKey: .titleMode); try c.encode(quickConnect, forKey: .quickConnect); try c.encode(initialDirectory, forKey: .initialDirectory)
     }
     public static var local: SessionProfile { .init(name: "本地终端", group: "本机", kind: .local) }
     public func validate() throws {
@@ -75,7 +98,7 @@ public struct SessionProfile: Codable, Equatable, Identifiable {
         for tunnel in tunnels where tunnel.enabled { try tunnel.validate() }
         let listeners = tunnels.filter(\.enabled).map { "\($0.kind == .remote ? "remote" : "local"):\($0.bindHost):\($0.listenPort)" }
         guard Set(listeners).count == listeners.count else { throw ModelError.invalid("隧道监听地址和端口重复。") }
-        guard jumpHost.isEmpty || proxy.kind == .none else { throw ModelError.invalid("旧跳板机字段与代理不能同时设置，请将跳板机迁移到代理页。") }
+        guard jumpHost.isEmpty || (proxy.kind == .none && proxyID == nil) else { throw ModelError.invalid("旧跳板机字段与代理不能同时设置，请将跳板机迁移到代理页。") }
         guard !identityFile.contains("\0") else { throw ModelError.invalid("私钥路径无效。") }
     }
     private static func isToken(_ value: String) -> Bool {
@@ -89,7 +112,15 @@ public struct SessionProfile: Codable, Equatable, Identifiable {
         if !username.isEmpty { args += ["-l", username] }
         if !identityFile.isEmpty { args += ["-i", NSString(string: identityFile).expandingTildeInPath] }
         if !jumpHost.isEmpty { args += ["-J", jumpHost] }
-        if proxy.kind == .jump {
+        if proxyID != nil || !runtimeProxyRoute.isEmpty {
+            if let proxyHelper {
+                guard !runtimeProxyRoute.isEmpty, runtimeProxyRoute.count <= ProxyCatalog.maximumHops else { throw ModelError.invalid("共享代理尚未解析或已被删除，未建立连接。") }
+                args += ["-o", "ProxyCommand=" + ProxyCatalog.helperCommand(helper: proxyHelper, index: runtimeProxyRoute.count - 1, knownHosts: knownHostsFile, tcpKeepAlive: keepAlive.tcp)]
+            } else {
+                // ssh -G may inspect identities without a helper, but a real connection must never bypass the route.
+                args += ["-o", "ProxyCommand=/usr/bin/false"]
+            }
+        } else if proxy.kind == .jump {
             args += ["-J", (proxy.username.isEmpty ? "" : proxy.username + "@") + ConnectionValidation.bracket(proxy.host) + ":\(proxy.port)"]
         } else if proxy.needsHelper {
             let helper = proxyHelper ?? URL(fileURLWithPath: "/usr/bin/true") // ssh -G resolves identity without launching a proxy.
@@ -223,6 +254,7 @@ public struct Configuration: Codable {
     public var sessionDefaults = SessionDefaults()
     public var sessionLinks = SessionLinks()
     public var profiles: [SessionProfile]
+    public var proxies: [ProxyProfile] = []
     public var preferences: Preferences
     public var directories: [String] = []
     public var quickCommands: [QuickCommand] = []
@@ -231,13 +263,14 @@ public struct Configuration: Codable {
     public init(profiles: [SessionProfile] = [.local], preferences: Preferences = Preferences()) {
         self.profiles = profiles; self.preferences = preferences
     }
-    private enum CodingKeys: String, CodingKey { case profiles, preferences, directories, quickCommands, highlightSets, ftpProfiles, sessionLinks, sessionDefaults, masterPasswordVerifier }
+    private enum CodingKeys: String, CodingKey { case profiles, proxies, preferences, directories, quickCommands, highlightSets, ftpProfiles, sessionLinks, sessionDefaults, masterPasswordVerifier }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         sessionLinks = try values.decodeIfPresent(SessionLinks.self, forKey: .sessionLinks) ?? SessionLinks()
         sessionDefaults = try values.decodeIfPresent(SessionDefaults.self, forKey: .sessionDefaults) ?? SessionDefaults()
         masterPasswordVerifier = try values.decodeIfPresent(EncryptedPassword.self, forKey: .masterPasswordVerifier)
         profiles = try values.decode([SessionProfile].self, forKey: .profiles)
+        proxies = try values.decodeIfPresent([ProxyProfile].self, forKey: .proxies) ?? []
         preferences = try values.decode(Preferences.self, forKey: .preferences)
         directories = try values.decodeIfPresent([String].self, forKey: .directories) ?? []
         quickCommands = try values.decodeIfPresent([QuickCommand].self, forKey: .quickCommands) ?? []
@@ -295,6 +328,7 @@ public final class ConfigurationStore {
         var config = try JSONDecoder().decode(Configuration.self, from: plaintext)
         if requiresMasterProtection { try SharingProtection.require(config) }
         try config.migrateFileSessions()
+        try config.migrateProxyCatalog()
         config.sessionLinks.normalize(profiles: config.profiles)
         config.preferences.clamp()
         try config.sessionDefaults.validate()

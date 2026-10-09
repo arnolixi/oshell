@@ -14,6 +14,8 @@ final class AuthBroker {
     private var stopped = false
     private var policy: SavedPasswordPolicy?
     private var proxyAttempted = false
+    private var routeAttempts = Set<UUID>()
+    private var routePolicies = [UUID: SavedPasswordPolicy]()
     private var pendingPassword: (String, SSHIdentity)?
     private let permitsSaving: Bool
     private lazy var loginIdentity: SSHIdentity? = try? SSHIdentity.resolve(profile)
@@ -22,6 +24,8 @@ final class AuthBroker {
     var onSavePassword: ((SessionProfile, String, SSHIdentity) -> Void)?
     var manualPrompt: ((AuthRequest, @escaping (AuthResponse) -> Void) -> Void)?
     init(profile: SessionProfile, oneTimePassword: String? = nil, permitsSaving: Bool = true) throws {
+        guard profile.runtimeProxyRoute.count <= ProxyCatalog.maximumHops, Set(profile.runtimeProxyRoute.map(\.id)).count == profile.runtimeProxyRoute.count else { throw ModelError.invalid("代理链重复或过长。") }
+        for proxy in profile.runtimeProxyRoute { try proxy.validate() }
         self.profile = profile; self.permitsSaving = permitsSaving && oneTimePassword == nil
         if let oneTimePassword { policy = SavedPasswordPolicy(identity: try SSHIdentity.resolve(profile), password: oneTimePassword) }
         directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("oa-" + String(UUID().uuidString.prefix(8)))
@@ -65,7 +69,7 @@ final class AuthBroker {
     }
     var environment: [String: String] {
         var values = ["SSH_ASKPASS": ZmodemTransfer.helperDirectory.appendingPathComponent("OShellAskpass").path,
-                      "SSH_ASKPASS_REQUIRE": "force", "OSHELL_AUTH_SOCKET": endpoint.path, "OSHELL_AUTH_TOKEN": token]
+                      "SSH_ASKPASS_REQUIRE": "force", "OSHELL_AUTH_PROXY_ID": "", "OSHELL_AUTH_SOCKET": endpoint.path, "OSHELL_AUTH_TOKEN": token]
         if OpenSSHCapabilities.current.needsLegacyAskpass {
             values.removeValue(forKey: "SSH_ASKPASS_REQUIRE")
             values["DISPLAY"] = ProcessInfo.processInfo.environment["DISPLAY"] ?? "oshell:0"
@@ -73,6 +77,16 @@ final class AuthBroker {
         return values
     }
     private func respond(_ request: AuthRequest, completion: @escaping (AuthResponse) -> Void) {
+        if request.hint == "oshell-proxy-route" {
+            var route = profile.runtimeProxyRoute
+            for index in route.indices { route[index].encryptedPassword = nil }
+            let encoded = (try? JSONEncoder().encode(route)).flatMap { String(data: $0, encoding: .utf8) }
+            completion(AuthResponse(success: encoded != nil && !route.isEmpty, answer: encoded ?? "")); return
+        }
+        if let id = request.proxyID {
+            guard let proxy = profile.runtimeProxyRoute.first(where: { $0.id == id }) else { completion(AuthResponse(success: false)); return }
+            respondProxy(proxy, request: request, completion: completion); return
+        }
         if request.hint == "oshell-session-ready" {
             let pending = pendingPassword; pendingPassword = nil
             onAuthenticated?(); completion(AuthResponse(success: true))
@@ -161,6 +175,51 @@ final class AuthBroker {
         completion(AuthResponse(success: accepted, answer: answer))
     }
 
-    func stop() { stopped = true; policy = nil; pendingPassword = nil; source?.cancel(); source = nil; try? FileManager.default.removeItem(at: directory) }
+    private func respondProxy(_ proxy: ProxySettings, request: AuthRequest, completion: @escaping (AuthResponse) -> Void) {
+        let credential = proxy.credentialProfile
+        if proxy.kind != .jump {
+            guard request.hint == "oshell-proxy", proxy.supportsPassword, !routeAttempts.contains(proxy.id) else { completion(AuthResponse(success: false)); return }
+            routeAttempts.insert(proxy.id)
+            if credential.encryptedPassword != nil {
+                PasswordVault.shared.decrypt(credential, resolve: false) { result in
+                    switch result { case .success(let value): completion(AuthResponse(success: true, answer: value.0))
+                    case .failure(let error): Dialogs.message(error.localizedDescription); completion(AuthResponse(success: false)) }
+                }; return
+            }
+        } else if request.hint != "confirm" {
+            if var saved = routePolicies[proxy.id], let answer = saved.reply(prompt: request.prompt, hint: request.hint) {
+                routePolicies[proxy.id] = saved; completion(AuthResponse(success: true, answer: answer)); return
+            }
+            if routePolicies[proxy.id] == nil, let envelope = credential.encryptedPassword {
+                var probe = SavedPasswordPolicy(identity: envelope.identity, password: "probe")
+                if probe.reply(prompt: request.prompt, hint: request.hint) != nil {
+                    PasswordVault.shared.decrypt(credential) { [weak self] result in
+                        guard let self, !self.stopped else { completion(AuthResponse(success: false)); return }
+                        switch result {
+                        case .success(let value):
+                            var policy = SavedPasswordPolicy(identity: value.1, password: value.0)
+                            let answer = policy.reply(prompt: request.prompt, hint: request.hint); self.routePolicies[proxy.id] = policy
+                            completion(AuthResponse(success: answer != nil, answer: answer ?? ""))
+                        case .failure(let error): Dialogs.message(error.localizedDescription); completion(AuthResponse(success: false))
+                        }
+                    }; return
+                }
+            }
+        }
+        if let manualPrompt { manualPrompt(request, completion); return }
+        let alert = PopupAlert(); alert.messageText = proxy.kind == .jump ? "SSH 跳板机认证" : "代理身份验证"
+        alert.informativeText = "\(proxy.username)@\(proxy.host):\(proxy.port)\n" + (proxy.kind == .jump ? request.prompt : "请输入代理密码。")
+        if request.hint == "confirm" || request.prompt.contains("(yes/no") {
+            alert.addButton(withTitle: "确认连接"); alert.addButton(withTitle: "取消")
+            completion(AuthResponse(success: true, answer: alert.runModal() == .alertFirstButtonReturn ? "yes" : "no")); return
+        }
+        alert.addButton(withTitle: "连接"); alert.addButton(withTitle: "取消")
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 400, height: 26))
+        alert.accessoryView = field; alert.window.initialFirstResponder = field
+        let accepted = alert.runModal() == .alertFirstButtonReturn && !stopped
+        completion(AuthResponse(success: accepted, answer: accepted ? field.stringValue : "")); field.stringValue = ""
+    }
+
+    func stop() { stopped = true; routePolicies = [:]; routeAttempts = []; policy = nil; pendingPassword = nil; source?.cancel(); source = nil; try? FileManager.default.removeItem(at: directory) }
     deinit { source?.cancel(); try? FileManager.default.removeItem(at: directory) }
 }

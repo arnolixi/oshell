@@ -84,6 +84,10 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
     }
     func connect(_ profile: SessionProfile, directory: String? = nil, uploading: [URL] = [], password: String? = nil, connectionGroup: SSHConnectionGroup? = nil) {
         guard let workspace, !busy, !closed, profile.kind != .local else { return }
+        var profile = profile
+        do {
+            if connectionGroup == nil { profile = try workspace.configuration.resolvingProxy(profile) }
+        } catch { reportError(error); return }
         let lease: SSHConnectionLease?
         do { lease = try connectionGroup.map { try SSHConnectionLease(group: $0, profile: profile) } }
         catch { reportError(error); return }

@@ -235,7 +235,9 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
                 lines += ["实际连接 IP：" + peer.address, "实际连接端口：\(peer.port)"]
             } else { lines.append("实际连接 IP：未获取") }
             lines.append("实际连接指本机 TCP 对端；代理、跳板机及内层跳转可能与当前主机不同。")
-            if profile.proxy.kind != .none {
+            if !profile.runtimeProxyRoute.isEmpty {
+                lines.append("代理链：" + profile.runtimeProxyRoute.map { $0.kind.title + " · " + $0.host + ":" + String($0.port) }.joined(separator: " → "))
+            } else if profile.proxy.kind != .none {
                 lines.append("代理：" + profile.proxy.kind.title + " · " + display(profile.proxy.host) + ":\(profile.proxy.port)")
             } else if !profile.jumpHost.isEmpty { lines.append("跳板机：" + display(profile.jumpHost)) }
             lines.append("状态：" + (ended ? "已结束，当前为本机工具模式" : (sessionReady ? "已连接" : "连接中")))
@@ -390,7 +392,9 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     }
     func start() {
         do {
-            var args = profile.kind == .ssh ? try profile.sshArguments(knownHostsFile: knownHostsFile, proxyHelper: ZmodemTransfer.helperDirectory.appendingPathComponent("OShellProxy")) : ["-l"]
+            var connectionProfile = profile
+            if reusesSSHConnection { connectionProfile.proxyID = nil; connectionProfile.proxy = ProxySettings(); connectionProfile.jumpHost = ""; connectionProfile.runtimeProxyRoute = [] }
+            var args = profile.kind == .ssh ? try connectionProfile.sshArguments(knownHostsFile: knownHostsFile, proxyHelper: ZmodemTransfer.helperDirectory.appendingPathComponent("OShellProxy")) : ["-l"]
             if let group = sshConnectionGroup { args = try group.arguments(for: profile, clone: reusesSSHConnection) + args }
             if profile.kind == .ssh && !reusesSSHConnection {
                 let helper = ZmodemTransfer.helperDirectory.appendingPathComponent("OShellAskpass").path.replacingOccurrences(of: "%", with: "%%")

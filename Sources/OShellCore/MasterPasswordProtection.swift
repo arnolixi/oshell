@@ -41,6 +41,7 @@ public enum MasterPasswordProtection {
             result.profiles[index].proxy.encryptedPassword = try migrate(configuration.profiles[index].proxy.credentialProfile)
         }
         for index in result.ftpProfiles.indices { result.ftpProfiles[index].encryptedPassword = try migrate(configuration.ftpProfiles[index].credentialProfile) }
+        for index in result.proxies.indices { result.proxies[index].settings.encryptedPassword = try migrate(configuration.proxies[index].settings.credentialProfile) }
         if result.masterPasswordVerifier == nil { result.masterPasswordVerifier = try createVerifier(password) }
         try check(); return CredentialRotation(configuration: result, replacements: replacements)
     }
@@ -67,6 +68,7 @@ public enum MasterPasswordProtection {
             result.profiles[index].proxy.encryptedPassword = try convert(configuration.profiles[index].proxy.credentialProfile)
         }
         for index in result.ftpProfiles.indices { result.ftpProfiles[index].encryptedPassword = try convert(configuration.ftpProfiles[index].credentialProfile) }
+        for index in result.proxies.indices { result.proxies[index].settings.encryptedPassword = try convert(configuration.proxies[index].settings.credentialProfile) }
         result.masterPasswordVerifier = nil
         try check(); return CredentialRotation(configuration: result, replacements: replacements)
     }

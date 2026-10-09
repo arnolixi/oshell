@@ -13,9 +13,11 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
     private let pages = NSTabView()
     private let name = NSTextField(), directory = SessionDirectoryPicker(), host = NSTextField(), port = NSTextField(), user = NSTextField(), key = NSTextField()
     private let password = NSSecureTextField(), remember = NSButton(checkboxWithTitle: "保存密码", target: nil, action: nil)
-    private let passwordProtection = NSPopUpButton(), proxyProtection = NSPopUpButton()
-    private let proxyKind = NSPopUpButton(), proxyHost = NSTextField(), proxyPort = NSTextField(), proxyUser = NSTextField(), proxyPassword = NSSecureTextField()
-    private let proxyRemember = NSButton(checkboxWithTitle: "保存代理密码", target: nil, action: nil)
+    private let passwordProtection = NSPopUpButton()
+    private let proxyPicker = NSPopUpButton()
+    private let proxyRouteNote = NSTextField(wrappingLabelWithString: "")
+    private var proxyCatalog: [ProxyProfile]
+    private let manageProxies: (() -> [ProxyProfile])?
     private let legacy = NSButton(checkboxWithTitle: "兼容 CentOS 6 / 旧版 SSH 服务", target: nil, action: nil)
     private let alive = NSButton(checkboxWithTitle: "发送 SSH 保持活动消息", target: nil, action: nil)
     private let interval = NSTextField(), missed = NSTextField()
@@ -32,7 +34,8 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
     private let remoteDirectory = NSTextField()
     private var allPages = [NSTabViewItem]()
     private var lastKind: SessionKind = .ssh
-    init(_ existing: SessionProfile?, profiles: [SessionProfile], directories: [String], initialDirectory: String, kind: SessionKind = .ssh, defaults: SessionDefaults = SessionDefaults()) {
+    init(_ existing: SessionProfile?, profiles: [SessionProfile], directories: [String], initialDirectory: String, kind: SessionKind = .ssh, defaults: SessionDefaults = SessionDefaults(), proxies: [ProxyProfile] = [], manageProxies: (() -> [ProxyProfile])? = nil) {
+        proxyCatalog = proxies; self.manageProxies = manageProxies
         original = existing; profile = existing ?? defaults.makeProfile(kind: kind, directory: initialDirectory); self.profiles = profiles; self.defaults = defaults
         lastKind = profile.kind
         super.init()
@@ -50,33 +53,28 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
         password.placeholderString = profile.encryptedPassword == nil ? "留空则在连接时输入" : "已保存；留空保留，填写新值替换"
         remember.state = profile.encryptedPassword == nil ? .off : .on
         password.identifier = .init("session.password"); remember.identifier = .init("session.remember")
-        passwordProtection.identifier = .init("session.passwordProtection"); proxyProtection.identifier = .init("session.proxyProtection")
-        for popup in [passwordProtection, proxyProtection] { popup.addItems(withTitles: PasswordProtection.allCases.map(\.title)) }
+        passwordProtection.identifier = .init("session.passwordProtection")
+        for popup in [passwordProtection] { popup.addItems(withTitles: PasswordProtection.allCases.map(\.title)) }
         passwordProtection.selectItem(at: profile.encryptedPassword != nil && profile.encryptedPassword?.localKeyID == nil ? 1 : 0)
-        proxyProtection.selectItem(at: profile.proxy.encryptedPassword != nil && profile.proxy.encryptedPassword?.localKeyID == nil ? 1 : 0)
         remember.target = self; remember.action = #selector(passwordStorageChanged)
-        proxyRemember.target = self; proxyRemember.action = #selector(passwordStorageChanged)
         if PasswordVault.shared.masterProtectionEnabled {
-            for popup in [passwordProtection, proxyProtection] {
+            for popup in [passwordProtection] {
                 popup.selectItem(at: 1); popup.autoenablesItems = false; popup.item(at: 0)?.isEnabled = false
             }
         }
         let passwordStorage = NSStackView(views: [remember, passwordProtection]); passwordStorage.spacing = 8
-        let proxyStorage = NSStackView(views: [proxyRemember, proxyProtection]); proxyStorage.spacing = 8
         legacy.state = profile.legacySSH ? .on : .off
         protocolKind.addItems(withTitles: ["SSH", "SFTP", "FTP"])
         protocolKind.selectItem(at: [.ssh, .sftp, .ftp].firstIndex(of: profile.kind) ?? 0)
         protocolKind.target = self; protocolKind.action = #selector(protocolChanged)
         remoteDirectory.stringValue = profile.initialDirectory
         addPage("连接", rows: [("协议", protocolKind), ("名称", name), ("目录", directory), ("主机", host), ("端口", port), ("用户名", user), ("私钥", key), ("密码", password), ("密码保存", passwordStorage), ("文件初始目录", remoteDirectory), ("兼容性", legacy)], note: "本机自动加密的密文和随机密钥均由 OShell 保存在数据目录，复制整个目录可能同时带走密钥。主密码模式保护更强。旧密码留空切换时需解锁一次，也可重新填写会话密码。")
-        proxyKind.addItems(withTitles: ProxyKind.allCases.map(\.title)); proxyKind.selectItem(at: ProxyKind.allCases.firstIndex(of: profile.proxy.kind)!)
-        proxyHost.stringValue = profile.proxy.host; proxyPort.stringValue = String(profile.proxy.port); proxyUser.stringValue = profile.proxy.username
-        proxyPassword.placeholderString = profile.proxy.encryptedPassword == nil ? "不保存则在连接时询问" : "已保存；留空保留，填写新值替换"
-        proxyRemember.state = profile.proxy.encryptedPassword == nil ? .off : .on
-        let oldJump = NSTextField(string: profile.jumpHost); oldJump.placeholderString = "兼容旧配置，如 user@bastion:22；与上方代理互斥"
-        oldJump.identifier = .init("legacy-jump")
-        addPage("代理", rows: [("类型", proxyKind), ("主机", proxyHost), ("端口", proxyPort), ("用户名", proxyUser), ("密码", proxyPassword), ("密码保存", proxyStorage), ("旧跳板机", oldJump)], note: "SOCKS4 使用本地 IPv4 解析，SOCKS4A / SOCKS5 由代理解析域名。HTTP 使用 CONNECT（可选 Basic 认证）。SSH 跳板机使用系统 SSH 配置、Agent 或交互认证。")
-        proxyKind.target = self; proxyKind.action = #selector(proxyChanged)
+        proxyRouteNote.maximumNumberOfLines = 3; proxyRouteNote.lineBreakMode = .byTruncatingMiddle
+        proxyPicker.identifier = .init("session.sharedProxy")
+        proxyPicker.target = self; proxyPicker.action = #selector(proxyChanged)
+        reloadProxies(selected: profile.proxyID)
+        let manage = button("代理管理…", #selector(openProxyManager)); manage.isEnabled = manageProxies != nil
+        addPage("代理", rows: [("共享代理", proxyPicker), ("", manage), ("连接链路", proxyRouteNote)], note: "多个会话可选择同一代理。代理管理中配置认证与上级代理；连接顺序从本机开始，最多 8 级。修改在下次新连接时生效。")
         let tunnelPage = NSView()
         let note = label("连接建立后自动应用启用的转发规则，可配置本地、远程及动态 SOCKS 转发。")
         for (id, title, width) in [("kind", "类型", 110.0), ("source", "监听地址", 160.0), ("target", "目标", 180.0), ("note", "说明", 130.0)] {
@@ -153,16 +151,29 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
         }
         keepAliveChanged()
     }
+    private func reloadProxies(selected: UUID?) {
+        proxyPicker.removeAllItems(); proxyPicker.addItem(withTitle: "无代理（直连）")
+        if profile.proxy.kind != .none || !profile.jumpHost.isEmpty {
+            proxyPicker.addItem(withTitle: "当前独立代理 / 旧跳板机（兼容）"); proxyPicker.lastItem?.representedObject = "legacy"
+        }
+        for (index, entry) in proxyCatalog.enumerated() { proxyPicker.addItem(withTitle: "\(index + 1). " + entry.name); proxyPicker.lastItem?.representedObject = entry.id.uuidString }
+        if let selected, let item = proxyPicker.itemArray.first(where: { ($0.representedObject as? String) == selected.uuidString }) { proxyPicker.select(item) }
+        else if let selected { proxyPicker.addItem(withTitle: "代理已缺失，请重新选择"); proxyPicker.lastItem?.representedObject = selected.uuidString; proxyPicker.selectItem(at: proxyPicker.numberOfItems - 1) }
+        else if let item = proxyPicker.itemArray.first(where: { ($0.representedObject as? String) == "legacy" }) { proxyPicker.select(item) }
+        proxyChanged()
+    }
+    @objc private func openProxyManager() {
+        let selected = (proxyPicker.selectedItem?.representedObject as? String).flatMap(UUID.init(uuidString:))
+        if let manageProxies { proxyCatalog = manageProxies(); reloadProxies(selected: selected) }
+    }
     @objc private func proxyChanged() {
-        let kind = ProxyKind.allCases[proxyKind.indexOfSelectedItem]
-        [proxyHost, proxyPort, proxyUser].forEach { $0.isEnabled = kind != .none }
-        proxyPassword.isEnabled = kind == .socks5 || kind == .http; proxyRemember.isEnabled = proxyPassword.isEnabled
-        passwordStorageChanged()
+        if let id = (proxyPicker.selectedItem?.representedObject as? String).flatMap(UUID.init(uuidString:)) {
+            do { proxyRouteNote.stringValue = "本机 → " + (try ProxyCatalog.route(id, in: proxyCatalog)).map(\.name).joined(separator: " → ") + " → 当前会话" }
+            catch { proxyRouteNote.stringValue = error.localizedDescription }
+        } else { proxyRouteNote.stringValue = (proxyPicker.selectedItem?.representedObject as? String) == "legacy" ? "保留原有连接路径；可在代理管理中建立共享代理后替换。" : "本机 → 当前会话" }
+        proxyRouteNote.toolTip = proxyRouteNote.stringValue
     }
-    @objc private func passwordStorageChanged() {
-        passwordProtection.isEnabled = remember.state == .on
-        proxyProtection.isEnabled = proxyRemember.isEnabled && proxyRemember.state == .on
-    }
+    @objc private func passwordStorageChanged() { passwordProtection.isEnabled = remember.state == .on }
     @objc private func keepAliveChanged() {
         interval.isEnabled = alive.state == .on; missed.isEnabled = alive.state == .on
         idle.isEnabled = lastKind == .ssh
@@ -182,11 +193,10 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
             profile.name = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             profile.host = host.stringValue.trimmingCharacters(in: .whitespacesAndNewlines); profile.port = Int(port.stringValue) ?? 0
             profile.username = user.stringValue.trimmingCharacters(in: .whitespacesAndNewlines); profile.identityFile = key.stringValue
-            func find(_ view: NSView) -> NSTextField? { if view.identifier?.rawValue == "legacy-jump" { return view as? NSTextField }; return view.subviews.compactMap(find).first }
-            profile.jumpHost = pages.tabViewItems.compactMap { $0.view.flatMap(find) }.first?.stringValue ?? ""
-            profile.proxy.kind = ProxyKind.allCases[proxyKind.indexOfSelectedItem]
-            profile.proxy.host = proxyHost.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            profile.proxy.port = Int(proxyPort.stringValue) ?? 0; profile.proxy.username = proxyUser.stringValue
+            let chosenProxy = proxyPicker.selectedItem?.representedObject as? String
+            if chosenProxy != "legacy" {
+                profile.proxyID = chosenProxy.flatMap(UUID.init(uuidString:)); profile.proxy = ProxySettings(); profile.jumpHost = ""
+            }
             profile.legacySSH = legacy.state == .on
             profile.keepAlive.enabled = alive.state == .on; profile.keepAlive.interval = Int(interval.stringValue) ?? 0; profile.keepAlive.maxMissed = Int(missed.stringValue) ?? 0
             profile.keepAlive.tcp = tcp.state == .on; profile.keepAlive.idleEnabled = profile.kind == .ssh && idle.state == .on
@@ -194,11 +204,12 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
             profile.quickConnect = quick.state == .on
             profile.titleMode = HostTitleMode.allCases[titleMode.indexOfSelectedItem]
             if profile.kind == .ftp {
-                profile.identityFile = ""; profile.jumpHost = ""; profile.proxy = ProxySettings(); profile.tunnels = []; profile.legacySSH = false; profile.keepAlive = KeepAliveSettings()
+                profile.identityFile = ""; profile.jumpHost = ""; profile.proxy = ProxySettings(); profile.proxyID = nil; profile.tunnels = []; profile.legacySSH = false; profile.keepAlive = KeepAliveSettings()
             }
             do {
                 profile.group = directory.selectedDirectory
                 try profile.validate()
+                if let id = profile.proxyID { _ = try ProxyCatalog.route(id, in: proxyCatalog) }
                 let known = profiles + profiles.filter { $0.proxy.encryptedPassword != nil }.map { $0.proxy.credentialProfile }
                 func protect(_ input: String, destination: SessionProfile, old: SessionProfile?, selection: NSPopUpButton, explicitIdentity: Bool) throws -> EncryptedPassword? {
                     let mode = PasswordProtection.allCases[selection.indexOfSelectedItem]
@@ -222,15 +233,10 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
                     guard let encrypted = try protect(password.stringValue, destination: profile, old: original, selection: passwordProtection, explicitIdentity: profile.kind == .ftp) else { continue }
                     profile.encryptedPassword = encrypted
                 } else { profile.encryptedPassword = nil }
-                if profile.proxy.supportsPassword && proxyRemember.state == .on {
-                    guard !profile.proxy.username.isEmpty else { throw ModelError.invalid("保存代理密码时请填写代理用户名。"); }
-                    guard let encrypted = try protect(proxyPassword.stringValue, destination: profile.proxy.credentialProfile, old: original?.proxy.credentialProfile, selection: proxyProtection, explicitIdentity: true) else { continue }
-                    profile.proxy.encryptedPassword = encrypted
-                } else { profile.proxy.encryptedPassword = nil }
-                password.stringValue = ""; proxyPassword.stringValue = ""; return profile
+                password.stringValue = ""; return profile
             } catch { Dialogs.message(error.localizedDescription) }
         }
-        password.stringValue = ""; proxyPassword.stringValue = ""; return nil
+        password.stringValue = ""; return nil
     }
     func numberOfRows(in tableView: NSTableView) -> Int { profile.tunnels.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {

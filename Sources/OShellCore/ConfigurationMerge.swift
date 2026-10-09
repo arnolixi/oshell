@@ -70,7 +70,7 @@ public final class ConfigurationMerge {
         let baseFields = try Self.fields(base)
         localFields = try Self.fields(local); remoteFields = try Self.fields(remote)
         merged = remoteFields
-        let labels = ["preferences":"应用设置", "directories":"会话目录", "quickCommands":"快速命令", "highlightSets":"突出显示集", "sessionLinks":"快捷引用", "sessionDefaults":"默认会话属性"]
+        let labels = ["preferences":"应用设置", "directories":"会话目录", "quickCommands":"快速命令", "highlightSets":"突出显示集", "sessionLinks":"快捷引用", "sessionDefaults":"默认会话属性", "proxies":"共享代理"]
         for key in Set(baseFields.keys).union(localFields.keys).union(remoteFields.keys).sorted() where key != "profiles" {
             let b = baseFields[key], l = localFields[key], r = remoteFields[key]
             if Self.equal(l, r) || Self.equal(r, b) { merged[key] = l }
@@ -105,6 +105,7 @@ public final class ConfigurationMerge {
         result["profiles"] = try profileOrder.compactMap { selected[$0] }.map(Self.fields)
         var configuration = try JSONDecoder().decode(Configuration.self, from: JSONSerialization.data(withJSONObject: result))
         try configuration.migrateFileSessions()
+        try ProxyCatalog.validate(configuration.proxies, sessions: configuration.profiles)
         configuration.sessionLinks.normalize(profiles: configuration.profiles)
         configuration.normalizeSessionLinkDirectories()
         return configuration

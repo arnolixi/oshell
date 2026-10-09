@@ -95,6 +95,7 @@ final class PasswordVault {
         for index in configuration.ftpProfiles.indices {
             configuration.ftpProfiles[index].encryptedPassword = currentCredential(original.ftpProfiles[index].credentialProfile).encryptedPassword
         }
+        for index in configuration.proxies.indices { configuration.proxies[index].settings.encryptedPassword = currentCredential(original.proxies[index].settings.credentialProfile).encryptedPassword }
         return configuration
     }
     func masterForImport(hasSavedPasswords: Bool) -> String? { requestMaster(creating: !hasSavedPasswords && !masterProtectionEnabled) }

@@ -8,7 +8,8 @@ public struct AuthRequest: Codable {
     public var token: String
     public var prompt: String
     public var hint: String
-    public init(token: String, prompt: String, hint: String) { self.token = token; self.prompt = prompt; self.hint = hint }
+    public var proxyID: UUID?
+    public init(token: String, prompt: String, hint: String, proxyID: UUID? = nil) { self.token = token; self.prompt = prompt; self.hint = hint; self.proxyID = proxyID }
 }
 public struct AuthResponse: Codable {
     public var success: Bool

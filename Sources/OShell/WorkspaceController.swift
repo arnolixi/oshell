@@ -314,6 +314,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
                 }
             }
             try normalized.migrateFileSessions()
+            try normalized.migrateProxyCatalog()
             try normalized.sessionDefaults.validate()
             normalized.sessionLinks.normalize(profiles: normalized.profiles)
             normalized.normalizeSessionLinkDirectories()
@@ -361,13 +362,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     @objc func exportSessions() { showSessionManager(); sessionManager?.exportAll() }
     @objc func newSession() { createSession(kind: .ssh) }
     func createSession(kind: SessionKind) {
-        guard let profile = Dialogs.session(profiles: credentialProfiles, directories: SessionDirectory.all(configuration), initialDirectory: sessionManager?.currentDirectory ?? "服务器", kind: kind, defaults: configuration.sessionDefaults) else { return }
+        guard let profile = Dialogs.session(profiles: credentialProfiles, directories: SessionDirectory.all(configuration), initialDirectory: sessionManager?.currentDirectory ?? "服务器", kind: kind, defaults: configuration.sessionDefaults, proxies: configuration.proxies, manageProxies: manageProxiesForEditor) else { return }
         var value = configuration; value.profiles.append(profile)
         if saveConfiguration(value) { if sessionManager == nil { showSessionManager() }; sessionManager?.reveal(profile); sessionManager?.showPreservingMode() }
     }
     @objc func editSession() {
         guard let selected = selectedProfile, selected.kind != .local,
-              let profile = Dialogs.session(selected, profiles: credentialProfiles, directories: SessionDirectory.all(configuration), defaults: configuration.sessionDefaults),
+              let profile = Dialogs.session(selected, profiles: credentialProfiles, directories: SessionDirectory.all(configuration), defaults: configuration.sessionDefaults, proxies: configuration.proxies, manageProxies: manageProxiesForEditor),
               let index = configuration.profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         var value = configuration; value.profiles[index] = profile
         let linkID = sessionManager?.selectedLink?.id
@@ -449,7 +450,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         idleMemoryReclaimer.cancel()
         let knownHosts = knownHostsURL
         try? FileManager.default.createDirectory(at: knownHosts.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let pane = TerminalPane(profile: profile, preferences: configuration.preferences, knownHostsFile: knownHosts, oneTimePassword: oneTimePassword, terminalType: terminalType, connectionGroup: connectionGroup, reuseConnection: reuseConnection, blank: blank)
+        var resolved = profile
+        if !reuseConnection { resolved.runtimeProxyRoute = []; resolved = (try? configuration.resolvingProxy(resolved)) ?? resolved }
+        let pane = TerminalPane(profile: resolved, preferences: configuration.preferences, knownHostsFile: knownHosts, oneTimePassword: oneTimePassword, terminalType: terminalType, connectionGroup: connectionGroup, reuseConnection: reuseConnection, blank: blank)
         bindPane(pane)
         return pane
     }

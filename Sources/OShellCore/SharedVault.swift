@@ -83,7 +83,7 @@ public enum SharedVault {
     }
     public static func decode(_ data: Data, password: String) throws -> Configuration {
         var value = try JSONDecoder().decode(Configuration.self, from: open(data, password: password))
-        try value.migrateFileSessions(); try SharingProtection.require(value)
+        try value.migrateFileSessions(); try value.migrateProxyCatalog(); try SharingProtection.require(value)
         try MasterPasswordProtection.verifyStartup(value, password: password)
         for profile in value.profiles { try profile.validate() }
         return value

@@ -119,10 +119,11 @@ final class FileProcess {
 }
 
 enum FileSSH {
-    static func arguments(_ profile: SessionProfile, knownHosts: URL) throws -> [String] {
+    static func arguments(_ profile: SessionProfile, knownHosts: URL, reusingConnection: Bool = false) throws -> [String] {
         var copy = profile; copy.tunnels = []
+        if reusingConnection { copy.proxyID = nil; copy.proxy = ProxySettings(); copy.jumpHost = ""; copy.runtimeProxyRoute = [] }
         let args = try copy.sshArguments(knownHostsFile: knownHosts, proxyHelper: ZmodemTransfer.helperDirectory.appendingPathComponent("OShellProxy"))
-        return Array(args.dropLast(2)).filter { $0 != "-tt" } + ["-o", "ClearAllForwardings=yes", "-o", "RemoteCommand=none"]
+        return (reusingConnection ? ["-o", "ProxyCommand=/usr/bin/false"] : []) + Array(args.dropLast(2)).filter { $0 != "-tt" } + ["-o", "ClearAllForwardings=yes", "-o", "RemoteCommand=none"]
     }
     static func environment(_ broker: AuthBroker?) -> [String: String] {
         var environment = SSHEnvironment.remoteClient(ProcessInfo.processInfo.environment)
@@ -175,7 +176,7 @@ final class SFTPBackend: RemoteFileBackend {
         lease = try connectionGroup.map { try SSHConnectionLease(group: $0, profile: profile) }
         broker = connectionGroup == nil ? try AuthBroker(profile: profile, oneTimePassword: oneTimePassword) : nil
         let shared = try connectionGroup?.arguments(for: profile, clone: true) ?? []
-        let args = shared + (try FileSSH.arguments(profile, knownHosts: knownHosts)) + ["-T", "-s", "--", profile.host, "sftp"]
+        let args = shared + (try FileSSH.arguments(profile, knownHosts: knownHosts, reusingConnection: connectionGroup != nil)) + ["-T", "-s", "--", profile.host, "sftp"]
         process = FileProcess(executable: "/usr/bin/ssh", arguments: args, environment: FileSSH.environment(broker))
     }
     func connect() throws {

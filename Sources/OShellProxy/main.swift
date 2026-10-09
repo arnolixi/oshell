@@ -57,10 +57,11 @@ func connectTo(_ host: String, _ port: Int) throws -> Int32 {
     }
     throw fail("无法连接代理服务器。")
 }
+var activeProxyID: UUID?
 func proxyPassword() throws -> String {
     let env = ProcessInfo.processInfo.environment
     guard let socket = env["OSHELL_AUTH_SOCKET"], let token = env["OSHELL_AUTH_TOKEN"] else { throw fail("缺少代理认证通道。") }
-    let result = try AuthIPC.request(socketPath: socket, request: AuthRequest(token: token, prompt: "OShell proxy password", hint: "oshell-proxy"))
+    let result = try AuthIPC.request(socketPath: socket, request: AuthRequest(token: token, prompt: "OShell proxy password", hint: "oshell-proxy", proxyID: activeProxyID))
     guard result.success else { throw fail("代理身份验证已取消。") }; return result.answer
 }
 func handshake(_ fd: Int32, type: ProxyKind, host: String, port: Int, user: String) throws {
@@ -152,17 +153,83 @@ func relay(_ socket: Int32) throws {
         if descriptors.contains(where: { $0.revents & Int16(POLLERR | POLLNVAL) != 0 }) { throw fail("代理连接中断。") }
     }
 }
+func routeSettings() throws -> [ProxySettings] {
+    let env = ProcessInfo.processInfo.environment
+    guard let path = env["OSHELL_AUTH_SOCKET"], let token = env["OSHELL_AUTH_TOKEN"] else { throw fail("缺少代理认证通道。") }
+    let response = try AuthIPC.request(socketPath: path, request: AuthRequest(token: token, prompt: "", hint: "oshell-proxy-route"))
+    guard response.success else { throw fail("代理链无法读取。") }
+    let route = try JSONDecoder().decode([ProxySettings].self, from: Data(response.answer.utf8))
+    guard !route.isEmpty, route.count <= ProxyCatalog.maximumHops else { throw fail("代理链长度无效。") }
+    for hop in route { try hop.validate(); guard hop.kind != .none, hop.encryptedPassword == nil else { throw fail("代理路由不能包含凭据。") } }
+    return route
+}
+func execSSH(_ args: [String], proxyID: UUID) throws -> Never {
+    setenv("OSHELL_AUTH_PROXY_ID", proxyID.uuidString, 1)
+    let strings = (["/usr/bin/ssh"] + args).map { strdup($0) }
+    defer { strings.forEach { free($0) } }
+    var pointers = strings + [nil]
+    execv("/usr/bin/ssh", &pointers)
+    throw fail("无法启动 SSH 跳板连接。")
+}
+
 do {
     let args = Array(CommandLine.arguments.dropFirst()); var options = [String: String]()
     guard args.count % 2 == 0 else { throw fail("代理参数无效。") }
     for index in stride(from: 0, to: args.count, by: 2) { options[args[index]] = args[index + 1] }
-    guard let type = ProxyKind(rawValue: options["--type"] ?? ""), let host = options["--host"], let port = Int(options["--port"] ?? ""),
-          let target = options["--target-host"], let targetPort = Int(options["--target-port"] ?? ""), ConnectionValidation.host(host), ConnectionValidation.host(target),
-          (1...65535).contains(port), (1...65535).contains(targetPort) else { throw fail("代理地址参数无效。") }
-    let fd = try connectTo(host, port); defer { close(fd) }
+    guard let target = options["--target-host"], let targetPort = Int(options["--target-port"] ?? ""), ConnectionValidation.host(target), (1...65535).contains(targetPort) else { throw fail("代理目标参数无效。") }
+    let fd: Int32, type: ProxyKind, user: String
+    var upstream: Process?
+    if let raw = options["--route-index"] {
+        let route = try routeSettings()
+        guard let index = Int(raw), route.indices.contains(index) else { throw fail("代理层级无效。") }
+        let hop = route[index]; activeProxyID = hop.id; type = hop.kind; user = hop.username
+        let helper = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        let known = options["--known-hosts"].map { URL(fileURLWithPath: $0) }
+        if type == .jump {
+            var profile = hop.credentialProfile
+            profile.encryptedPassword = nil; profile.keepAlive.tcp = options["--tcp-keepalive"] == "yes"
+            var args = try profile.sshArguments(knownHostsFile: known)
+            if let tty = args.firstIndex(of: "-tt") { args.remove(at: tty) }
+            args.removeLast(2)
+            args += ["-o", "PermitLocalCommand=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "RequestTTY=no"]
+            if hop.sshAuthentication == .password { args += ["-o", "PubkeyAuthentication=no", "-o", "PreferredAuthentications=password,keyboard-interactive"] }
+            if hop.sshAuthentication == .privateKey { args += ["-o", "IdentitiesOnly=yes", "-o", "PreferredAuthentications=publickey"] }
+            args += ["-o", "ProxyCommand=" + (index > 0 ? ProxyCatalog.helperCommand(helper: helper, index: index - 1, knownHosts: known, tcpKeepAlive: profile.keepAlive.tcp) : "none")]
+            args += ["-W", ConnectionValidation.bracket(target) + ":" + String(targetPort), "--", hop.host]
+            try execSSH(args, proxyID: hop.id)
+        }
+        if index == 0 { fd = try connectTo(hop.host, hop.port) }
+        else {
+            var pair: [Int32] = [-1, -1]
+            guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else { throw fail("无法创建代理链通道。") }
+            for descriptor in pair { _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC) }
+            let child = Process(), handle = FileHandle(fileDescriptor: pair[1], closeOnDealloc: true)
+            child.executableURL = helper; child.arguments = ["--route-index", String(index - 1), "--target-host", hop.host, "--target-port", String(hop.port), "--tcp-keepalive", options["--tcp-keepalive"] ?? "yes"]
+            if let known { child.arguments! += ["--known-hosts", known.path] }
+            child.standardInput = handle; child.standardOutput = handle; child.standardError = FileHandle.standardError
+            do { try child.run(); try? handle.oshellClose(); fd = pair[0]; upstream = child }
+            catch { close(pair[0]); try? handle.oshellClose(); throw error }
+            // Authentication in previous SSH hops may require human interaction.
+            var timeout = timeval(tv_sec: 300, tv_usec: 0)
+            _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+            _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        }
+    } else {
+        guard let kind = ProxyKind(rawValue: options["--type"] ?? ""), let host = options["--host"], let port = Int(options["--port"] ?? ""), ConnectionValidation.host(host), (1...65535).contains(port) else { throw fail("代理地址参数无效。") }
+        type = kind; user = options["--user"] ?? ""; fd = try connectTo(host, port)
+    }
+    defer {
+        close(fd)
+        if let upstream {
+            if upstream.isRunning { upstream.terminate() }
+            let deadline = Date().addingTimeInterval(2)
+            while upstream.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+            if upstream.isRunning { kill(upstream.processIdentifier, SIGKILL) }; upstream.waitUntilExit()
+        }
+    }
     var keepAlive: Int32 = options["--tcp-keepalive"] == "yes" ? 1 : 0
     _ = setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, socklen_t(MemoryLayout<Int32>.size))
-    try handshake(fd, type: type, host: target, port: targetPort, user: options["--user"] ?? "")
+    try handshake(fd, type: type, host: target, port: targetPort, user: user)
     try relay(fd)
 } catch {
     try? FileHandle.standardError.oshellWrite(contentsOf: Data(("OShell: " + error.localizedDescription + "\n").utf8)); exit(1)

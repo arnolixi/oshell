@@ -6,9 +6,13 @@ import UniformTypeIdentifiers
 import OShellCore
 
 enum SessionTransfer {
-    static func export(profiles: [SessionProfile], directories: [String], links: [SessionLink] = []) {
-        let currentProfiles = PasswordVault.shared.currentCredentials(in: Configuration(profiles: profiles)).profiles
-        let hasLocal = currentProfiles.contains { $0.encryptedPassword?.localKeyID != nil || $0.proxy.encryptedPassword?.localKeyID != nil }
+    static func export(profiles: [SessionProfile], directories: [String], links: [SessionLink] = [], proxies: [ProxyProfile] = []) {
+        var source = Configuration(profiles: profiles)
+        do { source.proxies = try ProxyCatalog.required(for: profiles, in: proxies) }
+        catch { Dialogs.message(error.localizedDescription); return }
+        let current = PasswordVault.shared.currentCredentials(in: source), currentProfiles = current.profiles
+        let credentials = ConfigurationCredentials.profiles(in: current)
+        let hasLocal = credentials.contains { $0.encryptedPassword?.localKeyID != nil }
         let options = PopupAlert(); options.messageText = "导出会话"
         options.informativeText = "导出 \(profiles.count) 个会话、\(links.count) 个快捷引用及目录结构。包含代理、隧道、保活等连接设置；不包含私钥文件、主机指纹或终端历史。"
         options.addButton(withTitle: "选择保存位置…"); options.addButton(withTitle: "取消")
@@ -16,10 +20,10 @@ enum SessionTransfer {
         passwords.frame = NSRect(x: 0, y: 0, width: 420, height: 26); passwords.state = .off; options.accessoryView = passwords
         guard options.runModal() == .alertFirstButtonReturn else { return }
         do {
-            var archive = SessionArchive(profiles: currentProfiles, directories: directories, includePasswords: passwords.state == .on, links: links)
+            var archive = SessionArchive(profiles: currentProfiles, directories: directories, includePasswords: passwords.state == .on, links: links, proxies: current.proxies)
             if passwords.state == .on && hasLocal {
                 guard let exportPassword = PasswordVault.promptMaster(title: "设置导出文件密码", creating: true),
-                      let keys = try PasswordVault.shared.credentialKeys(for: currentProfiles + currentProfiles.map { $0.proxy.credentialProfile }) else { return }
+                      let keys = try PasswordVault.shared.credentialKeys(for: credentials) else { return }
                 let source = archive
                 guard let result = CredentialTask.run(title: "加密导出密码…", work: { token in
                     try source.protectedForExport(password: exportPassword, credentialKey: { profile in
