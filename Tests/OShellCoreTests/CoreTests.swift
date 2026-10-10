@@ -396,7 +396,7 @@ final class CoreTests {
         XCTAssertTrue(KeyboardShortcut(122, 0).isValid)
         XCTAssertEqual(KeyboardShortcut(3, 13).display, "⌃⇧⌘F")
         XCTAssertEqual(Set(ShortcutKey.all.map(\.code)).count, ShortcutKey.all.count)
-        for action in [ShortcutAction.zoomPane, .nextPane, .previousPane, .quickSwitch] {
+        for action in [ShortcutAction.zoomPane, .nextPane, .previousPane, .quickSwitch, .focusFullscreen] {
             var upgraded = KeyboardShortcuts()
             let binding = action.defaults[0]
             upgraded.overrides[ShortcutAction.newBlank.rawValue] = .init(binding)

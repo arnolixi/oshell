@@ -78,7 +78,7 @@ extension WorkspaceController {
         }
         sessionLinkBar.update(entries, menu: sessionLinkMenu(folder: ""))
         refreshSessionLinkAddButton()
-        sessionLinkBar.isHidden = !links.visible; sessionLinkHeight?.constant = links.visible ? 30 : 0
+        sessionLinkBar.isHidden = isFocusFullscreen || !links.visible; sessionLinkHeight?.constant = links.visible ? 30 : 0
     }
     private func linkDetail(_ link: SessionLink) -> String {
         guard let profile = configuration.profiles.first(where: { $0.id == link.profileID }) else { return link.name }
@@ -129,6 +129,8 @@ extension WorkspaceController {
             item.state = customTabLayout == nil && arrangement == mode ? .on : .off
         }
         arrangementItem.submenu = arrangements
+        let fullscreen = menu.addItem(withTitle: isFocusFullscreen ? "退出专注全屏" : "专注全屏", action: #selector(toggleFocusFullscreen), keyEquivalent: "")
+        fullscreen.target = self
         if let tab, tab.layout.panes.count > 1 {
             menu.addItem(.separator())
             let zoom = menu.addItem(withTitle: tab.zoomedPane == nil ? "放大当前分屏" : "恢复分屏布局", action: #selector(togglePaneZoomFromTab(_:)), keyEquivalent: "")

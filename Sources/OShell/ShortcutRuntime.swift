@@ -44,6 +44,7 @@ extension ShortcutAction {
         case .findPrevious: return #selector(WorkspaceController.findPreviousInTerminal)
         case .splitVertical: return #selector(WorkspaceController.splitVertical)
         case .splitHorizontal: return #selector(WorkspaceController.splitHorizontal)
+        case .focusFullscreen: return #selector(WorkspaceController.toggleFocusFullscreen)
         case .zoomPane: return #selector(WorkspaceController.togglePaneZoom)
         case .nextPane: return #selector(WorkspaceController.nextPane)
         case .previousPane: return #selector(WorkspaceController.previousPane)

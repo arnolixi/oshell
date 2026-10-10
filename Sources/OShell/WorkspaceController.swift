@@ -25,6 +25,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     private var arrangingView: TabArrangementView?
     let idleMemoryReclaimer = IdleMemoryReclaimer()
     let terminalHost = TabDropHost()
+    var isFocusFullscreen = false
+    var focusFullscreenRequested = false
+    var fullscreenTransitionInProgress = false
+    var focusFullscreenWindowState: FocusFullscreenWindowState?
+    var normalWorkspaceTop: NSLayoutConstraint?, focusWorkspaceTop: NSLayoutConstraint?
+    weak var topToolbar: WorkspaceToolbar?
+    weak var topDivider: NSView?
     var customTabLayout: TabGroupNode?
     var activeTabGroupID: UUID?
     var groupStrips = [(TabGroupNode, TabStripView)]()
@@ -165,7 +172,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         tabGroupButton.toolTip = "新建、命名和显示/隐藏标签组；隐藏不会断开连接"
         let tools = NSPopUpButton(frame: .zero, pullsDown: true); tools.bezelStyle = .texturedRounded
         let toolsMenu = NSMenu(); toolsMenu.addItem(withTitle: "工具", action: nil, keyEquivalent: "")
-        for (title, action) in [("快捷链接栏", #selector(toggleSessionLinkBar)), ("快速发送栏", #selector(toggleQuickSendBar)), ("撰写窗", #selector(toggleComposer)), ("同步输入…", #selector(configureSyncInput)), ("停止同步输入", #selector(stopSyncInput)), ("快速命令管理器…", #selector(showQuickCommands)), ("文件管理…", #selector(showFiles)), ("突出显示集…", #selector(showHighlights))] {
+        for (title, action) in [("专注全屏", #selector(toggleFocusFullscreen)), ("快捷链接栏", #selector(toggleSessionLinkBar)), ("快速发送栏", #selector(toggleQuickSendBar)), ("撰写窗", #selector(toggleComposer)), ("同步输入…", #selector(configureSyncInput)), ("停止同步输入", #selector(stopSyncInput)), ("快速命令管理器…", #selector(showQuickCommands)), ("文件管理…", #selector(showFiles)), ("突出显示集…", #selector(showHighlights))] {
             toolsMenu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
         }
         tools.menu = toolsMenu
@@ -176,6 +183,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         let settings = iconButton("", "gearshape", #selector(showPreferences)); settings.toolTip = "设置"
         configurePropertyButtons()
         let toolbar = WorkspaceToolbar(views: [connect, quickButton, new, local, currentPropertiesButton, defaultPropertiesButton, tools, tabGroupButton, splitButton, arrangementButton, syncIndicator, stopSyncButton, NSView(), find, recordButton, settings])
+        topToolbar = toolbar
         toolbar.identifier = .init("workspace.toolbar")
         toolbar.compactButtons = [new, local, find, recordButton]
         for (button, label) in [(new, "新建会话"), (local, "本地终端"), (find, "搜索终端"), (recordButton, "记录终端日志")] {
@@ -191,11 +199,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         syncIndicator.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         stopSyncButton.widthAnchor.constraint(equalToConstant: 22).isActive = true
         stopSyncButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        let divider = NSBox(); divider.boxType = .separator
+        let divider = NSBox(); divider.boxType = .separator; topDivider = divider
         configureSessionLinkBar()
         sessionLinkHeight = sessionLinkBar.heightAnchor.constraint(equalToConstant: configuration.sessionLinks.visible ? 30 : 0)
         configureMasterWarning()
         [toolbar, masterWarning, sessionLinkBar, workspace, divider].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; content.addSubview($0) }
+        normalWorkspaceTop = workspace.topAnchor.constraint(equalTo: divider.bottomAnchor)
+        focusWorkspaceTop = workspace.topAnchor.constraint(equalTo: content.topAnchor)
         NSLayoutConstraint.activate([
             toolbar.topAnchor.constraint(equalTo: content.topAnchor), toolbar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: content.trailingAnchor), toolbar.heightAnchor.constraint(equalToConstant: 40),
@@ -205,7 +215,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
             sessionLinkBar.trailingAnchor.constraint(equalTo: content.trailingAnchor), sessionLinkHeight,
             divider.topAnchor.constraint(equalTo: sessionLinkBar.bottomAnchor), divider.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             divider.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            workspace.topAnchor.constraint(equalTo: divider.bottomAnchor), workspace.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            normalWorkspaceTop!, workspace.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             workspace.trailingAnchor.constraint(equalTo: content.trailingAnchor), workspace.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
     }
@@ -778,6 +788,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         } else { window?.title = tabs.isEmpty ? "OShell" : "\(tabs.count) 个标签 · \(panes.count) 个终端 · 当前无活动标签 — OShell"; recordButton.title = "记录"; recordButton.isEnabled = false }
     }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleFocusFullscreen) {
+            menuItem.title = focusFullscreenRequested || isFocusFullscreen ? "退出专注全屏" : "专注全屏"
+            menuItem.state = isFocusFullscreen ? .on : .off
+            return isSecurityUnlocked && window?.attachedSheet == nil && NSApp.modalWindow == nil
+        }
         if menuItem.action == #selector(togglePaneZoom) {
             menuItem.title = selectedTab?.zoomedPane == nil ? "放大当前分屏" : "恢复分屏布局"
             return isSecurityUnlocked && (selectedTab?.layout.panes.count ?? 0) > 1

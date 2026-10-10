@@ -32,7 +32,7 @@ public enum ShortcutAction: String, Codable, CaseIterable {
     case newWindow, settings, sessionManager, connectSelected, newSession, newBlank, local, currentProperties, liveProperties, defaults, importSessions, exportSessions
     case reconnect, closePane, closeTab, copy, paste, selectAll, find, findNext, findPrevious
     case splitVertical, splitHorizontal, logging, nextTab, previousTab, recentTab
-    case zoomPane, nextPane, previousPane, quickSwitch
+    case zoomPane, nextPane, previousPane, quickSwitch, focusFullscreen
     case tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tabNumber
     case newGroup, showGroups, arrangeTabs, arrangeHorizontal, arrangeVertical, arrangeTiled
     case links, quickSend, focusQuickSend, composer, syncInput, stopSync, files, quickCommands, highlights, appearance, hide, quit, minimize
@@ -62,6 +62,7 @@ public enum ShortcutAction: String, Codable, CaseIterable {
         case .findPrevious: return "上一个匹配"
         case .splitVertical: return "新建左右分屏"
         case .splitHorizontal: return "新建上下分屏"
+        case .focusFullscreen: return "专注全屏 / 退出"
         case .zoomPane: return "放大 / 恢复当前分屏"
         case .nextPane: return "下一个分屏"
         case .previousPane: return "上一个分屏"
@@ -115,6 +116,7 @@ public enum ShortcutAction: String, Codable, CaseIterable {
         case .findPrevious: return [.init(5,cmd|shift)]
         case .splitVertical: return [.init(2,cmd)]
         case .splitHorizontal: return [.init(2,cmd|shift)]
+        case .focusFullscreen: return [.init(3,cmd|ctrl)]
         case .zoomPane: return [.init(36,cmd|shift)]
         case .nextPane: return [.init(30,cmd|KeyboardShortcut.option)]
         case .previousPane: return [.init(33,cmd|KeyboardShortcut.option)]
@@ -144,7 +146,7 @@ public struct KeyboardShortcuts: Codable, Equatable {
         if let override = overrides[action.rawValue] { return override.shortcut.map { [$0] } ?? [] }
         // Newly introduced defaults must not invalidate existing customized
         // configurations when upgrading or silently take over their keys.
-        if [.zoomPane, .nextPane, .previousPane, .quickSwitch].contains(action) {
+        if [.zoomPane, .nextPane, .previousPane, .quickSwitch, .focusFullscreen].contains(action) {
             return action.defaults.filter { binding in !overrides.values.contains(where: { $0.shortcut == binding }) }
         }
         return action.defaults

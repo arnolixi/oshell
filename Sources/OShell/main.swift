@@ -88,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
         if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.complete(controller) }
         if CommandLine.arguments.contains("--command-input-test") { CommandInputTest.run(controller) }
+        if CommandLine.arguments.contains("--focus-fullscreen-test") { FocusFullscreenTest.run(controller) }
         if CommandLine.arguments.contains("--unicode-display-test") { UnicodeDisplayTest.run(controller) }
         if CommandLine.arguments.contains("--tunnel-ownership-test") { TunnelOwnershipTest.run(controller) }
         if CommandLine.arguments.contains("--terminal-clock-test") { TerminalClockTest.run(controller) }
@@ -232,6 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(edit, "下一个匹配", #selector(WorkspaceController.findNextInTerminal), "g")
         add(edit, "上一个匹配", #selector(WorkspaceController.findPreviousInTerminal), "g", [.command, .shift])
         let view = menu("视图")
+        add(view, "专注全屏", #selector(WorkspaceController.toggleFocusFullscreen), "f", [.command, .control])
         add(view, "新建标签组…", #selector(WorkspaceController.newNamedTabGroup))
         add(view, "显示全部标签组", #selector(WorkspaceController.showAllTabGroups))
         view.addItem(.separator())

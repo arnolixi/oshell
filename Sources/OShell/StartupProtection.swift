@@ -23,7 +23,7 @@ extension WorkspaceController {
         refreshMasterWarning()
     }
     func refreshMasterWarning() {
-        let hidden = configuration.hasMasterPassword || configuration.preferences.masterWarningAcknowledged
+        let hidden = isFocusFullscreen || configuration.hasMasterPassword || configuration.preferences.masterWarningAcknowledged
         masterWarning.isHidden = hidden
         masterWarningHeight?.constant = hidden ? 0 : 30
     }
