@@ -91,6 +91,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     }
     func completeStartupUnlock(_ allowed: Bool) {
         guard startupDecision == nil else { return }
+        if allowed && !loadFailed { BiometricUnlock.shared.invalidateIfChanged(configuration) }
         startupDecision = allowed; isSecurityUnlocked = allowed
         let callbacks = startupWaiters; startupWaiters.removeAll()
         callbacks.forEach { $0(allowed) }
@@ -109,7 +110,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         window.isReleasedWhenClosed = false; window.titlebarAppearsTransparent = true
         super.init(window: window)
         PasswordVault.shared.configureLocalStorage(directory: store.url.deletingLastPathComponent())
-        PasswordVault.shared.configureProtection(configuration)
+        // Do not discard a saved unlock record based on unreadable or
+        // unauthenticated startup data; reconcile after successful unlock.
+        PasswordVault.shared.configureProtection(configuration, reconcileBiometrics: false)
         if !loadFailed && !configuration.hasMasterPassword && !store.requiresMasterProtection { completeStartupUnlock(true) }
         window.delegate = self; window.center(); window.setFrameAutosaveName(CommandLine.arguments.contains("--memory-profile") ? "OShell.memory-profile" : "OShell.main")
         quickSendScope = configuration.preferences.quickSendScope
@@ -727,7 +730,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     @objc func showAppearancePreferences() { editPreferences(appearanceSelected: true) }
     func editPreferences(appearanceSelected: Bool, updatesSelected: Bool = false) {
         let storageView = StorageSettingsView(workspace: self)
-        guard let preferences = Dialogs.preferences(configuration.preferences, appearanceSelected: appearanceSelected, updatesSelected: updatesSelected, storageView: storageView) else { return }
+        let securityView = SecuritySettingsView(workspace: self)
+        guard let preferences = Dialogs.preferences(configuration.preferences, appearanceSelected: appearanceSelected, updatesSelected: updatesSelected, storageView: storageView, securityView: securityView) else { return }
         if appUpdater.isBusy && preferences.updateRepository != configuration.preferences.updateRepository { Dialogs.message("更新正在进行，请完成或取消后再修改更新仓库。"); return }
         var value = configuration; value.preferences = preferences
         guard saveConfiguration(value) else { return }
@@ -736,6 +740,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         ApplicationAppearance.apply(applied.interfaceTheme)
         tabs.flatMap { $0.layout.panes }.forEach { $0.apply(applied) }; refreshSelection()
         do { try storageView.applySelection() } catch { Dialogs.message("目录选择未保存：" + error.localizedDescription) }
+        do { try securityView.applySelection() } catch { Dialogs.message("Touch ID 设置未完成：" + error.localizedDescription) }
     }
     @objc func syncWebDAVNow() { windowCoordinator?.webDAV.sync(interactive: true) }
     @objc func reloadSharedConfiguration() { windowCoordinator?.reloadSharedConfiguration(interactive: true) }

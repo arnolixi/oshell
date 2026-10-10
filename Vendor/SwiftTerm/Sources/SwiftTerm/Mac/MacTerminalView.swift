@@ -325,7 +325,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     public var foregroundHighlightProvider: ((String) -> [(NSRange, NSColor)])? {
         didSet { terminal.updateFullScreen(); needsDisplay = true }
     }
-    private var scroller: NSScroller!
+    private var scroller: TerminalScroller!
     
     // Attribute dictionary, maps a console attribute (color, flags) to the corresponding dictionary
     // of attributes for an NSAttributedString
@@ -951,6 +951,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             if settingFg { return }
             settingFg = true
             _nativeFg = newValue
+            scroller?.applyColors(foreground: newValue, background: _nativeBg ?? .textBackgroundColor)
             terminal.foregroundColor = nativeForegroundColor.getTerminalColor ()
             settingFg = false
         }
@@ -967,6 +968,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             if settingBg { return }
             settingBg = true
             _nativeBg = newValue
+            scroller?.applyColors(foreground: _nativeFg ?? .textColor, background: newValue)
             terminal.backgroundColor = nativeBackgroundColor.getTerminalColor ()
             // Keep the layer background (which paints the margins) in sync,
             // including any translucency carried in the alpha channel; when
@@ -1092,10 +1094,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         case .incrementPage:
             pageDown()
             scroller.doubleValue =  scrollPosition
-        case .knob:
+        case .knob, .knobSlot:
             scroll(toPosition: scroller.doubleValue)
-        case .knobSlot:
-            print ("Scroller .knobSlot clicked")
         case .noPart:
             print ("Scroller .noPart clicked")
         case .decrementLine:
@@ -1111,23 +1111,24 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// Set to `.legacy` for an always-visible scrollbar.
     public var scrollerStyle: NSScroller.Style = .overlay {
         didSet {
-            scroller?.scrollerStyle = scrollerStyle
+            guard oldValue != scrollerStyle else { return }
+            scroller?.applyStyle(scrollerStyle)
             if let scroller {
-                let width = NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
-                scroller.constraints.first(where: { $0.firstAttribute == .width })?.constant = width
+                scroller.constraints.first(where: { $0.firstAttribute == .width })?.constant = scrollerWidth
+                if cellDimension != nil { _ = processSizeChange(newSize: frame.size) }
             }
         }
     }
 
     func getScrollerFrame() -> CGRect {
-        let width = reservedScrollerWidth
+        let width = scrollerWidth
         return NSRect(x: bounds.maxX - width, y: 0, width: width, height: bounds.height)
     }
 
     func setupScroller()
     {
         if scroller == nil {
-            scroller = NSScroller(frame: .zero)
+            scroller = TerminalScroller(frame: .zero)
             scroller.translatesAutoresizingMaskIntoConstraints = false
             addSubview(scroller)
 
@@ -1140,7 +1141,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
                 scroller.widthAnchor.constraint(equalToConstant: scrollerWidth)
             ])
         }
-        scroller.scrollerStyle = scrollerStyle
+        scroller.applyStyle(scrollerStyle)
+        scroller.applyColors(foreground: _nativeFg ?? .textColor, background: _nativeBg ?? .textBackgroundColor)
         scroller.knobProportion = 0.1
         scroller.isEnabled = false
         if let progressBarView {
@@ -1171,11 +1173,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
         
     private var scrollerWidth: CGFloat {
-        NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
+        scrollerStyle == .overlay ? TerminalScroller.overlayWidth : NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
     }
 
     private var reservedScrollerWidth: CGFloat {
-        scroller?.isHidden == true ? 0 : scrollerWidth
+        scrollerStyle == .overlay || scroller?.isHidden == true ? 0 : scrollerWidth
     }
 
     /**
@@ -1240,7 +1242,10 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         scroller.isEnabled = canScroll
         scroller.doubleValue = scrollPosition
         scroller.knobProportion = scrollThumbsize
+        if !canScroll { scroller.hideImmediately() }
     }
+
+    func revealScroller() { scroller?.scrollingActivity() }
     
     var userScrolling = false
 
@@ -3226,6 +3231,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
 
         let reportsMouse = allowMouseReporting && !shiftBypassesMouseReporting(for: event) && terminal.mouseMode != .off
+        if !reportsMouse && !terminal.isDisplayBufferAlternate { revealScroller() }
 
         // Alternate Scroll Mode (DECSET 1007): while the alternate screen is
         // active and the application is not tracking the mouse, the wheel is

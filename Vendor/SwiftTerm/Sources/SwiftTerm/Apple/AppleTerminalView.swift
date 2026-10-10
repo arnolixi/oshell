@@ -2774,6 +2774,9 @@ extension TerminalView {
             //selectionView.notifyScrolled(source: terminal)
             terminalDelegate?.scrolled (source: self, position: scrollPosition)
             updateScroller()
+#if os(macOS)
+            revealScroller()
+#endif
             setNeedsDisplay(frame)
         } else {
 #if os(iOS) || os(visionOS)

@@ -51,12 +51,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let harness = ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] != nil && (CommandLine.arguments.contains(where: { $0.hasSuffix("-test") || $0.hasPrefix("--memory-") }) || ProcessInfo.processInfo.environment.keys.contains { $0.hasSuffix("_TEST_ROOT") })
         let shared = !harness && ((try? StorageLocation().syncDirectory()) != nil || FileManager.default.fileExists(atPath: WebDAVSync.settingsURL.path))
+        BiometricUnlock.shared.configure(directory: directory)
         let store = ConfigurationStore(directory: directory, masterPassword: openingMaster, requiresMasterProtection: shared)
         if let data = try? SharedDataFile.readIfPresent(store.url), SharedVault.isEncrypted(data) {
             while true {
                 if let password = store.masterPassword, (try? store.load()).flatMap({ try? MasterPasswordProtection.verifyStartup($0, password: password) }) != nil { break }
                 NSApp.activate(ignoringOtherApps: true)
-                guard let password = PasswordVault.promptMaster(title: "解锁 OShell 加密数据", creating: false) else { NSApp.terminate(nil); return }
+                guard let password = PasswordVault.promptMaster(title: "解锁 OShell 加密数据", creating: false, allowBiometrics: true) else { NSApp.terminate(nil); return }
                 store.masterPassword = password
                 do { let config = try store.load(); try MasterPasswordProtection.verifyStartup(config, password: password); break }
                 catch { store.masterPassword = nil; Dialogs.message(error.localizedDescription) }
@@ -88,6 +89,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
         if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.complete(controller) }
         if CommandLine.arguments.contains("--command-input-test") { CommandInputTest.run(controller) }
+        if CommandLine.arguments.contains("--password-selection-test") { PasswordSelectionTest.run(controller) }
+        if CommandLine.arguments.contains("--biometric-unlock-test") { BiometricUnlockTest.run(controller) }
+        if CommandLine.arguments.contains("--terminal-scroller-test") { TerminalScrollerTest.run(controller) }
         if CommandLine.arguments.contains("--theme-audit-test") { ThemeAuditTest.run(controller) }
         if CommandLine.arguments.contains("--terminal-chrome-test") { TerminalChromePreview.run(controller) }
         if CommandLine.arguments.contains("--focus-fullscreen-test") { FocusFullscreenTest.run(controller) }

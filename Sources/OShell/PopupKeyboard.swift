@@ -147,11 +147,24 @@ enum PopupKeyboard {
             if let menu = note.object as? NSMenu { trackingMenus.remove(ObjectIdentifier(menu)) }
         })
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard isEscape(keyCode: event.keyCode, modifiers: event.modifierFlags),
-                  let window = event.window ?? NSApp.keyWindow, window === NSApp.keyWindow else { return event }
+            guard let window = event.window ?? NSApp.keyWindow, window === NSApp.keyWindow else { return event }
             if let recorder = ShortcutRecorder.active, recorder.window === window, recorder.isRecording { return event }
+            if selectAllPassword(with: event, in: window) { return nil }
+            guard isEscape(keyCode: event.keyCode, modifiers: event.modifierFlags) else { return event }
             return dismiss(window: window) ? nil : event
         }
+    }
+    /// Ctrl+A is a convenience alias only for active password editors. Keep
+    /// Emacs/readline Ctrl+A behavior in terminals and other text inputs.
+    @discardableResult static func selectAllPassword(with event: NSEvent, in window: NSWindow) -> Bool {
+        guard event.type == .keyDown, event.keyCode == 0,
+              event.modifierFlags.intersection([.command, .option, .control, .shift]) == .control,
+              trackingMenus.isEmpty,
+              let editor = window.firstResponder as? NSTextView, editor.isFieldEditor, !editor.hasMarkedText(),
+              let field = editor.delegate as? NSSecureTextField,
+              field.isEnabled, field.isEditable, field.currentEditor() === editor else { return false }
+        editor.selectAll(nil)
+        return true
     }
     static func register(window: NSWindow, cancellation: @escaping () -> Void) -> UUID {
         let token = UUID(); alerts[ObjectIdentifier(window)] = (token, cancellation); return token

@@ -8,7 +8,7 @@ enum Dialogs {
     static func session(_ existing: SessionProfile? = nil, profiles: [SessionProfile] = [], directories: [String] = [], initialDirectory: String = "服务器", kind: SessionKind = .ssh, defaults: SessionDefaults = SessionDefaults(), proxies: [ProxyProfile] = [], manageProxies: (() -> [ProxyProfile])? = nil) -> SessionProfile? {
         SessionEditor(existing, profiles: profiles, directories: directories, initialDirectory: initialDirectory, kind: kind, defaults: defaults, proxies: proxies, manageProxies: manageProxies).run()
     }
-    static func preferences(_ current: Preferences, appearanceSelected: Bool = false, updatesSelected: Bool = false, storageView: StorageSettingsView? = nil) -> Preferences? {
+    static func preferences(_ current: Preferences, appearanceSelected: Bool = false, updatesSelected: Bool = false, storageView: StorageSettingsView? = nil, securityView: SecuritySettingsView? = nil) -> Preferences? {
         let font = NSPopUpButton()
         TerminalFontCatalog.populate(font, selected: current.fontName)
         let size = NSPopUpButton(); [11, 12, 13, 14, 15, 16, 18, 20, 24, 26].forEach { size.addItem(withTitle: String($0)) }
@@ -46,6 +46,9 @@ enum Dialogs {
         }
         let textView = TerminalTextSettingsView(current)
         let textTab = NSTabViewItem(identifier: "text"); textTab.label = "文字"; textTab.view = textView; tabs.addTabViewItem(textTab)
+        if let securityView {
+            let security = NSTabViewItem(identifier: "security"); security.label = "安全"; security.view = securityView; tabs.addTabViewItem(security)
+        }
         let about = NSTabViewItem(identifier: "about"); about.label = "关于"; about.view = AboutSettingsView(preferences: current); tabs.addTabViewItem(about)
         tabs.selectTabViewItem(at: updatesSelected ? 2 : (appearanceSelected ? 1 : 0))
         let dialog = SettingsWindow(tabs: tabs, appearanceView: appearanceView)

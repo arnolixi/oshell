@@ -13,8 +13,9 @@ final class PasswordVault {
     func acceptSharedConfiguration(_ configuration: Configuration) {
         generation += 1; replacements.removeAll(); configureProtection(configuration)
     }
-    func configureProtection(_ configuration: Configuration) {
+    func configureProtection(_ configuration: Configuration, reconcileBiometrics: Bool = true) {
         masterProtectionEnabled = configuration.hasMasterPassword; verifier = configuration.masterPasswordVerifier
+        if reconcileBiometrics { BiometricUnlock.shared.invalidateIfChanged(configuration) }
     }
     func migrationKey(_ profile: SessionProfile, master: String) throws -> String {
         if let id = profile.encryptedPassword?.localKeyID {
@@ -26,7 +27,10 @@ final class PasswordVault {
     private var generation = 0
     private var replacements = [String: EncryptedPassword]()
     private var localStore: LocalCredentialStore?
-    func configureLocalStorage(directory: URL) { localStore = LocalCredentialStore(directory: directory) }
+    func configureLocalStorage(directory: URL) {
+        localStore = LocalCredentialStore(directory: directory)
+        BiometricUnlock.shared.configure(directory: directory)
+    }
     func localKeyForSaving(knownProfiles: [SessionProfile]) throws -> LocalCredentialKey {
         guard let localStore else { throw ModelError.invalid("OShell 本机密码存储尚未初始化。"); }
         return try localStore.keyForSaving(knownProfiles: knownProfiles)
@@ -99,16 +103,18 @@ final class PasswordVault {
         return configuration
     }
     func masterForImport(hasSavedPasswords: Bool) -> String? { requestMaster(creating: !hasSavedPasswords && !masterProtectionEnabled) }
-    static func promptMaster(title: String, creating: Bool) -> String? {
+    static func promptMaster(title: String, creating: Bool, allowBiometrics: Bool = false) -> String? {
         let vault = PasswordVault()
-        return vault.requestMaster(creating: creating, title: title)
+        return vault.requestMaster(creating: creating, title: title, allowBiometrics: allowBiometrics)
     }
-    private func requestMaster(creating: Bool, title: String? = nil) -> String? {
+    private func requestMaster(creating: Bool, title: String? = nil, allowBiometrics: Bool = true) -> String? {
         if let master { return master }
         let alert = PopupAlert(); alert.messageText = title ?? (creating ? "设置主密码" : "解锁会话密码")
         let archivePassword = title?.contains("导出文件") == true
-        alert.informativeText = archivePassword ? "此密码仅用于保护导出文件，不会成为 OShell 主密码；导入该文件时需要它。" : "密码密文保存在会话配置中。主密码不保存，迁移配置时也需要输入它。"
+        alert.informativeText = archivePassword ? "此密码仅用于保护导出文件，不会成为 OShell 主密码；导入该文件时需要它。" : "密码密文保存在会话配置中。可在设置 → 安全中启用本机 Touch ID 解锁；迁移到其他 Mac 时仍需要主密码。"
         alert.addButton(withTitle: "确定"); alert.addButton(withTitle: "取消")
+        let biometric = allowBiometrics && !creating && !archivePassword && BiometricUnlock.shared.enabled
+        if biometric { alert.addButton(withTitle: "使用 Touch ID").identifier = .init("master.touchID") }
         let field = NSSecureTextField(); field.placeholderString = archivePassword ? (creating ? "导出文件密码（至少 8 个字符）" : "导出文件密码或原主密码") : (creating ? "主密码（至少 8 个字符）" : "主密码")
         let confirm = NSSecureTextField(); confirm.placeholderString = archivePassword ? "再次输入导出文件密码" : "再次输入主密码"
         defer { field.stringValue = ""; confirm.stringValue = "" }
@@ -116,7 +122,13 @@ final class PasswordVault {
         stack.frame = NSRect(x: 0, y: 0, width: 330, height: creating ? 62 : 26)
         field.widthAnchor.constraint(equalToConstant: 330).isActive = true
         alert.accessoryView = stack; alert.window.initialFirstResponder = field
-        while alert.runModal() == .alertFirstButtonReturn {
+        while true {
+            let response = alert.runModal()
+            if response == .alertThirdButtonReturn && biometric {
+                if let value = BiometricUnlock.shared.requestPassword() { return value }
+                continue
+            }
+            guard response == .alertFirstButtonReturn else { break }
             let value = field.stringValue
             if creating && (value.count < 8 || value != confirm.stringValue) { Dialogs.message(archivePassword ? "导出文件密码至少 8 个字符，且两次输入应一致。" : "主密码至少 8 个字符，且两次输入应一致。"); continue }
             if value.isEmpty { continue }

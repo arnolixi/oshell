@@ -40,7 +40,7 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
         lastKind = profile.kind
         super.init()
         alert.messageText = existing == nil ? "新建会话" : "会话属性"
-        alert.informativeText = "配置在下次新建连接时生效。密码可由 OShell 本机自动加密，无需主密码；也可选择主密码保护。不使用系统钥匙串。"
+        alert.informativeText = "配置在下次新建连接时生效。密码可由 OShell 本机自动加密，无需主密码；也可选择主密码保护。会话密码仍保存在 OShell 配置中；主密码可另行启用 Touch ID 解锁。"
         alert.addButton(withTitle: "保存"); alert.addButton(withTitle: "取消")
         name.stringValue = profile.name; directory.configure(directories: directories, selected: profile.group)
         name.identifier = .init("session.name"); host.identifier = .init("session.host"); port.identifier = .init("session.port")
