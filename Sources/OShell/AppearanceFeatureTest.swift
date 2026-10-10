@@ -59,8 +59,24 @@ enum AppearanceFeatureTest {
         controller.newLocal(); controller.newLocal()
         let panes = controller.tabs.flatMap { $0.layout.panes }, pids = panes.map { $0.terminal.process.shellPid }
         let previousRevision = controller.configurationRevision
+        let savedAppTheme = ApplicationAppearance.theme
+        let savedWorkspaceAppearance = controller.window?.effectiveAppearance.name
         modal { root in
             let view = descendants(root).compactMap { $0 as? AppearanceSettingsView }.first!
+            let palette = view.preview.nativeBackgroundColor
+            let systemAppearance: NSAppearance.Name
+            if #available(macOS 10.14, *) { systemAppearance = NSApp.effectiveAppearance.name }
+            else { systemAppearance = .aqua }
+            for (index, theme) in [InterfaceTheme.dark, .light, .dark, .light, .system].enumerated() {
+                view.theme.selectItem(at: InterfaceTheme.allCases.firstIndex(of: theme)!)
+                view.themeChanged()
+                let expected = theme == .dark ? NSAppearance.Name.oshellDark : (theme == .light ? .aqua : systemAppearance)
+                checks["previewTheme\(index)WholeWindow"] = root.window?.effectiveAppearance.name == expected && view.effectiveAppearance.name == expected
+                checks["previewTheme\(index)ControlsInheritWindow"] = descendants(root).filter { $0 is NSControl || $0 is NSTabView }.allSatisfy { $0.effectiveAppearance.name == expected }
+                checks["previewTheme\(index)NoPageOverride"] = view.appearance == nil
+                checks["previewTheme\(index)PaletteIndependent"] = view.preview.nativeBackgroundColor == palette
+                checks["previewTheme\(index)MainWindowUnchanged"] = ApplicationAppearance.theme == savedAppTheme && controller.window?.effectiveAppearance.name == savedWorkspaceAppearance
+            }
             view.schemes.selectItem(at: 2); view.schemeChanged()
             view.theme.selectItem(at: 2); view.themeChanged()
             checks["modalPreviewDoesNotApplyEarly"] = ApplicationAppearance.theme != .dark
@@ -68,6 +84,7 @@ enum AppearanceFeatureTest {
         }
         controller.showAppearancePreferences()
         checks["cancelDoesNotSave"] = controller.configurationRevision == previousRevision
+        checks["cancelPreservesApplicationTheme"] = ApplicationAppearance.theme == savedAppTheme && controller.window?.effectiveAppearance.name == savedWorkspaceAppearance
         modal { root in
             let view = descendants(root).compactMap { $0 as? AppearanceSettingsView }.first!
             let settingsTabs = descendants(root).compactMap { $0 as? NSTabView }.first
@@ -97,6 +114,17 @@ enum AppearanceFeatureTest {
         checks["appliesAllOpenTerminals"] = panes.allSatisfy { $0.terminal.nativeBackgroundColor.rgbHex == "#2E3440" }
         checks["doesNotRecreateConnections"] = panes.map { $0.terminal.process.shellPid } == pids
         checks["appThemeApplied"] = ApplicationAppearance.theme == .dark && controller.window?.appearance?.name == .oshellDark
+        modal { root in
+            let view = descendants(root).compactMap { $0 as? AppearanceSettingsView }.first!
+            view.theme.selectItem(at: InterfaceTheme.allCases.firstIndex(of: .system)!); view.themeChanged()
+            let dark = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
+            checks["systemPreviewIgnoresSavedDarkOverride"] = root.window?.effectiveAppearance.name == (dark ? .oshellDark : .aqua)
+            checks["systemPreviewDoesNotApplyEarly"] = ApplicationAppearance.theme == .dark && controller.window?.appearance?.name == .oshellDark
+            if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) }
+        }
+        controller.showAppearancePreferences()
+        checks["cancelSystemPreviewKeepsDarkSetting"] = controller.configuration.preferences.interfaceTheme == .dark
+
         if let additionalSystemFont {
             modal { root in
                 let tabs = descendants(root).compactMap { $0 as? NSTabView }.first

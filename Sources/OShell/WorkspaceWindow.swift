@@ -19,14 +19,18 @@ final class WorkspaceWindow: NSWindow {
             if let editor = firstResponder as? NSTextView, editor.hasMarkedText() { return false }
             pane.searchPanel.hide(); return true
         }
-        if event.keyCode == 53, flags.isEmpty, workspace.isFocusFullscreen || workspace.focusFullscreenRequested {
-            workspace.requestFocusFullscreen(false); return true
-        }
         let shortcut = KeyboardShortcut(event: event)
         guard workspace.isSecurityUnlocked, shortcut.isValid,
               let action = workspace.configuration.preferences.keyboardShortcuts.action(for: shortcut) else { return false }
         if action == .focusFullscreen && event.isARepeat { return true }
         return workspace.dispatchShortcut(action)
+    }
+    override func cancelOperation(_ sender: Any?) {
+        // Text controls can forward Esc along the responder chain. Do not let
+        // NSWindow's native fullscreen cancellation exit focus mode either.
+        if let workspace = windowController as? WorkspaceController,
+           workspace.isFocusFullscreen || workspace.focusFullscreenRequested { return }
+        super.cancelOperation(sender)
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         navigate(event) || super.performKeyEquivalent(with: event)

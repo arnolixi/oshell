@@ -13,7 +13,7 @@ enum ApplicationAppearance {
     static func apply(_ value: InterfaceTheme) {
         theme = value
         if #available(macOS 10.14, *) { NSApp.appearance = appearance }
-        NSApp.windows.forEach { $0.appearance = appearance }
+        NSApp.windows.filter { $0.parent == nil }.forEach { PopupPresentation.applyAppearance(appearance, to: $0) }
     }
 }
 
@@ -45,6 +45,8 @@ final class AppearanceSettingsView: NSView {
     private var headings = [NSTextField]()
     var allSchemes: [TerminalColorScheme] { TerminalColorScheme.presets + custom }
     var selected: TerminalColorScheme { allSchemes.first { $0.id == selectedID } ?? TerminalColorScheme.presets[0] }
+    var onThemeChanged: (() -> Void)?
+    var selectedTheme: InterfaceTheme { InterfaceTheme.allCases[theme.indexOfSelectedItem] }
     private var loading = false
     init(preferences: Preferences) {
         custom = preferences.customColorSchemes; selectedID = preferences.colorScheme.id
@@ -81,7 +83,7 @@ final class AppearanceSettingsView: NSView {
         preview.toolTip = "预览基础颜色及 ANSI 色板。远端程序的真彩色与突出显示集使用各自指定的颜色。"
         // Preview uses the actual ANSI renderer, without process creation.
         [theme, schemes, name, copyButton, deleteButton, importButton, exportButton, note, preview].forEach(addSubview)
-        reload(); themeChanged()
+        reload()
         preview.feed(text: "oshell@server:~$ ls -lah\r\n\u{1b}[32mSUCCESS\u{1b}[0m 已连接 · Unicode 中文 / UTF-8\r\n\u{1b}[33mWARNING\u{1b}[0m 配色预览，不会执行命令\r\n\u{1b}[31mERROR\u{1b}[0m connection refused\r\n")
         for bold in [false, true] {
             for index in 0..<8 { preview.feed(text: "\u{1b}[\(bold ? 90 + index : 30 + index)m■ ANSI \(index) \u{1b}[0m") }
@@ -107,8 +109,9 @@ final class AppearanceSettingsView: NSView {
         note.stringValue = value.background.lowercased() == value.foreground.lowercased() ? "文字与背景颜色相同，请调整以便阅读。" : "修改预设颜色会自动创建自定义副本；应用后更新全部终端，取消则不保存。"
     }
     @objc func themeChanged() {
-        let value = InterfaceTheme.allCases[theme.indexOfSelectedItem]
-        appearance = value == .system ? nil : NSAppearance(named: value == .dark ? .oshellDark : .aqua)
+        // The settings window owns the preview. A view-only override changes
+        // label colors without changing the enclosing tab/window background.
+        onThemeChanged?()
     }
     @objc func schemeChanged() {
         stashName(); let index = schemes.indexOfSelectedItem

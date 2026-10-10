@@ -6,7 +6,7 @@ import OShellCore
 
 /// A bounded tab strip. The document owns its width instead of relying on the
 /// intrinsic size of a stack view inside an unconstrained clip view.
-final class TabStripView: NSView {
+final class TabStripView: InterfaceSurfaceView {
     static let barHeight: CGFloat = 30
     private final class Scroll: NSScrollView {
         override func scrollWheel(with event: NSEvent) {
@@ -46,7 +46,7 @@ final class TabStripView: NSView {
                 let pasteboard = NSPasteboardItem(); pasteboard.setString(id.uuidString, forType: TabDropHost.pasteboardType)
                 let item = NSDraggingItem(pasteboardWriter: pasteboard)
                 let image = NSImage(size: bounds.size); image.lockFocus()
-                NSColor.windowBackgroundColor.setFill(); NSBezierPath(roundedRect: NSRect(origin: .zero, size: bounds.size), xRadius: 6, yRadius: 6).fill()
+                NSColor.windowBackgroundColor.setFill(); NSBezierPath(roundedRect: NSRect(origin: .zero, size: bounds.size), xRadius: 4, yRadius: 4).fill()
                 (selectButton.title as NSString).draw(at: NSPoint(x: 10, y: 6), withAttributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor]); image.unlockFocus()
                 item.setDraggingFrame(bounds, contents: image)
                 beginDraggingSession(with: [item], event: next, source: self); return true
@@ -80,11 +80,11 @@ final class TabStripView: NSView {
             closeButton.frame = NSRect(x: bounds.width - 26, y: 0, width: 22, height: bounds.height)
         }
         override func draw(_ dirtyRect: NSRect) {
-            (selected ? NSColor.oshellAccentColor.withAlphaComponent(0.18) : NSColor.quaternaryLabelColor.withAlphaComponent(0.08)).setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6).fill()
+            NSColor.labelColor.withAlphaComponent(selected ? 0.075 : 0.02).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4).fill()
             if selected {
-                NSColor.oshellAccentColor.setFill()
-                NSBezierPath(roundedRect: NSRect(x: 8, y: 0, width: max(0, bounds.width - 16), height: 2), xRadius: 1, yRadius: 1).fill()
+                TerminalChrome.flame.setFill()
+                NSBezierPath(roundedRect: NSRect(x: 18, y: 0, width: min(32, max(0, bounds.width - 36)), height: 2), xRadius: 1, yRadius: 1).fill()
             }
             if hasUnreadOutput {
                 NSColor.systemOrange.setFill()
@@ -176,8 +176,8 @@ final class TabStripView: NSView {
             let title = entry.number.map { "\($0)  \(entry.title)" } ?? entry.title
             item.selectButton.title = title; item.hasUnreadOutput = entry.hasUnreadOutput
             item.selectButton.oshellContentTintColor = entry.hasUnreadOutput ? .systemOrange : .labelColor
-            item.selectButton.font = .systemFont(ofSize: 12, weight: entry.hasUnreadOutput ? .bold : .medium)
             item.selected = entry.id == selectedID
+            item.selectButton.font = .systemFont(ofSize: 12, weight: item.selected || entry.hasUnreadOutput ? .semibold : .regular)
             item.selectButton.setAccessibilityLabel("标签 \(number)：\(entry.title)")
             item.selectButton.setAccessibilityValue((item.selected ? "已选中" : "未选中") + (entry.hasUnreadOutput ? "，有未读输出" : ""))
             item.toolTip = "\(number). \(entry.title)\n" + (entry.hasUnreadOutput ? "有新输出，切换查看后清除提示\n" : "") + entry.detail

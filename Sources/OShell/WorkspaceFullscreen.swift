@@ -56,7 +56,7 @@ extension WorkspaceController {
     func windowDidEnterFullScreen(_ notification: Notification) {
         fullscreenTransitionInProgress = false
         // AppKit still owns the animation transaction inside this callback.
-        // Defer a queued Esc request until it can accept the opposite transition.
+        // Defer a queued toggle request until it can accept the opposite transition.
         if isFocusFullscreen { DispatchQueue.main.async { [weak self] in self?.reconcileFocusFullscreen() } }
     }
     func windowWillExitFullScreen(_ notification: Notification) {

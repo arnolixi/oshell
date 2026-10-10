@@ -126,7 +126,7 @@ final class TabDropHost: NSView {
 }
 
 /// Native splitters with per-subtree minimum sizes and persistent divider ratios.
-final class TabGroupSplit: NSSplitView, NSSplitViewDelegate {
+final class TabGroupSplit: TerminalSplitView, NSSplitViewDelegate {
     override var isFlipped: Bool { true }
     let node: TabGroupNode
     let minimums: [NSSize]

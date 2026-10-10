@@ -48,7 +48,7 @@ enum Dialogs {
         let textTab = NSTabViewItem(identifier: "text"); textTab.label = "文字"; textTab.view = textView; tabs.addTabViewItem(textTab)
         let about = NSTabViewItem(identifier: "about"); about.label = "关于"; about.view = AboutSettingsView(preferences: current); tabs.addTabViewItem(about)
         tabs.selectTabViewItem(at: updatesSelected ? 2 : (appearanceSelected ? 1 : 0))
-        let dialog = SettingsWindow(tabs: tabs)
+        let dialog = SettingsWindow(tabs: tabs, appearanceView: appearanceView)
         var prefs = current
         while true {
             guard dialog.runModal() == .OK else { return nil }

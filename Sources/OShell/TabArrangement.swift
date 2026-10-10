@@ -26,7 +26,7 @@ enum TabArrangement: Int, CaseIterable {
 /// Keeps each terminal usable when many groups are arranged in a small window.
 /// Native splitters remain draggable; overflow is reachable by scrolling.
 final class TabArrangementView: NSScrollView {
-    private final class Split: NSSplitView, NSSplitViewDelegate {
+    private final class Split: TerminalSplitView, NSSplitViewDelegate {
         var minimums = [NSSize]()
         override init(frame: NSRect) { super.init(frame: frame); delegate = self }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

@@ -20,8 +20,19 @@ enum PopupPresentation {
         while let current = parent { if current === window { return true }; parent = current.parent }
         return false
     }
+    /// Keep native controls and custom drawing in the same appearance domain,
+    /// including an already-open color panel during a settings preview.
+    static func applyAppearance(_ appearance: NSAppearance?, to window: NSWindow) {
+        window.appearance = appearance
+        func redraw(_ view: NSView) {
+            view.needsDisplay = true
+            view.subviews.forEach(redraw)
+        }
+        if let content = window.contentView { redraw(content) }
+        for child in window.childWindows ?? [] { applyAppearance(appearance, to: child) }
+    }
     static func prepare(_ window: NSWindow, over owner: NSWindow?) {
-        window.appearance = ApplicationAppearance.appearance
+        applyAppearance(owner?.appearance ?? ApplicationAppearance.appearance, to: window)
         window.collectionBehavior.subtract([.fullScreenPrimary, .fullScreenNone, .canJoinAllSpaces])
         window.collectionBehavior.formUnion([.fullScreenAuxiliary, .moveToActiveSpace])
         guard let owner, owner !== window, !isDescendant(owner, of: window) else { return }

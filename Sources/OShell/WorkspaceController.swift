@@ -69,7 +69,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     var highlightManager: HighlightManager?
     var fileWindows = [RemoteFileWindow]()
     var commandMenu: NSMenu? { didSet { rebuildCommandMenu() } }
-    private let welcome = NSView()
+    private let welcome = InterfaceSurfaceView()
     private let recordButton = NSButton()
     private(set) var tabs = [TerminalTab]()
     private var tabHistory = [UUID]()
@@ -260,8 +260,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         NSLayoutConstraint.activate([
             tabStrip.topAnchor.constraint(equalTo: workspace.topAnchor), tabStrip.leadingAnchor.constraint(equalTo: workspace.leadingAnchor),
             tabStrip.trailingAnchor.constraint(equalTo: workspace.trailingAnchor), tabStripHeight,
-            terminalHost.topAnchor.constraint(equalTo: tabStrip.bottomAnchor, constant: 2), terminalHost.leadingAnchor.constraint(equalTo: workspace.leadingAnchor, constant: 4),
-            terminalHost.trailingAnchor.constraint(equalTo: workspace.trailingAnchor, constant: -4), terminalHost.bottomAnchor.constraint(equalTo: composerHost.topAnchor, constant: -2),
+            terminalHost.topAnchor.constraint(equalTo: tabStrip.bottomAnchor), terminalHost.leadingAnchor.constraint(equalTo: workspace.leadingAnchor),
+            terminalHost.trailingAnchor.constraint(equalTo: workspace.trailingAnchor), terminalHost.bottomAnchor.constraint(equalTo: composerHost.topAnchor),
             composerHost.leadingAnchor.constraint(equalTo: workspace.leadingAnchor), composerHost.trailingAnchor.constraint(equalTo: workspace.trailingAnchor), composerHost.bottomAnchor.constraint(equalTo: quickSendBar.topAnchor), composerHeight,
             quickSendBar.leadingAnchor.constraint(equalTo: workspace.leadingAnchor), quickSendBar.trailingAnchor.constraint(equalTo: workspace.trailingAnchor), quickSendBar.bottomAnchor.constraint(equalTo: workspace.bottomAnchor), quickSendHeight
         ])
@@ -555,11 +555,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     private func refreshSelection() {
         refreshSessionLinkAddButton(); refreshToolbarActions()
         if isObservingSelectedTab { selectedTab?.markOutputRead() }
+        let visibleCount = visibleTerminalTabs.reduce(0) { $0 + ($1.zoomedPane == nil ? $1.layout.panes.count : 1) }
         for tab in tabs {
             let panes = tab.layout.panes
             for pane in panes {
                 pane.closeButton.isHidden = panes.count < 2
-                pane.setSelected(tab === selectedTab && pane === tab.activePane)
+                pane.setSelected(tab === selectedTab && pane === tab.activePane, showFocusIndicator: visibleCount > 1)
             }
         }
         refreshTabTitles(); refreshStatus()
@@ -579,6 +580,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
             let view = TabArrangementView(tabs: tabs, mode: arrangement)
             arrangingView = view; install(view); view.equalize()
         } else { showWelcome() }
+        refreshTerminalChrome()
         terminalHost.layoutSubtreeIfNeeded()
         tabs.forEach { $0.restoreDividerPositionsIfNeeded() }
         let visible = visibleTerminalTabs
@@ -681,7 +683,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         if tab.restoreZoom() { rebuildWorkspace() }
         let original = tab.activePane
         guard let pane = replica(of: original) else { return }
-        let splitter = NSSplitView(); splitter.isVertical = vertical; splitter.dividerStyle = .thin
+        let splitter = TerminalSplitView(); splitter.isVertical = vertical; splitter.dividerStyle = .thin
         let frame = original.view.frame
         original.view.removeFromSuperview()
         splitter.frame = frame; splitter.addArrangedSubview(original.view); splitter.addArrangedSubview(pane.view)
@@ -855,6 +857,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
         let preferencesChanged = (try? encoder.encode(configuration.preferences)) != (try? encoder.encode(value.preferences))
         configuration = value; configurationRevision += 1
+        refreshTerminalChrome()
         refreshMasterWarning(); rebuildQuickLinks(); rebuildCommandMenu(); applyHighlightConfiguration()
         sessionManager?.reload(); commandManager?.reload(); highlightManager?.reload()
         if preferencesChanged {

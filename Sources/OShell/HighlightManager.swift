@@ -25,6 +25,33 @@ extension WorkspaceController {
         inputPanes.forEach { $0.applyHighlights(set) }
     }
 }
+/// Arbitrary terminal colors must not become unreadable UI text (white on
+/// light tables, black on dark tables). Keep the exact color in a bordered chip.
+final class HighlightColorCell: NSTableCellView {
+    private final class Swatch: NSView {
+        var color = NSColor.clear
+        override func draw(_ dirtyRect: NSRect) {
+            let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 2, yRadius: 2)
+            color.setFill(); shape.fill()
+            NSColor.secondaryLabelColor.setStroke(); shape.lineWidth = 1; shape.stroke()
+        }
+    }
+    private let swatch = Swatch()
+    init(hex: String) {
+        super.init(frame: .zero)
+        let label = NSTextField(labelWithString: hex); label.lineBreakMode = .byTruncatingTail
+        textField = label; swatch.color = NSColor(hex: hex) ?? .clear
+        addSubview(swatch); addSubview(label); toolTip = hex
+        setAccessibilityLabel("规则颜色 " + hex)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layout() {
+        super.layout()
+        swatch.frame = NSRect(x: 0, y: floor((bounds.height - 12) / 2), width: 12, height: 12)
+        textField?.frame = NSRect(x: 18, y: floor((bounds.height - 18) / 2), width: max(0, bounds.width - 18), height: 18)
+    }
+}
+
 final class HighlightManager: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     override func showWindow(_ sender: Any?) {
         if let popup = window as? PopupWindow, let owner = workspace?.window { popup.present(over: owner) }
@@ -88,7 +115,8 @@ final class HighlightManager: NSWindowController, NSTableViewDataSource, NSTable
         let text: String
         switch tableColumn?.identifier.rawValue { case "enabled": text = rule.enabled ? "✓" : "—"; case "pattern": text = rule.pattern; case "type": text = rule.regex ? "正则" : "关键字"; default: text = rule.color }
         let label = NSTextField(labelWithString: text); label.lineBreakMode = .byTruncatingTail
-        if tableColumn?.identifier.rawValue == "color" { label.textColor = NSColor(hex: rule.color) }; return label
+        if tableColumn?.identifier.rawValue == "color" { return HighlightColorCell(hex: rule.color) }
+        return label
     }
     @objc private func addRule() { edit(nil) }
     @objc private func editRule() { if let current, current.rules.indices.contains(table.selectedRow) { edit(current.rules[table.selectedRow]) } }

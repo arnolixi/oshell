@@ -128,6 +128,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     let view = NSView()
     private let header = NSTextField(labelWithString: "")
     let closeButton = PaneCloseButton()
+    let focusStripe = TerminalFocusStripe()
     let transferProgress = ZmodemProgressView()
     let clockView = TerminalClockView()
     let searchPanel = TerminalSearchPanel()
@@ -333,7 +334,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         sshConnectionGroup?.attach(id)
         terminal.owner = self; terminal.processDelegate = self
         terminal.registerForDraggedTypes([.fileURL])
-        view.wantsLayer = true; view.layer?.cornerRadius = 7; view.layer?.masksToBounds = true
+        view.wantsLayer = true; view.layer?.cornerRadius = 0; view.layer?.masksToBounds = true
         header.font = .systemFont(ofSize: 11, weight: .medium); header.textColor = .secondaryLabelColor
         header.lineBreakMode = .byTruncatingMiddle
         header.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -373,6 +374,11 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
             terminal.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
             terminal.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4)
         ])
+        focusStripe.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(focusStripe)
+        NSLayoutConstraint.activate([
+            focusStripe.topAnchor.constraint(equalTo: view.topAnchor), focusStripe.heightAnchor.constraint(equalToConstant: 2),
+            focusStripe.leadingAnchor.constraint(equalTo: view.leadingAnchor), focusStripe.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        ])
         clockView.constrain(to: terminal)
         let progressWidth = transferProgress.widthAnchor.constraint(equalToConstant: 360)
         progressWidth.priority = .defaultHigh; progressWidth.isActive = true
@@ -408,9 +414,10 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         if !prefs.fontName.isEmpty, let font = NSFont(name: prefs.fontName, size: prefs.fontSize) { return font }
         return .oshellMonospacedSystemFont(ofSize: prefs.fontSize, weight: .regular)
     }
-    func setSelected(_ value: Bool) {
-        view.layer?.borderWidth = value ? 1.5 : 0
-        view.layer?.borderColor = NSColor.oshellAccentColor.cgColor
+    func setSelected(_ value: Bool, showFocusIndicator: Bool = true) {
+        view.layer?.borderWidth = 0
+        view.layer?.borderColor = nil
+        focusStripe.isHidden = !value || !showFocusIndicator
     }
     @objc private func focusHeader() { activate() }
     @objc private func closeAction() { if !isShutdown { onCloseRequested?(self) } }

@@ -67,8 +67,23 @@ final class FocusFullscreenTest {
                 pane.activate(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
                 let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
                 let consumed = window.performKeyEquivalent(with: event)
-                checks["escapeRequestsFullscreenExit"] = consumed && !workspace.focusFullscreenRequested
-                if !consumed { workspace.requestFocusFullscreen(false) }
+                checks["escapeIsNotFullscreenShortcut"] = !consumed && workspace.focusFullscreenRequested
+                var input = [UInt8]()
+                let previousInput = pane.onUserInput
+                pane.onUserInput = { _, bytes in input += bytes; return true }
+                window.sendEvent(event)
+                pane.onUserInput = previousInput
+                checks["terminalReceivesEscape"] = input == [27]
+                pane.searchPanel.show(prefillSelection: false, performSearch: false)
+                checks["escapeStillClosesSearch"] = window.performKeyEquivalent(with: event) && pane.searchPanel.isHidden && workspace.focusFullscreenRequested
+                workspace.quickSendBar.fill(.init(text: "keep this draft", appendReturn: true))
+                window.sendEvent(event)
+                window.cancelOperation(nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in
+                checks["escapeInInputKeepsNativeFocusFullscreen"] = workspace.focusFullscreenRequested && workspace.isFocusFullscreen && window.styleMask.contains(.fullScreen) && !workspace.fullscreenTransitionInProgress
+                checks["escapeKeepsQuickSendDraft"] = workspace.quickSendBar.field.stringValue == "keep this draft"
+                let toggle = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.control, .command], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, characters: "f", charactersIgnoringModifiers: "f", isARepeat: false, keyCode: 3)!
+                checks["shortcutStillExitsFocusFullscreen"] = window.performKeyEquivalent(with: toggle) && !workspace.focusFullscreenRequested
                 wait("returnedToWindowedMode", { !self.window.styleMask.contains(.fullScreen) && !self.workspace.fullscreenTransitionInProgress && !self.workspace.isFocusFullscreen }) { [self] in
                     checks["exitRestoresChromeAndPreferences"] = workspace.topToolbar?.isHidden == false && workspace.configuration.sessionLinks.visible == initialLinks && workspace.sessionLinkBar.isHidden == !initialLinks
                     checks["allOriginalProcessesSurviveFullscreen"] = workspace.inputPanes.filter { paneIDs.contains($0.id) }.map { $0.terminal.process.shellPid } == pids && workspace.inputPanes.filter { paneIDs.contains($0.id) }.allSatisfy { $0.terminal.process.running }
@@ -76,6 +91,7 @@ final class FocusFullscreenTest {
                     // Exercise an exit request while entry animation is pending.
                     workspace.requestFocusFullscreen(true); workspace.requestFocusFullscreen(false)
                     wait("rapidEntryCancelRestoresWindow", { !self.workspace.isFocusFullscreen && !self.workspace.fullscreenTransitionInProgress && !self.window.styleMask.contains(.fullScreen) }) { [self] in finish() }
+                }
                 }
             }
         }

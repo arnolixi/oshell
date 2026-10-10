@@ -4,7 +4,7 @@
 import AppKit
 import OShellCore
 
-private final class EmptyTabGroupView: NSView {
+private final class EmptyTabGroupView: InterfaceSurfaceView {
     var onSelect: (() -> Void)?
     override func mouseDown(with event: NSEvent) { onSelect?() }
 }
@@ -228,7 +228,7 @@ extension WorkspaceController {
         return view
     }
     func hiddenTabGroupsView() -> NSView {
-        let view = NSView(), label = NSTextField(labelWithString: "所有标签组已隐藏，连接继续在后台运行")
+        let view = InterfaceSurfaceView(), label = NSTextField(labelWithString: "所有标签组已隐藏，连接继续在后台运行")
         label.textColor = .secondaryLabelColor
         let show = NSButton(title: "显示全部标签组", target: self, action: #selector(showAllTabGroups)); show.bezelStyle = .rounded
         let stack = NSStackView(views: [label, show]); stack.orientation = .vertical; stack.spacing = 16; stack.translatesAutoresizingMaskIntoConstraints = false

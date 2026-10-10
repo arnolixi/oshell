@@ -2,11 +2,14 @@
 // Copyright (c) 2026 OShell contributors
 
 import AppKit
+import OShellCore
 
 /// A preferences editor has its own compact window chrome, not an alert's icon/header.
 final class SettingsWindow: NSObject, NSWindowDelegate {
     let window: PopupWindow
-    init(tabs: NSTabView) {
+    private let appearanceView: AppearanceSettingsView
+    init(tabs: NSTabView, appearanceView: AppearanceSettingsView) {
+        self.appearanceView = appearanceView
         window = PopupWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 632), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init()
         window.title = "OShell 设置"; window.isReleasedWhenClosed = false; window.delegate = self
@@ -25,6 +28,23 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             button.bezelStyle = .rounded; button.frame = NSRect(x: x, y: 12, width: 92, height: 32); root.addSubview(button)
         }
         window.defaultButtonCell = apply.cell as? NSButtonCell
+        appearanceView.onThemeChanged = { [weak self] in self?.previewTheme() }
+    }
+    private func previewTheme() {
+        let appearance: NSAppearance?
+        switch appearanceView.selectedTheme {
+        case .light: appearance = NSAppearance(named: .aqua)
+        case .dark: appearance = NSAppearance(named: .oshellDark)
+        case .system:
+            // nil would inherit NSApp's saved theme, which may be forced dark
+            // or light. Preview the system preference without mutating NSApp.
+            if ApplicationAppearance.theme == .system { appearance = nil }
+            else {
+                let dark = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
+                appearance = NSAppearance(named: dark ? .oshellDark : .aqua)
+            }
+        }
+        PopupPresentation.applyAppearance(appearance, to: window)
     }
     func runModal() -> NSApplication.ModalResponse {
         PopupKeyboard.install()
@@ -35,6 +55,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         }
         if let owner = PopupPresentation.owner(excluding: window) { window.present(over: owner) }
         else { window.center(); window.makeKeyAndOrderFront(nil) }
+        previewTheme()
         return NSApp.runModal(for: window)
     }
     @objc private func apply() { NSApp.stopModal(withCode: .OK) }

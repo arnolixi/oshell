@@ -88,6 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
         if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.complete(controller) }
         if CommandLine.arguments.contains("--command-input-test") { CommandInputTest.run(controller) }
+        if CommandLine.arguments.contains("--theme-audit-test") { ThemeAuditTest.run(controller) }
+        if CommandLine.arguments.contains("--terminal-chrome-test") { TerminalChromePreview.run(controller) }
         if CommandLine.arguments.contains("--focus-fullscreen-test") { FocusFullscreenTest.run(controller) }
         if CommandLine.arguments.contains("--unicode-display-test") { UnicodeDisplayTest.run(controller) }
         if CommandLine.arguments.contains("--tunnel-ownership-test") { TunnelOwnershipTest.run(controller) }
