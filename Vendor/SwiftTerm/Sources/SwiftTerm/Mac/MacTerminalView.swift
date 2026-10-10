@@ -3464,7 +3464,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         updateScroller ()
     }
     
-    func ensureCaretIsVisible ()
+    /// Reveal the input cursor for host-managed input, using the same viewport
+    /// behavior as typing. Does not change focus or bypass synchronized output.
+    public func ensureCaretIsVisible ()
     {
         guard !terminal.synchronizedOutputActive else { return }
         let displayBuffer = terminal.displayBuffer

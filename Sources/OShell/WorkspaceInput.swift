@@ -46,6 +46,7 @@ extension WorkspaceController {
         targets.forEach { $0.sendManaged(bytes) }; return true
     }
     func pasteText(_ text: String, from source: TerminalPane) {
+        guard !text.isEmpty else { return }
         guard text.utf8.count <= 1_048_576, !text.contains("\0") else { Dialogs.message("粘贴内容不能包含空字符或超过 1 MiB；较大内容请使用文件上传。"); return }
         let ids = !source.blocksManagedToolInput && syncTargets.contains(source.id) ? syncTargets : [source.id]
         let panes = inputPanes.filter { ids.contains($0.id) }
@@ -60,11 +61,16 @@ extension WorkspaceController {
                 guard saveConfiguration(updated) else { return }
             }
         }
+        guard !content.isEmpty else { return }
         if source.blocksManagedToolInput, ids == [source.id], !source.isShutdown {
+            source.terminal.ensureCaretIsVisible()
             source.handleEndedInput(InputText.bytes(content, bracketed: source.terminal.getTerminal().bracketedPasteMode)[...]); return
         }
         guard !panes.isEmpty, panes.allSatisfy(\.acceptsManagedInput), Set(inputPanes.map(\.id)).isSuperset(of: ids) else { Dialogs.message("目标会话正在登录、传输、运行交互式本机工具或标签已关闭，未粘贴。"); return }
-        for pane in panes { pane.sendManaged(InputText.bytes(content, bracketed: pane.usesPTYInput && pane.terminal.getTerminal().bracketedPasteMode)) }
+        for pane in panes {
+            pane.terminal.ensureCaretIsVisible()
+            pane.sendManaged(InputText.bytes(content, bracketed: pane.usesPTYInput && pane.terminal.getTerminal().bracketedPasteMode))
+        }
     }
     func sendComposed(_ text: String, appendReturn: Bool) {
         guard !text.isEmpty, text.utf8.count <= 1_048_576, !text.contains("\0") else { Dialogs.message("请输入要发送的内容（最多 1 MiB）。"); return }

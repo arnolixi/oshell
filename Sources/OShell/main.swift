@@ -89,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
         if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.complete(controller) }
         if CommandLine.arguments.contains("--command-input-test") { CommandInputTest.run(controller) }
+        if CommandLine.arguments.contains("--paste-scroll-test") { PasteScrollTest.run(controller) }
         if CommandLine.arguments.contains("--password-selection-test") { PasswordSelectionTest.run(controller) }
         if CommandLine.arguments.contains("--biometric-unlock-test") { BiometricUnlockTest.run(controller) }
         if CommandLine.arguments.contains("--terminal-scroller-test") { TerminalScrollerTest.run(controller) }
