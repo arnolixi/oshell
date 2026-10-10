@@ -17,7 +17,7 @@ final class SecuritySettingsView: NSView {
         let available = workspace.configuration.masterPasswordVerifier != nil && BiometricUnlock.shared.unavailableReason == nil
         touchID.isEnabled = available || originallyEnabled
         let status = NSTextField(wrappingLabelWithString: workspace.configuration.hasMasterPassword
-            ? (BiometricUnlock.shared.unavailableReason ?? (originallyEnabled ? "已在此 Mac 启用。仍可随时手动输入主密码。" : "此 Mac 支持 Touch ID。勾选后点击“应用”，输入当前主密码完成启用。"))
+            ? (BiometricUnlock.shared.unavailableReason ?? (originallyEnabled ? "已在此 Mac 启用。打开解锁窗口会自动验证指纹，也可手动输入主密码。" : "此 Mac 支持 Touch ID。勾选后点击“应用”，输入当前主密码完成启用。"))
             : "请先通过顶部“工具 → 设置主密码”启用主密码保护，再设置 Touch ID。")
         status.font = .systemFont(ofSize: 12); status.textColor = .secondaryLabelColor
         let help = NSTextField(wrappingLabelWithString: "主密码加密后保存在本机系统钥匙串，解密时由 Secure Enclave 验证当前指纹。不会将主密码写入会话文件，也不会随 iCloud / WebDAV 同步。\n\n更换 Mac、变更指纹或主密码后需要重新启用。应用更新后若钥匙串需要重新授权，可先手动解锁，再关闭并重新开启本选项。请继续妥善保管主密码，指纹解锁不能用于恢复遗忘的主密码。")

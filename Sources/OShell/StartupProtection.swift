@@ -101,20 +101,20 @@ extension WorkspaceController {
         alert.informativeText = "请输入主密码以打开工作区。取消或按 Esc 将退出程序。"
         alert.addButton(withTitle: "解锁"); alert.addButton(withTitle: "退出")
         let biometric = BiometricUnlock.shared.enabled
-        if biometric { alert.addButton(withTitle: "使用 Touch ID").identifier = .init("master.touchID") }
         let password = NSSecureTextField(); password.placeholderString = "主密码"; password.identifier = .init("master.unlock")
         let error = NSTextField(wrappingLabelWithString: ""); error.textColor = .systemRed; error.identifier = .init("master.error")
+        let biometricPrompt = biometric ? AutomaticBiometricPrompt(alert: alert, field: password, status: error) : nil
         let stack = NSStackView(views: [password, error]); stack.orientation = .vertical; stack.spacing = 10
-        stack.frame = NSRect(x: 0, y: 0, width: 340, height: 70)
+        stack.frame = NSRect(x: 0, y: 0, width: 340, height: biometric ? 110 : 70)
         for view in [password, error] { view.widthAnchor.constraint(equalToConstant: 340).isActive = true }
         alert.accessoryView = stack; alert.window.initialFirstResponder = password
         NSApp.activate(ignoringOtherApps: true)
         defer { password.stringValue = "" }
         while true {
-            let response = alert.runModal()
+            let response = biometricPrompt?.runModal() ?? alert.runModal()
             let candidate: String
             if response == .alertThirdButtonReturn && biometric {
-                guard let value = BiometricUnlock.shared.requestPassword() else { continue }
+                guard let value = biometricPrompt?.password else { continue }
                 candidate = value
             } else {
                 guard response == .alertFirstButtonReturn else { break }
@@ -134,7 +134,7 @@ extension WorkspaceController {
                     guard saveConfiguration(configuration) else { break }
                 }
                 completeStartupUnlock(true); return true
-            } catch let failure { error.stringValue = "解锁失败：\(failure.localizedDescription)" }
+            } catch let failure { error.stringValue = "解锁失败：\(failure.localizedDescription)"; error.textColor = .systemRed }
         }
         completeStartupUnlock(false); return false
     }

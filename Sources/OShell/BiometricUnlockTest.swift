@@ -100,7 +100,7 @@ enum BiometricUnlockTest {
                     views(root).compactMap { $0 as? NSSecureTextField }.first?.stringValue = password
                     views(root).compactMap { $0 as? NSButton }.first { $0.title == "确定" }?.performClick(nil)
                 }
-                checks["manualFallbackStillWorks"] = PasswordVault.promptMaster(title: "解锁 OShell 加密数据", creating: false, allowBiometrics: true) == password
+                checks["manualFallbackStillWorks"] = PasswordVault.promptMaster(title: "解锁 OShell 加密数据", creating: false, allowBiometrics: true, authenticator: TestBiometricAuthenticator()) == password
                 modal { root in
                     checks["archiveNeverOffersLocalBiometrics"] = !views(root).contains { $0.identifier?.rawValue == "master.touchID" }
                     if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) }

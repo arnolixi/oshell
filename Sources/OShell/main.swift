@@ -54,10 +54,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         BiometricUnlock.shared.configure(directory: directory)
         let store = ConfigurationStore(directory: directory, masterPassword: openingMaster, requiresMasterProtection: shared)
         if let data = try? SharedDataFile.readIfPresent(store.url), SharedVault.isEncrypted(data) {
+            var automaticallyAuthenticate = true
             while true {
                 if let password = store.masterPassword, (try? store.load()).flatMap({ try? MasterPasswordProtection.verifyStartup($0, password: password) }) != nil { break }
                 NSApp.activate(ignoringOtherApps: true)
-                guard let password = PasswordVault.promptMaster(title: "解锁 OShell 加密数据", creating: false, allowBiometrics: true) else { NSApp.terminate(nil); return }
+                let automatic = automaticallyAuthenticate; automaticallyAuthenticate = false
+                guard let password = PasswordVault.promptMaster(title: "解锁 OShell 加密数据", creating: false, allowBiometrics: true, automaticallyAuthenticate: automatic) else { NSApp.terminate(nil); return }
                 store.masterPassword = password
                 do { let config = try store.load(); try MasterPasswordProtection.verifyStartup(config, password: password); break }
                 catch { store.masterPassword = nil; Dialogs.message(error.localizedDescription) }
@@ -91,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--command-input-test") { CommandInputTest.run(controller) }
         if CommandLine.arguments.contains("--paste-scroll-test") { PasteScrollTest.run(controller) }
         if CommandLine.arguments.contains("--password-selection-test") { PasswordSelectionTest.run(controller) }
+        if CommandLine.arguments.contains("--automatic-biometric-test") { AutomaticBiometricPromptTest.run(controller) }
         if CommandLine.arguments.contains("--biometric-unlock-test") { BiometricUnlockTest.run(controller) }
         if CommandLine.arguments.contains("--terminal-scroller-test") { TerminalScrollerTest.run(controller) }
         if CommandLine.arguments.contains("--theme-audit-test") { ThemeAuditTest.run(controller) }

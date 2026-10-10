@@ -112,7 +112,36 @@ enum BiometricCipher {
 }
 #endif
 
-final class BiometricUnlock {
+/// Cancellation is checked before delivering a password; late hardware replies
+/// must never override manual input or reopen a dismissed unlock window.
+final class BiometricRequest {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var cancellation: (() -> Void)?
+    init(cancellation: (() -> Void)? = nil) { self.cancellation = cancellation }
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    func cancel() {
+        lock.lock(); cancelled = true; let action = cancellation; cancellation = nil; lock.unlock()
+        action?()
+    }
+    func check() throws { if isCancelled { throw NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError) } }
+    deinit { cancel() }
+}
+enum BiometricDelivery {
+    static func onMain(_ body: @escaping () -> Void) {
+        // Password prompts can originate inside a main-queue callback. Deliver
+        // through the modal run loop instead of waiting for that callback to end.
+        RunLoop.main.perform(inModes: [.common, .modalPanel], block: body)
+        CFRunLoopWakeUp(CFRunLoopGetMain())
+    }
+}
+
+protocol BiometricAuthenticating: AnyObject {
+    var enabled: Bool { get }
+    func beginUnlock(completion: @escaping (Result<String, Error>) -> Void) -> BiometricRequest
+}
+
+final class BiometricUnlock: BiometricAuthenticating {
     static let shared = BiometricUnlock()
     private let store: BiometricRecordStore
     private let defaults: UserDefaults
@@ -156,34 +185,49 @@ final class BiometricUnlock {
         guard let scope, let previous = bindings[scope], previous != Self.binding(configuration) else { return }
         try? disable()
     }
-    func requestPassword() -> String? {
-        guard enabled, let scope else { return nil }
-        if let reason = unavailableReason { Dialogs.message(reason); return nil }
+    func beginUnlock(completion: @escaping (Result<String, Error>) -> Void) -> BiometricRequest {
+        guard enabled, let scope, let binding = bindings[scope], unavailableReason == nil else {
+            let request = BiometricRequest()
+            let error = BiometricFailure(message: unavailableReason ?? "Touch ID 未启用，请输入主密码。")
+            BiometricDelivery.onMain { if !request.isCancelled { completion(.failure(error)) } }
+            return request
+        }
 #if !OSHELL_LEGACY
         if #available(macOS 10.15, *) {
             let context = LAContext(); context.localizedReason = "使用 Touch ID 解锁 OShell 主密码"
-            context.localizedFallbackTitle = ""; context.touchIDAuthenticationAllowableReuseDuration = 0
-            defer { context.invalidate() }
+            context.localizedFallbackTitle = "输入主密码"; context.touchIDAuthenticationAllowableReuseDuration = 0
+            let request = BiometricRequest(cancellation: { context.invalidate() })
             let store = self.store
-            guard let result = CredentialTask.run(title: "Touch ID 解锁", message: "请按系统提示验证指纹。取消后可手动输入主密码。", work: { token in
-                try token.check()
-                let data = try store.read(account: scope)
-                try token.check()
-                let password = try BiometricCipher.open(data, scope: scope, context: context)
-                try token.check(); return password
-            }) else { return nil }
-            do {
-                let password = try result.get()
-                guard self.scope == scope, enabled else { return nil }
-                return password
-            } catch {
-                let failure = error as NSError
-                let cancelled = (failure.domain == LAError.errorDomain && [LAError.userCancel.rawValue, LAError.systemCancel.rawValue, LAError.appCancel.rawValue, LAError.userFallback.rawValue].contains(failure.code)) || (failure.domain == NSOSStatusErrorDomain && failure.code == Int(errSecUserCanceled))
-                if !cancelled { Dialogs.message((error as? BiometricFailure)?.message ?? "Touch ID 解锁未完成，请手动输入主密码。如果已更改指纹或主密码，请在设置中重新启用 Touch ID。") }
-                return nil
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = Result {
+                    try request.check()
+                    let data = try store.read(account: scope)
+                    try request.check()
+                    let password = try BiometricCipher.open(data, scope: scope, context: context)
+                    try request.check(); return password
+                }
+                context.invalidate()
+                BiometricDelivery.onMain {
+                    guard !request.isCancelled else { return }
+                    guard self.scope == scope, self.bindings[scope] == binding else {
+                        completion(.failure(BiometricFailure(message: "指纹解锁设置已变化，请输入主密码。"))); return
+                    }
+                    completion(result)
+                }
             }
+            return request
         }
 #endif
-        return nil
+        let request = BiometricRequest()
+        BiometricDelivery.onMain { if !request.isCancelled { completion(.failure(BiometricFailure(message: "此版本请使用主密码解锁。"))) } }
+        return request
+    }
+    static func message(for error: Error) -> String {
+        let failure = error as NSError
+        let cancelled = (failure.domain == LAError.errorDomain && [LAError.userCancel.rawValue, LAError.systemCancel.rawValue, LAError.appCancel.rawValue, LAError.userFallback.rawValue].contains(failure.code))
+            || (failure.domain == NSOSStatusErrorDomain && failure.code == Int(errSecUserCanceled))
+            || (failure.domain == NSCocoaErrorDomain && failure.code == NSUserCancelledError)
+        if cancelled { return "已取消指纹验证，可直接输入主密码，或点击重试。" }
+        return (error as? BiometricFailure)?.message ?? "指纹验证未完成，可输入主密码。更改指纹或主密码后，请重新启用 Touch ID。"
     }
 }

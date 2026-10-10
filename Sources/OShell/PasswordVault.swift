@@ -103,29 +103,32 @@ final class PasswordVault {
         return configuration
     }
     func masterForImport(hasSavedPasswords: Bool) -> String? { requestMaster(creating: !hasSavedPasswords && !masterProtectionEnabled) }
-    static func promptMaster(title: String, creating: Bool, allowBiometrics: Bool = false) -> String? {
+    static func promptMaster(title: String, creating: Bool, allowBiometrics: Bool = false, automaticallyAuthenticate: Bool = true, authenticator: BiometricAuthenticating = BiometricUnlock.shared) -> String? {
         let vault = PasswordVault()
-        return vault.requestMaster(creating: creating, title: title, allowBiometrics: allowBiometrics)
+        return vault.requestMaster(creating: creating, title: title, allowBiometrics: allowBiometrics, automaticallyAuthenticate: automaticallyAuthenticate, authenticator: authenticator)
     }
-    private func requestMaster(creating: Bool, title: String? = nil, allowBiometrics: Bool = true) -> String? {
+    private func requestMaster(creating: Bool, title: String? = nil, allowBiometrics: Bool = true, automaticallyAuthenticate: Bool = true, authenticator: BiometricAuthenticating = BiometricUnlock.shared) -> String? {
         if let master { return master }
         let alert = PopupAlert(); alert.messageText = title ?? (creating ? "设置主密码" : "解锁会话密码")
         let archivePassword = title?.contains("导出文件") == true
         alert.informativeText = archivePassword ? "此密码仅用于保护导出文件，不会成为 OShell 主密码；导入该文件时需要它。" : "密码密文保存在会话配置中。可在设置 → 安全中启用本机 Touch ID 解锁；迁移到其他 Mac 时仍需要主密码。"
         alert.addButton(withTitle: "确定"); alert.addButton(withTitle: "取消")
-        let biometric = allowBiometrics && !creating && !archivePassword && BiometricUnlock.shared.enabled
-        if biometric { alert.addButton(withTitle: "使用 Touch ID").identifier = .init("master.touchID") }
+        let biometric = allowBiometrics && !creating && !archivePassword && authenticator.enabled
         let field = NSSecureTextField(); field.placeholderString = archivePassword ? (creating ? "导出文件密码（至少 8 个字符）" : "导出文件密码或原主密码") : (creating ? "主密码（至少 8 个字符）" : "主密码")
         let confirm = NSSecureTextField(); confirm.placeholderString = archivePassword ? "再次输入导出文件密码" : "再次输入主密码"
         defer { field.stringValue = ""; confirm.stringValue = "" }
-        let stack = NSStackView(views: creating ? [field, confirm] : [field]); stack.orientation = .vertical; stack.spacing = 10
-        stack.frame = NSRect(x: 0, y: 0, width: 330, height: creating ? 62 : 26)
+        let status = NSTextField(wrappingLabelWithString: "已启用 Touch ID，也可直接输入主密码。")
+        status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor; status.maximumNumberOfLines = 3
+        status.widthAnchor.constraint(equalToConstant: 330).isActive = true
+        let biometricPrompt = biometric ? AutomaticBiometricPrompt(alert: alert, field: field, status: status, automatically: automaticallyAuthenticate, authenticator: authenticator) : nil
+        let stack = NSStackView(views: creating ? [field, confirm] : (biometric ? [field, status] : [field])); stack.orientation = .vertical; stack.spacing = 10
+        stack.frame = NSRect(x: 0, y: 0, width: 330, height: creating ? 62 : (biometric ? 82 : 26))
         field.widthAnchor.constraint(equalToConstant: 330).isActive = true
         alert.accessoryView = stack; alert.window.initialFirstResponder = field
         while true {
-            let response = alert.runModal()
+            let response = biometricPrompt?.runModal() ?? alert.runModal()
             if response == .alertThirdButtonReturn && biometric {
-                if let value = BiometricUnlock.shared.requestPassword() { return value }
+                if let value = biometricPrompt?.password { return value }
                 continue
             }
             guard response == .alertFirstButtonReturn else { break }
