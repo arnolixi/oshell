@@ -79,7 +79,7 @@ final class TabArrangementView: NSScrollView {
         autohidesScrollers = true; scrollerStyle = .overlay
         contentView.postsBoundsChangedNotifications = true
         horizontalScrollElasticity = .none; verticalScrollElasticity = .none
-        let nodes = tabs.map { ($0.layout.view, $0.layout.minimumSize) }
+        let nodes = tabs.map { ($0.displayView, $0.displayMinimumSize) }
         let root: (NSView, NSSize)
         switch mode {
         case .tabs: root = nodes.first ?? (NSView(), .zero)
@@ -97,6 +97,9 @@ final class TabArrangementView: NSScrollView {
             root = Self.join(rows, vertical: false)
         }
         minimumSize = root.1
+        // A collapsed terminal split can become the scroll document directly.
+        // Its frame is owned by layout(), not the former splitter constraints.
+        root.0.translatesAutoresizingMaskIntoConstraints = true
         documentView = root.0
     }
     init(root: (NSView, NSSize)) {
@@ -105,7 +108,9 @@ final class TabArrangementView: NSScrollView {
         autohidesScrollers = true; scrollerStyle = .overlay
         contentView.postsBoundsChangedNotifications = true
         horizontalScrollElasticity = .none; verticalScrollElasticity = .none
-        minimumSize = root.1; documentView = root.0
+        minimumSize = root.1
+        root.0.translatesAutoresizingMaskIntoConstraints = true
+        documentView = root.0
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     private static func join(_ nodes: [(NSView, NSSize)], vertical: Bool) -> (NSView, NSSize) {

@@ -131,6 +131,8 @@ extension WorkspaceController {
         arrangementItem.submenu = arrangements
         if let tab, tab.layout.panes.count > 1 {
             menu.addItem(.separator())
+            let zoom = menu.addItem(withTitle: tab.zoomedPane == nil ? "放大当前分屏" : "恢复分屏布局", action: #selector(togglePaneZoomFromTab(_:)), keyEquivalent: "")
+            zoom.target = self; zoom.representedObject = id
             let close = menu.addItem(withTitle: "关闭当前分屏会话", action: #selector(closePaneFromTabMenu(_:)), keyEquivalent: "")
             close.target = self; close.representedObject = id
             close.toolTip = "关闭此标签中选中的分屏，保留其他会话"

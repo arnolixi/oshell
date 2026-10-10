@@ -38,6 +38,73 @@ enum PaneCloseTest {
                 checks["confirmation-\(title)"] = true; button.performClick(nil)
             }
         }
+        func geometryCases() {
+            var renderers = [false]
+            #if !OSHELL_LEGACY
+            renderers.append(true)
+            #endif
+            let cases = renderers.flatMap { gpu in
+                (0..<5).flatMap { mode in [false, true].map { (gpu, mode, $0) } }
+            }
+            var index = 0
+            func next() {
+                guard index < cases.count else { finish(); return }
+                let (gpu, mode, closeFirst) = cases[index]; index += 1
+                let key = "geometry-\(gpu)-\(mode)-\(closeFirst)"
+                workspace.configuration.preferences.metal = gpu
+                workspace.arrange(.tabs)
+                workspace.newBlankTab(); let background = workspace.selectedTab!
+                workspace.newBlankTab(); let tab = workspace.selectedTab!, first = tab.activePane
+                if closeFirst { workspace.splitVertical() } else { workspace.splitHorizontal() }
+                let second = tab.activePane
+                if mode == 4 { _ = workspace.moveTab(tab.id, beside: background.id, position: .right) }
+                else { workspace.arrange(TabArrangement(rawValue: mode)!) }
+                workspace.select(tab)
+                (closeFirst ? first : second).closeButton.performClick(nil)
+                let survivor = closeFirst ? second : first
+                func checkGeometry(_ phase: String) {
+                    window.contentView?.layoutSubtreeIfNeeded()
+                    checks[key + "-" + phase + "-usable"] = survivor.view.window === window && survivor.view.bounds.width >= 220 && survivor.terminal.bounds.height >= 140 && !survivor.terminal.visibleRect.isEmpty
+                    checks[key + "-" + phase + "-renderer"] = survivor.terminal.isUsingMetalRenderer == gpu
+                    if mode == 0 { checks[key + "-" + phase + "-fillsHost"] = survivor.view.frame == workspace.terminalHost.bounds }
+                    checks[key + "-" + phase + "-fillsPane"] = abs(survivor.terminal.frame.width - (survivor.view.bounds.width - 8)) < 1 && abs(survivor.terminal.frame.height - (survivor.view.bounds.height - 22)) < 1
+                }
+                // Wait for the next AppKit layout pass, which exposed the old
+                // false positive: the model survived while its view collapsed.
+                later {
+                    checkGeometry("settled")
+                    for size in [NSSize(width: 780, height: 520), NSSize(width: 1600, height: 1000)] {
+                        window.setContentSize(size); checkGeometry("resize-\(Int(size.width))")
+                    }
+                    workspace.select(background); workspace.select(tab)
+                    later {
+                        checkGeometry("reselected")
+                        if index == 1, let path = ProcessInfo.processInfo.environment["OSHELL_PANE_CLOSE_PREVIEW"], let root = window.contentView,
+                           let bitmap = root.bitmapImageRepForCachingDisplay(in: root.bounds) {
+                            root.cacheDisplay(in: root.bounds, to: bitmap)
+                            try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                        }
+                        // Promote a subtree as well as a single leaf, then
+                        // collapse it again without rebuilding terminal objects.
+                        workspace.select(tab); workspace.splitVertical(); let nested = tab.activePane
+                        workspace.splitHorizontal(); let last = tab.activePane
+                        survivor.closeButton.performClick(nil)
+                        later {
+                            window.contentView?.layoutSubtreeIfNeeded()
+                            checks[key + "-subtreeVisible"] = tab.layout.panes.count == 2 && [nested, last].allSatisfy { $0.terminal.bounds.height >= 140 && $0.view.window === window }
+                            last.closeButton.performClick(nil)
+                            later {
+                                window.contentView?.layoutSubtreeIfNeeded()
+                                checks[key + "-secondCollapseVisible"] = tab.layout.panes.count == 1 && nested.terminal.bounds.height >= 140
+                                workspace.tabs.flatMap { $0.layout.panes }.forEach { $0.sendManaged(Array("exit\r".utf8)) }
+                                next()
+                            }
+                        }
+                    }
+                }
+            }
+            next()
+        }
         func blankCases() {
             for mode in [TabArrangement.tabs, .tiled] {
                 workspace.arrange(mode)
@@ -64,6 +131,16 @@ enum PaneCloseTest {
                 checks["endedExitOnlyClosesLeaf-" + key] = b.isShutdown && !a.isShutdown && workspace.tabs.count == 1 && tab.layout.panes.count == 1
                 checks["quickSendFocusPreserved-" + key] = editor != nil && window.firstResponder === editor
                 checks["collapsedPaneFillsTab-" + key] = tab.layout.view === a.view && a.closeButton.isHidden && workspace.syncTargets.isEmpty
+                window.contentView?.layoutSubtreeIfNeeded()
+                buttonGeometry.append("collapsed-\(key): pane=\(a.view.frame), host=\(workspace.terminalHost.bounds), auto=\(a.view.translatesAutoresizingMaskIntoConstraints)")
+                if mode == .tabs {
+                    checks["collapsedRootActuallyFillsHost"] = a.view.frame == workspace.terminalHost.bounds
+                }
+                let oldSize = window.contentView!.bounds.size
+                window.setContentSize(NSSize(width: 1400, height: 900)); window.contentView?.layoutSubtreeIfNeeded()
+                if mode == .tabs { checks["collapsedRootFollowsResize"] = a.view.frame == workspace.terminalHost.bounds }
+                checks["collapsedTerminalRetainsUsableHeight-" + key] = a.terminal.bounds.height >= 140
+                window.setContentSize(oldSize); window.contentView?.layoutSubtreeIfNeeded()
                 a.sendManaged(Array("exit\r".utf8))
                 checks["lastLeafClosesTab-" + key] = workspace.tabs.isEmpty && window.firstResponder === editor
             }
@@ -82,7 +159,7 @@ enum PaneCloseTest {
             workspace.quickSendBar.fill(.init(text: "exit", appendReturn: true)); workspace.quickSendBar.submit()
             checks["broadcastClosesEachLeafExactlyOnce"] = workspace.tabs.isEmpty && a.isShutdown && d.isShutdown && other.activePane.isShutdown
             checks["broadcastRetainsQuickSendFocus"] = workspace.quickSendBar.field.currentEditor() != nil && window.firstResponder === workspace.quickSendBar.field.currentEditor()
-            finish()
+            geometryCases()
         }
         later {
             workspace.configuration.preferences.metal = false

@@ -34,6 +34,8 @@ enum SessionFeatureTest {
             controller.open(profile); let originalTab = controller.selectedTab!, pane = originalTab.activePane
             try pane.startLogging(to: root.appendingPathComponent("session.log"))
             let deadline = Date().addingTimeInterval(35)
+            var duplicatePanes = [TerminalPane]()
+            var secondWindow: WorkspaceController?
             var duplicated = false, results = [String: Bool]()
             func finish() {
                 pane.stopLogging()
@@ -51,24 +53,31 @@ enum SessionFeatureTest {
                     } else { results["channelClonePreservesProxyReference"] = false }
                     let report: [String: Any] = ["passed": results.values.allSatisfy { $0 }, "checks": results]
                     try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: root.appendingPathComponent("client-result.json"))
-                    controller.shutdown(); PasswordVault.shared.lock(); NSApp.terminate(nil)
+                    secondWindow?.shutdown(); secondWindow?.window?.close(); controller.shutdown(); PasswordVault.shared.lock(); NSApp.terminate(nil)
                 }
             }
             func check() {
                 let text = String(decoding: pane.terminal.getTerminal().getBufferAsData(), as: UTF8.self)
-                if text.contains("OSHELL_SESSION_READY") && !duplicated {
+                if text.contains("OSHELL_SESSION_READY"), pane.remoteAddress == "10.6.0.6", text.contains("IDLE_RECEIVED"), !duplicated {
                     duplicated = true
-                    // Reusing local listen ports in a duplicate is correctly rejected
-                    // by OpenSSH; use a session without forwards for the clone check.
-                    var cloneProfile = profile; cloneProfile.tunnels = []; cloneProfile.keepAlive.idleEnabled = false
+                    // Repeat the exact tunnel configuration through normal open,
+                    // tab duplication, and a different workspace window.
+                    var cloneProfile = profile; cloneProfile.keepAlive.idleEnabled = false
                     controller.open(cloneProfile); let source = controller.selectedTab!
                     controller.duplicateTab(source)
+                    duplicatePanes = [source.activePane, controller.selectedTab!.activePane]
+                    let other = WorkspaceController(store: controller.store, configuration: controller.configuration)
+                    other.completeStartupUnlock(true); other.open(cloneProfile); secondWindow = other
+                    duplicatePanes.append(other.selectedTab!.activePane)
+                    results["onlyFirstConnectionStartsTunnels"] = pane.opensConfiguredTunnels && duplicatePanes.allSatisfy { $0.skipsDuplicateTunnels && !$0.opensConfiguredTunnels }
+                    results["tunnelConfigurationNotModified"] = duplicatePanes.allSatisfy { $0.profile.tunnels == profile.tunnels } && controller.configuration.profiles[0].tunnels == profile.tunnels
                     results["duplicateCreatesIndependentPTY"] = source.activePane.terminal.process.shellPid != controller.selectedTab!.activePane.terminal.process.shellPid && source.activePane.profile == controller.selectedTab!.activePane.profile
                     try? Data("ready".utf8).write(to: root.appendingPathComponent("client-ready"))
                 }
                 let network = (try? JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("tunnel-result.json")))) as? [String: Bool]
                 let server = (try? JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("server-result.json")))) as? [String: Int]
-                if let network, text.contains("IDLE_RECEIVED"), (server?["aliveMessages"] ?? 0) > 0 {
+                if let network, duplicatePanes.count == 3, duplicatePanes.allSatisfy({ $0.sessionReady && !$0.ended }), text.contains("IDLE_RECEIVED"), (server?["aliveMessages"] ?? 0) > 0 {
+                    results["allDuplicateConnectionsAuthenticated"] = true
                     results.merge(network) { _, b in b }; results["idleStringAfterLogin"] = true; results["sshAliveReceived"] = true
                     results["authenticatedProxy"] = (server?["proxyAuthentications"] ?? 0) >= 1
                     finish()

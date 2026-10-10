@@ -20,6 +20,9 @@ with tempfile.TemporaryDirectory(prefix='oshell-session-', dir='/tmp') as folder
             output, _ = client.communicate(timeout=40)
             result = json.loads((root/'client-result.json').read_text())
             result['server'] = json.loads((root/'server-result.json').read_text())
+            transcript = (root/'session.log').read_text(errors='replace')
+            result['checks']['controlSocketProbeDoesNotPrintErrors'] = not any(marker in transcript for marker in ['mux_master_', 'mux_client_', 'Broken pipe'])
+            result['checks']['configuredRemoteForwardRequestedOnce'] = result['server']['remoteForwardRequests'] == 1
             result['checks']['clientLocaleNotForwarded'] = result['server']['localeRequests'] == 0
             f = json.loads((root/'fixture.json').read_text()); closed = True
             time.sleep(.2)

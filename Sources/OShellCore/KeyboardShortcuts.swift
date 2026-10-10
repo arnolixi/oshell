@@ -32,6 +32,7 @@ public enum ShortcutAction: String, Codable, CaseIterable {
     case newWindow, settings, sessionManager, connectSelected, newSession, newBlank, local, currentProperties, liveProperties, defaults, importSessions, exportSessions
     case reconnect, closePane, closeTab, copy, paste, selectAll, find, findNext, findPrevious
     case splitVertical, splitHorizontal, logging, nextTab, previousTab, recentTab
+    case zoomPane, nextPane, previousPane, quickSwitch
     case tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tabNumber
     case newGroup, showGroups, arrangeTabs, arrangeHorizontal, arrangeVertical, arrangeTiled
     case links, quickSend, focusQuickSend, composer, syncInput, stopSync, files, quickCommands, highlights, appearance, hide, quit, minimize
@@ -61,6 +62,10 @@ public enum ShortcutAction: String, Codable, CaseIterable {
         case .findPrevious: return "上一个匹配"
         case .splitVertical: return "新建左右分屏"
         case .splitHorizontal: return "新建上下分屏"
+        case .zoomPane: return "放大 / 恢复当前分屏"
+        case .nextPane: return "下一个分屏"
+        case .previousPane: return "上一个分屏"
+        case .quickSwitch: return "快速切换 / 连接会话"
         case .logging: return "开始 / 停止日志记录"
         case .nextTab: return "下一个标签"
         case .previousTab: return "上一个标签"
@@ -110,6 +115,10 @@ public enum ShortcutAction: String, Codable, CaseIterable {
         case .findPrevious: return [.init(5,cmd|shift)]
         case .splitVertical: return [.init(2,cmd)]
         case .splitHorizontal: return [.init(2,cmd|shift)]
+        case .zoomPane: return [.init(36,cmd|shift)]
+        case .nextPane: return [.init(30,cmd|KeyboardShortcut.option)]
+        case .previousPane: return [.init(33,cmd|KeyboardShortcut.option)]
+        case .quickSwitch: return [.init(31,cmd|KeyboardShortcut.option)]
         case .logging: return [.init(37,cmd|shift)]
         case .nextTab: return [.init(48,ctrl), .init(30,cmd|shift)]
         case .previousTab: return [.init(48,ctrl|shift), .init(33,cmd|shift)]
@@ -133,6 +142,11 @@ public struct KeyboardShortcuts: Codable, Equatable {
     public init() {}
     public func bindings(for action: ShortcutAction) -> [KeyboardShortcut] {
         if let override = overrides[action.rawValue] { return override.shortcut.map { [$0] } ?? [] }
+        // Newly introduced defaults must not invalidate existing customized
+        // configurations when upgrading or silently take over their keys.
+        if [.zoomPane, .nextPane, .previousPane, .quickSwitch].contains(action) {
+            return action.defaults.filter { binding in !overrides.values.contains(where: { $0.shortcut == binding }) }
+        }
         return action.defaults
     }
     public func action(for shortcut: KeyboardShortcut) -> ShortcutAction? {

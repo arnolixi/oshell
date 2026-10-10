@@ -54,7 +54,7 @@ final class GeneralSettingsView: NSView {
             : "非等宽字体：终端仍按字符网格显示，部分字符或表格可能不齐。"
         fontHint.textColor = TerminalFontCatalog.isMonospaced(font) ? .secondaryLabelColor : .systemOrange
     }
-    init(font: NSPopUpButton, size: NSPopUpButton, history: ScrollbackSettingsControl, gpu: NSButton, input: [NSView]) {
+    init(font: NSPopUpButton, size: NSPopUpButton, history: ScrollbackSettingsControl, gpu: NSButton, input: [NSView], clock: NSView? = nil) {
         super.init(frame: NSRect(x: 0, y: 0, width: 820, height: 520))
         func heading(_ title: String) -> NSTextField {
             let label = NSTextField(labelWithString: title); label.font = .systemFont(ofSize: 13, weight: .semibold); return label
@@ -78,7 +78,8 @@ final class GeneralSettingsView: NSView {
         fontChanged(font)
         let separator = NSBox(); separator.boxType = .separator
         let behavior = NSStackView(views: input); behavior.orientation = .vertical; behavior.alignment = .leading; behavior.spacing = 8
-        let stack = NSStackView(views: [heading("终端显示"), display, history.warning, preview, gpu, separator, heading("输入与传输"), behavior])
+        let extras = NSStackView(views: [gpu] + (clock.map { [$0] } ?? [])); extras.spacing = 24; extras.alignment = .centerY
+        let stack = NSStackView(views: [heading("终端显示"), display, history.warning, preview, extras, separator, heading("输入与传输"), behavior])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false; addSubview(stack)
         NSLayoutConstraint.activate([

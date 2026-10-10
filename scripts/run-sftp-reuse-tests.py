@@ -154,8 +154,13 @@ with tempfile.TemporaryDirectory(prefix='oshell-sftp-reuse-',dir='/tmp') as fold
             threading.Thread(target=client,args=(sock,),daemon=True).start()
     threading.Thread(target=serve,daemon=True).start()
     env=os.environ.copy();env.update(OSHELL_DATA_DIR=str(root/'config'),OSHELL_SFTP_REUSE_TEST_ROOT=folder,OSHELL_LAUNCH_NO_UI='1',LANG='en_US.UTF-8',LC_CTYPE='UTF-8',LC_ALL='C')
-    pid=None;endpoint=None
+    pid=None;endpoint=None;app=None
     try:
+        # Start the isolated fixture before delivering its one-use ticket, so
+        # AppKit initialization cannot consume the IPC socket read timeout.
+        app=subprocess.Popen([str(launcher.parent/'OShell'),'--external-launch-service'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        deadline=time.time()+15
+        while not (root/'app.pid').exists() and app.poll() is None and time.time()<deadline:time.sleep(.05)
         result=subprocess.run([str(launcher),'/DEV:SSH',f'/CONNECT:{user}:{password}@127.0.0.1:{port}','/EMU:Xterm','/TITLE:USM 文件连接复用测试'],env=env,capture_output=True,timeout=25)
         pid=int((root/'app.pid').read_text());endpoint=pathlib.Path((root/'endpoint.txt').read_text())
         deadline=time.time()+65
@@ -163,12 +168,14 @@ with tempfile.TemporaryDirectory(prefix='oshell-sftp-reuse-',dir='/tmp') as fold
         report=json.loads((root/'app-result.json').read_text())
         report['checks'].update(initialLaunchAccepted=result.returncode==0,oneTransportOnly=facts['transports']==1,oneAuthenticationOnly=facts['authenticated']==1 and facts['authAttempts']==1,fourSFTPChannels=facts['sftp']==4,SFTPRefusalExercised=facts['sftpDenied']==1,SCPCommandsReusedConnection=facts['execRequests']==2)
         report['server']=facts
+        if result.returncode: report['launchError']=result.stderr.decode(errors='replace').replace(password,'<fixture-secret>').replace(user,'<fixture-user>')[:300]
         report['checks']['clientLocaleNotForwarded']=facts['localeRequests']==0
         report['passed']=all(report['checks'].values())
         (project/'validation/sftp-reuse-result.json').write_text(json.dumps(report,indent=2))
         print(json.dumps(report,indent=2));raise SystemExit(0 if report['passed'] else 1)
     finally:
         listener.close()
+        if pid is None and app is not None: pid=app.pid
         if pid:
             deadline=time.time()+3
             while time.time()<deadline:

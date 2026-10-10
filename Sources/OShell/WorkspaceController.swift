@@ -271,6 +271,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     }
     private func install(_ view: NSView) {
         terminalHost.subviews.forEach { $0.removeFromSuperview() }
+        // NSSplitView disables autoresizing-mask constraints on its children.
+        // A promoted child is now frame-managed by the host; leaving this off
+        // lets its internal constraints shrink it to just the header row.
+        view.translatesAutoresizingMaskIntoConstraints = true
         view.frame = terminalHost.bounds; view.autoresizingMask = [.width, .height]; terminalHost.addSubview(view)
     }
     private func showWelcome() { install(welcome) }
@@ -402,6 +406,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         populate(menu, directory: "")
         if menu.items.count == 1 { let item = menu.addItem(withTitle: "暂无快捷会话", action: nil, keyEquivalent: ""); item.isEnabled = false }
         menu.addItem(.separator()); menu.addItem(withTitle: "管理会话…", action: #selector(showSessionManager), keyEquivalent: "").target = self
+        let switcher = NSMenuItem(title: "快速切换 / 连接会话…", action: #selector(showQuickSessionSwitcher), keyEquivalent: "")
+        switcher.target = self; menu.insertItem(switcher, at: 1)
         quickButton.menu = menu
         quickMenu?.removeAllItems(); if let quickMenu { populate(quickMenu, directory: ""); quickMenu.addItem(.separator()); quickMenu.addItem(withTitle: "管理会话…", action: #selector(showSessionManager), keyEquivalent: "").target = self }
     }
@@ -529,7 +535,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         refreshTabGroupMenu()
     }
     private func recordTerminalOutput(_ pane: TerminalPane) {
-        if isObservingSelectedTab, selectedTab?.layout.panes.contains(where: { $0 === pane }) == true { return }
+        if isObservingSelectedTab, let tab = selectedTab, tab.layout.panes.contains(where: { $0 === pane }),
+           tab.zoomedPane == nil || tab.zoomedPane === pane { return }
         guard !pane.isShutdown, tabs.contains(where: { $0.layout.panes.contains(where: { $0 === pane }) }) else { return }
         pane.markOutputUnread()
         // Called only on the first unread chunk; no per-byte counters or blinking timers.
@@ -550,19 +557,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     func rebuildWorkspace() {
         // Detach existing terminal views before disposing of the old arrangement.
         // No PTY or session is created or stopped by rearranging.
-        tabs.forEach { $0.layout.view.removeFromSuperview() }
+        tabs.forEach { $0.displayView.removeFromSuperview() }
         arrangingView = nil; groupStrips.removeAll(); reconcileTabGroups()
         tabStrip.isHidden = customTabLayout != nil; tabStripHeight.constant = customTabLayout == nil ? TabStripView.barHeight : 0
         if let customTabLayout {
             if let root = buildTabGroupView(customTabLayout) {
                 let view = TabArrangementView(root: root); arrangingView = view; install(view)
             } else { install(hiddenTabGroupsView()) }
-        } else if let selectedTab, arrangement == .tabs { install(selectedTab.layout.view) }
+        } else if let selectedTab, arrangement == .tabs { install(selectedTab.displayView) }
         else if !tabs.isEmpty {
             let view = TabArrangementView(tabs: tabs, mode: arrangement)
             arrangingView = view; install(view); view.equalize()
         } else { showWelcome() }
         terminalHost.layoutSubtreeIfNeeded()
+        tabs.forEach { $0.restoreDividerPositionsIfNeeded() }
         let visible = visibleTerminalTabs
         visible.flatMap { $0.layout.panes }.forEach { $0.prepareForDisplay() }
         refreshSelection()
@@ -574,14 +582,16 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     func select(_ tab: TerminalTab, focus: Bool = true) {
         guard tabs.contains(where: { $0 === tab }) else { return }
         selectedTab = tab
+        if let zoomed = tab.zoomedPane, zoomed !== tab.activePane { tab.zoom(tab.activePane); rebuildWorkspace() }
         if let group = customTabLayout?.group(containing: tab.id) { activeTabGroupID = group.id }
         if let group = customTabLayout?.group(containing: tab.id), group.active != tab.id || group.isHidden {
             group.isHidden = false; group.active = tab.id; rebuildWorkspace()
         }
-        if customTabLayout == nil, arrangement == .tabs, tab.layout.view.superview !== terminalHost {
-            install(tab.layout.view)
+        if customTabLayout == nil, arrangement == .tabs, tab.displayView.superview !== terminalHost {
+            install(tab.displayView)
         }
         terminalHost.layoutSubtreeIfNeeded()
+        tab.restoreDividerPositionsIfNeeded()
         tab.layout.panes.forEach { $0.prepareForDisplay() }
         // Clicking another visible terminal changes focus without rebuilding the grid.
         if focus, window?.firstResponder !== tab.activePane.terminal { tab.activePane.activate() }
@@ -614,7 +624,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
                 groupNeighbor = tabs.first { $0.id == nextID }
             }
         }
-        tab.layout.panes.forEach { $0.shutdown() }; tab.layout.view.removeFromSuperview(); tabs.remove(at: index)
+        tab.layout.panes.forEach { $0.shutdown() }; tab.displayView.removeFromSuperview(); tabs.remove(at: index)
         tabHistory.removeAll { $0 == tab.id }
         if wasSelected {
             let visible = tabs.filter { customTabLayout?.group(containing: $0.id)?.isHidden != true }
@@ -639,6 +649,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         let panes = tab.layout.panes
         guard panes.count > 1 else { close(tab, focusRemainingTerminal: focusedPane != nil); return }
         if pane.hasActiveProcess, !Dialogs.confirm("关闭此分屏会话？", text: "此分屏中的连接、本机工具与文件传输会结束，其他分屏保持连接。", action: "关闭") { return }
+        if tab.restoreZoom() { rebuildWorkspace() }
         guard let index = panes.firstIndex(where: { $0 === pane }), let layout = tab.layout.removing(pane.id) else { return }
         pane.shutdown()
         tab.layout = layout
@@ -657,6 +668,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     @objc func splitHorizontal() { split(vertical: false) }
     private func split(vertical: Bool) {
         guard let tab = selectedTab else { newLocal(); return }
+        if tab.restoreZoom() { rebuildWorkspace() }
         let original = tab.activePane
         guard let pane = replica(of: original) else { return }
         let splitter = NSSplitView(); splitter.isVertical = vertical; splitter.dividerStyle = .thin
@@ -675,6 +687,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         let old = tab.activePane
         if old.hasActiveProcess, !Dialogs.confirm("重新连接？", text: "当前连接或本机工具将结束，并重新建立原会话连接。", action: "重新连接") { return }
         guard let pane = replica(of: old) else { return }
+        if tab.restoreZoom() { rebuildWorkspace() }
         old.shutdown()
         tab.layout = tab.layout.replacing(old.id, with: .pane(pane)); tab.activePane = pane
         rebuildWorkspace(); select(tab)
@@ -765,6 +778,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         } else { window?.title = tabs.isEmpty ? "OShell" : "\(tabs.count) 个标签 · \(panes.count) 个终端 · 当前无活动标签 — OShell"; recordButton.title = "记录"; recordButton.isEnabled = false }
     }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(togglePaneZoom) {
+            menuItem.title = selectedTab?.zoomedPane == nil ? "放大当前分屏" : "恢复分屏布局"
+            return isSecurityUnlocked && (selectedTab?.layout.panes.count ?? 0) > 1
+        }
+        if [#selector(nextPane), #selector(previousPane)].contains(menuItem.action) { return isSecurityUnlocked && (selectedTab?.layout.panes.count ?? 0) > 1 }
+        if menuItem.action == #selector(showQuickSessionSwitcher) { return isSecurityUnlocked && NSApp.modalWindow == nil && window?.attachedSheet == nil }
         if menuItem.action == #selector(checkForUpdates) {
             menuItem.title = appUpdater.hasPendingInstallation ? "安装已下载的更新…" : "检查更新…"
             return isSecurityUnlocked && NSApp.modalWindow == nil && appUpdater.canCheck
@@ -810,7 +829,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
               destination.isSecurityUnlocked, window?.attachedSheet == nil else { return }
         let ids = Set(tab.layout.panes.map(\.id))
         syncTargets.subtract(ids); composerTargets.subtract(ids); quickSendSelected.subtract(ids)
-        tab.layout.view.removeFromSuperview(); tabs.remove(at: index); tabHistory.removeAll { $0 == tab.id }
+        tab.displayView.removeFromSuperview(); tabs.remove(at: index); tabHistory.removeAll { $0 == tab.id }
         if selectedTab === tab { selectedTab = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)] }
         rebuildWorkspace(); refreshOperatorState()
         destination.tabs.append(tab); destination.selectedTab = tab

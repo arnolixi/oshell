@@ -129,6 +129,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     private let header = NSTextField(labelWithString: "")
     let closeButton = PaneCloseButton()
     let transferProgress = ZmodemProgressView()
+    let clockView = TerminalClockView()
     let searchPanel = TerminalSearchPanel()
     private var detector = ZmodemDetector()
     private var logger: SessionLogger?
@@ -157,6 +158,8 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     private var oneTimePassword: String?
     let externalTerminalType: String?
     private(set) var sshConnectionGroup: SSHConnectionGroup?
+    private(set) var opensConfiguredTunnels = false
+    private(set) var skipsDuplicateTunnels = false
     let reusesSSHConnection: Bool
     let isBlank: Bool
     var transferSelection: ((TransferDirection) -> (files: [URL], directory: URL?)?)?
@@ -247,6 +250,9 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
             } else if profile.proxy.kind != .none {
                 lines.append("代理：" + profile.proxy.kind.title + " · " + display(profile.proxy.host) + ":\(profile.proxy.port)")
             } else if !profile.jumpHost.isEmpty { lines.append("跳板机：" + display(profile.jumpHost)) }
+            if profile.tunnels.contains(where: \.enabled) {
+                lines.append("隧道策略：" + (reusesSSHConnection ? "复用原 SSH 连接，不重复开启" : skipsDuplicateTunnels ? "同一会话配置已有隧道连接，本连接不重复开启" : "由首次连接启用"))
+            }
             lines.append("状态：" + (ended ? "已结束，当前为本机工具模式" : (sessionReady ? "已连接" : "连接中")))
         } else { lines += ["", "本地终端", "会话：" + display(profile.name)] }
         return lines.joined(separator: "\n")
@@ -319,7 +325,8 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         self.sshConnectionGroup = connectionGroup ?? (profile.kind == .ssh ? try? SSHConnectionGroup(profile: profile) : nil); self.reusesSSHConnection = reuseConnection
         self.knownHostsFile = knownHostsFile
         let options = TerminalOptions(cols: 100, rows: 30, cursorStyle: .steadyBlock, scrollback: preferences.scrollback,
-                                      enableSixelReported: false, kittyImageCacheLimitBytes: 4 * 1024 * 1024)
+                                      enableSixelReported: false, kittyImageCacheLimitBytes: 4 * 1024 * 1024,
+                                      ambiguousCharactersAreWide: preferences.ambiguousCharactersAreWide)
         terminal = OShellTerminal(frame: NSRect(x: 0, y: 0, width: 900, height: 580),
                                   font: Self.font(preferences), options: options)
         super.init()
@@ -347,7 +354,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         header.translatesAutoresizingMaskIntoConstraints = false
         headerBar.addSubview(header); headerBar.addSubview(closeButton)
         header.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(focusHeader)))
-        [headerBar, searchPanel, terminal, transferProgress].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
+        [headerBar, searchPanel, terminal, clockView, transferProgress].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: headerBar.leadingAnchor),
             header.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
@@ -366,6 +373,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
             terminal.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
             terminal.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4)
         ])
+        clockView.constrain(to: terminal)
         let progressWidth = transferProgress.widthAnchor.constraint(equalToConstant: 360)
         progressWidth.priority = .defaultHigh; progressWidth.isActive = true
         apply(preferences)
@@ -376,8 +384,14 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     func apply(_ prefs: Preferences) {
         guard !isShutdown else { return }
         preferences = prefs
-        terminal.font = Self.font(prefs)
-        terminal.privateUseFallbackFont = TerminalSymbolFont.matching(terminal.font)
+        clockView.apply(prefs)
+        terminal.preferColorEmoji = prefs.preferColorEmoji
+        let font = Self.font(prefs)
+        if terminal.font.fontName != font.fontName || terminal.font.pointSize != font.pointSize { terminal.font = font }
+        let fallback = TerminalSymbolFont.matching(font)
+        if terminal.privateUseFallbackFont?.fontName != fallback?.fontName || terminal.privateUseFallbackFont?.pointSize != fallback?.pointSize {
+            terminal.privateUseFallbackFont = fallback
+        }
         terminal.changeScrollback(prefs.scrollback)
         searchPanel.bufferDidChange(resized: true)
         let scheme = prefs.colorScheme
@@ -414,10 +428,21 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         terminal.window?.makeFirstResponder(terminal)
     }
     func start() {
+        guard !started, !isShutdown, !ended else { return }
         do {
             var connectionProfile = profile
+            if profile.kind == .ssh && profile.tunnels.contains(where: \.enabled) {
+                if reusesSSHConnection { connectionProfile.tunnels = [] }
+                else {
+                    guard let group = sshConnectionGroup else { throw ModelError.invalid("无法建立隧道占用管理，请重新连接。") }
+                    opensConfiguredTunnels = group.reserveConfiguredTunnels()
+                    skipsDuplicateTunnels = !opensConfiguredTunnels
+                    if skipsDuplicateTunnels { connectionProfile.tunnels = [] }
+                }
+            }
             if reusesSSHConnection { connectionProfile.proxyID = nil; connectionProfile.proxy = ProxySettings(); connectionProfile.jumpHost = ""; connectionProfile.runtimeProxyRoute = [] }
             var args = profile.kind == .ssh ? try connectionProfile.sshArguments(knownHostsFile: knownHostsFile, proxyHelper: ZmodemTransfer.helperDirectory.appendingPathComponent("OShellProxy")) : ["-l"]
+            if skipsDuplicateTunnels { args.insert(contentsOf: ["-o", "ClearAllForwardings=yes"], at: 0) }
             if let group = sshConnectionGroup { args = try group.arguments(for: profile, clone: reusesSSHConnection) + args }
             if profile.kind == .ssh && !reusesSSHConnection {
                 let helper = ZmodemTransfer.helperDirectory.appendingPathComponent("OShellAskpass").path.replacingOccurrences(of: "%", with: "%%")
@@ -447,7 +472,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
                                   currentDirectory: NSHomeDirectory())
             if reusesSSHConnection { sessionReady = true }
             refreshHeader(); onState?()
-        } catch { ended = true; refreshHeader(); beginEndedInput(); onState?(); onError?(error.localizedDescription) }
+        } catch { sshConnectionGroup?.connectionProcessEnded(); ended = true; refreshHeader(); beginEndedInput(); onState?(); onError?(error.localizedDescription) }
     }
     private func beginEndedInput() {
         guard endedInput == nil else { return }
@@ -666,6 +691,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     func shutdown() {
         guard !isShutdown else { return }
         isShutdown = true
+        clockView.dispose()
         searchPanel.dispose()
         if let window = terminal.window, let responder = window.firstResponder as? NSView,
            responder === terminal || responder.isDescendant(of: view) {
@@ -826,6 +852,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
            (try? RemotePath.validate(url.path)) != nil { remoteDirectory = url.path }
     }
     func processTerminated(source: TerminalView, exitCode: Int32?) {
+        sshConnectionGroup?.connectionProcessEnded()
         idleTimer?.cancel(); idleTimer = nil; sessionReady = false
         hostProbeWork?.cancel(); hostProbeWork = nil; hostProbeTimeout?.cancel(); hostProbeTimeout = nil; hostProbeToken = nil
         let pendingEcho = hostProbeEcho?.flush() ?? Data(); hostProbeEcho = nil; display(pendingEcho)
@@ -881,7 +908,57 @@ final class TerminalTab {
     let id = UUID()
     var layout: PaneLayout
     var activePane: TerminalPane
+    private(set) var zoomedPane: TerminalPane?
+    private var dividerFractions = [ObjectIdentifier: CGFloat]()
+    private var restoreFractionsPending = false
+    var displayView: NSView { zoomedPane?.view ?? layout.view }
+    var displayMinimumSize: NSSize { zoomedPane == nil ? layout.minimumSize : NSSize(width: 220, height: 140) }
+    func zoom(_ pane: TerminalPane) {
+        guard layout.panes.count > 1, layout.panes.contains(where: { $0 === pane }) else { return }
+        if zoomedPane == nil { dividerFractions = layout.dividerFractions }
+        else { zoomedPane?.view.removeFromSuperview(); layout.reattachViews() }
+        layout.view.removeFromSuperview(); pane.view.removeFromSuperview()
+        zoomedPane = pane; activePane = pane
+    }
+    @discardableResult func restoreZoom() -> Bool {
+        guard let zoomedPane else { return false }
+        zoomedPane.view.removeFromSuperview(); self.zoomedPane = nil
+        layout.reattachViews(); restoreFractionsPending = true
+        return true
+    }
+    func restoreDividerPositionsIfNeeded() {
+        guard restoreFractionsPending, layout.view.window != nil else { return }
+        layout.restoreDividers(dividerFractions)
+        dividerFractions.removeAll(); restoreFractionsPending = false
+    }
     var hasUnreadOutput: Bool { layout.panes.contains(where: \.hasUnreadOutput) }
-    func markOutputRead() { layout.panes.forEach { $0.markOutputRead() } }
+    func markOutputRead() {
+        if let zoomedPane { zoomedPane.markOutputRead() }
+        else { layout.panes.forEach { $0.markOutputRead() } }
+    }
     init(_ pane: TerminalPane) { layout = .pane(pane); activePane = pane }
+}
+
+extension PaneLayout {
+    var dividerFractions: [ObjectIdentifier: CGFloat] {
+        guard case .split(let split, let a, let b) = self else { return [:] }
+        let extent = (split.isVertical ? split.bounds.width : split.bounds.height) - split.dividerThickness
+        let length = split.isVertical ? a.view.frame.width : a.view.frame.height
+        var result = a.dividerFractions.merging(b.dividerFractions, uniquingKeysWith: { first, _ in first })
+        result[ObjectIdentifier(split)] = extent > 0 ? min(1, max(0, length / extent)) : 0.5
+        return result
+    }
+    func reattachViews() {
+        guard case .split(let split, let a, let b) = self else { return }
+        a.reattachViews(); b.reattachViews()
+        if a.view.superview !== split { a.view.removeFromSuperview(); split.insertArrangedSubview(a.view, at: 0) }
+        if b.view.superview !== split { b.view.removeFromSuperview(); split.addArrangedSubview(b.view) }
+    }
+    func restoreDividers(_ fractions: [ObjectIdentifier: CGFloat]) {
+        guard case .split(let split, let a, let b) = self else { return }
+        split.adjustSubviews()
+        let extent = max(0, (split.isVertical ? split.bounds.width : split.bounds.height) - split.dividerThickness)
+        split.setPosition(extent * (fractions[ObjectIdentifier(split)] ?? 0.5), ofDividerAt: 0)
+        a.restoreDividers(fractions); b.restoreDividers(fractions)
+    }
 }

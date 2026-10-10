@@ -88,6 +88,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
         if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.complete(controller) }
         if CommandLine.arguments.contains("--command-input-test") { CommandInputTest.run(controller) }
+        if CommandLine.arguments.contains("--unicode-display-test") { UnicodeDisplayTest.run(controller) }
+        if CommandLine.arguments.contains("--tunnel-ownership-test") { TunnelOwnershipTest.run(controller) }
+        if CommandLine.arguments.contains("--terminal-clock-test") { TerminalClockTest.run(controller) }
+        if CommandLine.arguments.contains("--navigation-experience-test") { NavigationExperienceTest.run(controller) }
         if CommandLine.arguments.contains("--pane-close-test") { PaneCloseTest.run(controller) }
         if CommandLine.arguments.contains("--proxy-catalog-test") { ProxyCatalogTest.run(controller) }
         if CommandLine.arguments.contains("--directory-sync-test") { DirectorySyncTest.run(controller) }
@@ -200,6 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(file, "新建窗口", #selector(WorkspaceController.newWindow), "n", [.command, .shift], target: self)
         add(file, "代理管理…", #selector(WorkspaceController.showProxyManager))
         add(file, "会话管理…", #selector(WorkspaceController.showSessionManager), "o", [.command, .shift])
+        add(file, "快速切换 / 连接会话…", #selector(WorkspaceController.showQuickSessionSwitcher), "o", [.command, .option])
         add(file, "立即同步共享数据", #selector(WorkspaceController.syncWebDAVNow))
         add(file, "处理同步冲突…", #selector(WorkspaceController.resolvePendingSharedConflicts))
         add(file, "放弃本机同步草稿…", #selector(WorkspaceController.discardPendingSharedConflicts))
@@ -237,6 +242,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.addItem(.separator())
         add(view, "新建左右分屏", #selector(WorkspaceController.splitVertical), "d")
         add(view, "新建上下分屏", #selector(WorkspaceController.splitHorizontal), "d", [.command, .shift])
+        add(view, "放大当前分屏", #selector(WorkspaceController.togglePaneZoom), "\r", [.command, .shift])
+        add(view, "下一个分屏", #selector(WorkspaceController.nextPane), "]", [.command, .option])
+        add(view, "上一个分屏", #selector(WorkspaceController.previousPane), "[", [.command, .option])
         add(view, "开始 / 停止日志记录…", #selector(WorkspaceController.toggleLogging), "l", [.command, .shift])
         add(view, "下一个标签", #selector(WorkspaceController.nextTab), "\t", .control)
         add(view, "上一个标签", #selector(WorkspaceController.previousTab), "\t", [.control, .shift])

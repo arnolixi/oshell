@@ -72,14 +72,14 @@ extension WorkspaceController {
         let strip = TabStripView(); configureTerminalTabStrip(strip)
         strip.onAdd = { [weak self, weak node] in self?.activeTabGroupID = node?.id; self?.newBlankTab() }
         strip.update(tabs: entries, selected: active, numbers: tabNumbers); configureGroupHeading(strip, group: node); groupStrips.append((node, strip))
-        let view = TerminalTabGroupView(strip: strip, content: active?.layout.view ?? emptyTabGroupView(node))
-        let minimum = NSSize(width: max(320, entries.map { $0.layout.minimumSize.width }.max() ?? 280), height: (entries.map { $0.layout.minimumSize.height }.max() ?? 140) + TabStripView.barHeight)
+        let view = TerminalTabGroupView(strip: strip, content: active?.displayView ?? emptyTabGroupView(node))
+        let minimum = NSSize(width: max(320, entries.map { $0.displayMinimumSize.width }.max() ?? 280), height: (entries.map { $0.displayMinimumSize.height }.max() ?? 140) + TabStripView.barHeight)
         view.frame = NSRect(origin: .zero, size: minimum); return (view, minimum)
     }
     func tabDropTarget(source: UUID, point: NSPoint) -> TabDropHost.Target? {
         guard tabs.contains(where: { $0.id == source }), terminalHost.bounds.contains(point) else { return nil }
         for tab in visibleTerminalTabs {
-            let view = customTabLayout == nil ? tab.layout.view : tab.layout.view.superview ?? tab.layout.view
+            let view = customTabLayout == nil ? tab.displayView : tab.displayView.superview ?? tab.displayView
             let rect = terminalHost.convert(view.bounds, from: view).intersection(terminalHost.bounds)
             guard !rect.isEmpty, rect.contains(point) else { continue }
             let overStrip = groupStrips.contains { group, strip in

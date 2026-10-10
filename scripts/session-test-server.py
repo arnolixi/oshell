@@ -17,7 +17,7 @@ root = Path(sys.argv[1]); root.mkdir(parents=True, exist_ok=True)
 (root/"server.pid").write_text(str(os.getpid()))
 key = paramiko.RSAKey.generate(2048)
 fixture = {'user': 'oshell-test', 'password': secrets.token_urlsafe(20), 'master': secrets.token_urlsafe(20), 'proxyPassword': secrets.token_urlsafe(20)}
-state = dict(authenticated=0, idleMessages=0, aliveMessages=0, proxyAuthentications=0, localForwards=0, remoteForwards=0, localeRequests=0)
+state = dict(authenticated=0, idleMessages=0, aliveMessages=0, proxyAuthentications=0, localForwards=0, remoteForwards=0, remoteForwardRequests=0, localeRequests=0)
 lock = threading.Lock()
 def record(key):
     with lock:
@@ -67,6 +67,7 @@ class Server(paramiko.ServerInterface):
         if destination[0] != '127.0.0.1' or destination[1] not in [fixture['echoPort'], fixture['legacyPort'], fixture['modernPort']]: return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
         self.destinations[chanid] = destination; record('localForwards'); return paramiko.OPEN_SUCCEEDED
     def check_port_forward_request(self, address, port):
+        record('remoteForwardRequests')
         if address != '127.0.0.1' or port != fixture['remotePort']: return False
         sock = socket.socket(); sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); sock.bind((address, port)); sock.listen(); self.forwards.append(sock)
         def forward(conn):

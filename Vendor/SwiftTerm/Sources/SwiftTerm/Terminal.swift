@@ -1366,7 +1366,7 @@ open class Terminal {
                 }
                 
                 let rune = UnicodeScalar (code)
-                chWidth = UnicodeUtil.columnWidth(rune: rune)
+                chWidth = UnicodeUtil.columnWidth(rune: rune, ambiguousIsWide: options.ambiguousCharactersAreWide)
                 if chWidth > 0 {
                     let charData = makeCharData (attribute: curAttr, scalar: rune, size: Int8 (chWidth))
                     insertCharacter(charData)
@@ -1395,7 +1395,7 @@ open class Terminal {
                 } else {
                     // Invalid UTF-8 sequence, fall back to interpreting the first byte
                     let rune = UnicodeScalar(code)
-                    chWidth = UnicodeUtil.columnWidth(rune: rune)
+                    chWidth = UnicodeUtil.columnWidth(rune: rune, ambiguousIsWide: options.ambiguousCharactersAreWide)
                     if chWidth > 0 {
                         let charData = makeCharData (attribute: curAttr, scalar: rune, size: Int8 (chWidth))
                         insertCharacter(charData)
@@ -1406,11 +1406,11 @@ open class Terminal {
                 // Now the challenge is that we have a character, not a rune, and we want to compute
                 // the width of it.
                 if ch.unicodeScalars.count == 1 {
-                    chWidth = UnicodeUtil.columnWidth(rune: ch.unicodeScalars.first!)
+                    chWidth = UnicodeUtil.columnWidth(rune: ch.unicodeScalars.first!, ambiguousIsWide: options.ambiguousCharactersAreWide)
                 } else {
                     chWidth = 0
                     for scalar in ch.unicodeScalars {
-                        let width = UnicodeUtil.columnWidth(rune: scalar)
+                        let width = UnicodeUtil.columnWidth(rune: scalar, ambiguousIsWide: options.ambiguousCharactersAreWide)
                         if width < 0 {
                             chWidth = -1
                             break
@@ -1520,8 +1520,10 @@ open class Terminal {
                                     updateCharData(&cd, char: newCh, size: Int32(oldSize))
                                 }
                             } else if isVs15 {
-                                updateCharData(&cd, char: newCh, size: 1)
-                                if oldSize == 2 && buffer.x > 0 {
+                                let base = getCharacter(for: cd).unicodeScalars.first
+                                let textWidth: Int32 = options.ambiguousCharactersAreWide && base.map(UnicodeUtil.isAmbiguousWidth) == true ? 2 : 1
+                                updateCharData(&cd, char: newCh, size: textWidth)
+                                if oldSize == 2 && textWidth == 1 && buffer.x > 0 {
                                     buffer.x -= 1
                                 }
                             } else if narrowRI && UnicodeUtil.isRegionalIndicator(firstScalar) && oldSize == 1 && lastx + 1 < cols {

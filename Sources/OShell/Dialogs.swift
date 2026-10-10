@@ -18,6 +18,7 @@ enum Dialogs {
         #if OSHELL_LEGACY
         gpu.state = .off; gpu.isEnabled = false; gpu.title = "旧系统使用标准终端渲染"
         #endif
+        let clock = TerminalClockSettingsView(current)
         let zmodem = NSButton(checkboxWithTitle: "自动识别 rz/sz 文件传输", target: nil, action: nil); zmodem.state = current.autoZmodem ? .on : .off
         let autoCopy = NSButton(checkboxWithTitle: "选中终端文本后自动复制", target: nil, action: nil); autoCopy.state = current.copyOnSelect ? .on : .off
         let trimTrailing = NSButton(checkboxWithTitle: "复制时删除尾部空白", target: nil, action: nil)
@@ -34,7 +35,7 @@ enum Dialogs {
         let appearanceView = AppearanceSettingsView(preferences: current)
         defer { appearanceView.dispose() }
         let tabs = NSTabView(frame: NSRect(x: 0, y: 0, width: 840, height: 550))
-        let basic = GeneralSettingsView(font: font, size: size, history: history, gpu: gpu, input: [zmodem, autoCopy, trimOptions, rightPaste, previewPaste])
+        let basic = GeneralSettingsView(font: font, size: size, history: history, gpu: gpu, input: [zmodem, autoCopy, trimOptions, rightPaste, previewPaste], clock: clock)
         let general = NSTabViewItem(identifier: "general"); general.label = "常规"; general.view = basic; tabs.addTabViewItem(general)
         let colors = NSTabViewItem(identifier: "appearance"); colors.label = "主题与配色"; colors.view = appearanceView; tabs.addTabViewItem(colors)
         let updatesView = UpdateSettingsView(preferences: current)
@@ -43,6 +44,8 @@ enum Dialogs {
         if let storageView {
             let storage = NSTabViewItem(identifier: "storage"); storage.label = "数据与同步"; storage.view = storageView; tabs.addTabViewItem(storage)
         }
+        let textView = TerminalTextSettingsView(current)
+        let textTab = NSTabViewItem(identifier: "text"); textTab.label = "文字"; textTab.view = textView; tabs.addTabViewItem(textTab)
         let about = NSTabViewItem(identifier: "about"); about.label = "关于"; about.view = AboutSettingsView(preferences: current); tabs.addTabViewItem(about)
         tabs.selectTabViewItem(at: updatesSelected ? 2 : (appearanceSelected ? 1 : 0))
         let dialog = SettingsWindow(tabs: tabs)
@@ -60,6 +63,8 @@ enum Dialogs {
         #endif
         prefs.copyOnSelect = autoCopy.state == .on; prefs.rightClickPaste = rightPaste.state == .on; prefs.confirmMultilinePaste = previewPaste.state == .on
         prefs.copyTrimLeadingWhitespace = trimLeading.state == .on; prefs.copyTrimTrailingWhitespace = trimTrailing.state == .on
+        textView.apply(to: &prefs)
+        clock.apply(to: &prefs)
         prefs.clamp(); return prefs
     }
     static func message(_ text: String) {

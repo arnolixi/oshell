@@ -100,6 +100,9 @@ public struct TerminalOptions {
     /// Width for individual Regional Indicator symbols. `.wide` (default) preserves existing
     /// behavior. `.narrow` matches system wcwidth() and avoids cursor divergence with tmux.
     public var regionalIndicatorWidth: RegionalIndicatorWidth
+    /// Optional CJK convention for East Asian Ambiguous characters. Applies to
+    /// newly written cells; configure at terminal creation to keep history consistent.
+    public var ambiguousCharactersAreWide: Bool
     /// BiDi state for new paragraphs after startup or reset.
     public var initialBidiState: BidiPresentationState
     /// Maximum rows that the renderer processes as one BiDi paragraph.
@@ -128,6 +131,7 @@ public struct TerminalOptions {
   public init(cols: Int = Self.default.cols, rows: Int = Self.default.rows, convertEol: Bool = Self.default.convertEol, termName: String = Self.default.termName, cursorStyle: CursorStyle = Self.default.cursorStyle, screenReaderMode: Bool = Self.default.screenReaderMode, scrollback: Int = Self.default.scrollback, tabStopWidth: Int = Self.default.tabStopWidth,
               enableSixelReported: Bool = Self.default.enableSixelReported, kittyImageCacheLimitBytes: Int = Self.default.kittyImageCacheLimitBytes, ansi256PaletteStrategy: Ansi256PaletteStrategy = Self.default.ansi256PaletteStrategy,
               regionalIndicatorWidth: RegionalIndicatorWidth = Self.default.regionalIndicatorWidth,
+              ambiguousCharactersAreWide: Bool = false,
               initialBidiState: BidiPresentationState = Self.default.initialBidiState,
               maximumBidiParagraphRows: Int = Self.default.maximumBidiParagraphRows,
               initialBidiArrowKeySwap: Bool = Self.default.initialBidiArrowKeySwap) {
@@ -143,6 +147,7 @@ public struct TerminalOptions {
         self.kittyImageCacheLimitBytes = kittyImageCacheLimitBytes
         self.ansi256PaletteStrategy = ansi256PaletteStrategy
         self.regionalIndicatorWidth = regionalIndicatorWidth
+        self.ambiguousCharactersAreWide = ambiguousCharactersAreWide
         self.initialBidiState = initialBidiState
         self.maximumBidiParagraphRows = max(1, maximumBidiParagraphRows)
         self.initialBidiArrowKeySwap = initialBidiArrowKeySwap

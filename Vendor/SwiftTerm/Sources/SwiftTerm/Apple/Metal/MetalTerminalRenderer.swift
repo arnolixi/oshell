@@ -181,6 +181,7 @@ struct CacheSignature: Hashable {
     let isAltBuffer: Bool
     let kittyStamp: KittyCacheStamp
     let bidiHostPolicy: BidiHostPolicy
+    let preferColorEmoji: Bool
 }
 
 final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
@@ -708,6 +709,11 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                          placementsCount: kittyState.placementsByKey.count,
                                          nextImageId: kittyState.nextImageId,
                                          nextPlacementId: kittyState.nextPlacementId)
+        #if os(macOS)
+        let preferColorEmoji = terminalView.preferColorEmoji
+        #else
+        let preferColorEmoji = false
+        #endif
         let signature = CacheSignature(scale: Double(scale),
                                        cellWidth: Double(cellWidth),
                                        cellHeight: Double(cellHeight),
@@ -720,7 +726,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                        fontSize: Double(terminalView.fontSet.normal.pointSize),
                                        isAltBuffer: terminalView.terminal.isCurrentBufferAlternate,
                                        kittyStamp: kittyStamp,
-                                       bidiHostPolicy: terminalView.bidiHostPolicy)
+                                       bidiHostPolicy: terminalView.bidiHostPolicy, preferColorEmoji: preferColorEmoji)
         let signatureChanged = signature != cacheSignature
         if signatureChanged {
             rowCache.removeAll()
@@ -2461,7 +2467,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                                          usingFg: terminalView.effectiveCaretColor,
                                                          andBg: caretTextColor) ?? [.font: terminalView.fontSet.normal]
         let character = charData.getCharacter()
-        if let fallback = terminalView.privateUseFont(for: character,
+        if let fallback = terminalView.cellFallbackFont(for: character,
             base: (attributes[.font] as? TTFont) ?? terminalView.fontSet.normal) { attributes[.font] = fallback }
         let attributedString = NSAttributedString(string: UnicodeUtil.textPresentationAdjusted(character), attributes: attributes)
         let ctline = CTLineCreateWithAttributedString(attributedString)

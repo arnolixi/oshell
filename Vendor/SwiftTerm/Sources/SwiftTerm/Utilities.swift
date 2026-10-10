@@ -389,7 +389,16 @@ struct UnicodeUtil {
      *   -1 if the value is not printable, otherwise the number of columsn that the rune occupies.
      * - Parameter rune: a UnicodeScalar
      */
-    static func columnWidth (rune: UnicodeScalar) -> Int
+    static func columnWidth (rune: UnicodeScalar, ambiguousIsWide: Bool = false) -> Int {
+        let width = defaultColumnWidth(rune: rune)
+        // Combining marks, selectors and controls keep their original widths.
+        if ambiguousIsWide, width == 1, isAmbiguousWidth(rune) { return 2 }
+        return width
+    }
+    static func isAmbiguousWidth(_ rune: UnicodeScalar) -> Bool {
+        rune.value >= 0xA1 && bisearch(rune: rune.value, table: AmbiguousWidthData.ranges, max: AmbiguousWidthData.ranges.count - 1) != 0
+    }
+    private static func defaultColumnWidth (rune: UnicodeScalar) -> Int
     {
         let irune = rune.value
         if irune < 0x2000 {

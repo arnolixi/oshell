@@ -16,6 +16,7 @@ final class SSHConnectionGroup {
     private let profileID: UUID, host: String, user: String, port: Int
     private let lock = NSLock()
     private var holders = Set<UUID>()
+    private let tunnelOwnerID = UUID()
     private var authenticated = false, stopped = false
 
     init(profile: SessionProfile, external: Bool = false) throws {
@@ -26,7 +27,14 @@ final class SSHConnectionGroup {
         directory = URL(fileURLWithPath: String(cString: template))
     }
     func attach(_ id: UUID) { lock.lock(); holders.insert(id); lock.unlock() }
-    func authenticatedConnectionReady() { lock.lock(); authenticated = true; lock.unlock() }
+    func reserveConfiguredTunnels() -> Bool {
+        SSHTunnelOwnership.shared.acquire(profile: profileID, owner: tunnelOwnerID, controlPath: controlPath)
+    }
+    func connectionProcessEnded() { SSHTunnelOwnership.shared.processEnded(profile: profileID, owner: tunnelOwnerID) }
+    func authenticatedConnectionReady() {
+        lock.lock(); authenticated = true; lock.unlock()
+        SSHTunnelOwnership.shared.established(profile: profileID, owner: tunnelOwnerID)
+    }
     var isAuthenticated: Bool { lock.lock(); defer { lock.unlock() }; return authenticated }
     var isAvailable: Bool {
         lock.lock(); let allowed = authenticated && !stopped; lock.unlock()
@@ -53,10 +61,14 @@ final class SSHConnectionGroup {
     }
     private func close() {
         lock.lock(); guard !stopped else { lock.unlock(); return }; stopped = true; lock.unlock()
-        let directory = directory, controlPath = controlPath, host = host
+        let directory = directory, controlPath = controlPath, host = host, profileID = profileID, tunnelOwnerID = tunnelOwnerID
+        SSHTunnelOwnership.shared.closing(profile: profileID, owner: tunnelOwnerID)
         Self.cleanup.enter()
         DispatchQueue.global(qos: .utility).async {
-            defer { try? FileManager.default.removeItem(at: directory); Self.cleanup.leave() }
+            defer {
+                if SSHTunnelOwnership.shared.finishedClosing(profile: profileID, owner: tunnelOwnerID) { try? FileManager.default.removeItem(at: directory) }
+                Self.cleanup.leave()
+            }
             let task = Process(); task.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
             task.arguments = ["-F", "/dev/null", "-S", controlPath, "-O", "exit", "--", host]
             task.standardInput = FileHandle.nullDevice; task.standardOutput = FileHandle.nullDevice; task.standardError = FileHandle.nullDevice

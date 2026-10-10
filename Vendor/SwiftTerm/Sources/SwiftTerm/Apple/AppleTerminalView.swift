@@ -147,6 +147,9 @@ private struct FallbackFontKey: Hashable {
     let character: Character
 }
 private var fallbackFontCache: [FallbackFontKey: TTFont] = [:]
+#if os(macOS)
+private var colorEmojiFontCache: [CGFloat: NSFont] = [:]
+#endif
 
 private func resolvedFont(for character: Character, base: TTFont) -> TTFont {
     let key = FallbackFontKey(baseFont: ObjectIdentifier(base), character: character)
@@ -190,12 +193,33 @@ extension TerminalView {
         #endif
     }
 
+    func cellFallbackFont(for character: Character, base: TTFont) -> TTFont? {
+        if let symbol = privateUseFont(for: character, base: base) { return symbol }
+        #if os(macOS)
+        let scalars = character.unicodeScalars
+        guard preferColorEmoji, !scalars.contains(where: { $0.value == 0xFE0E }),
+              let first = scalars.first, first.properties.isEmoji,
+              first.properties.isEmojiPresentation || scalars.contains(where: { $0.value == 0xFE0F || $0.value == 0x20E3 }) else { return nil }
+        let size = base.pointSize
+        if let font = colorEmojiFontCache[size] { return font }
+        guard let font = NSFont(name: "AppleColorEmoji", size: size) else { return nil }
+        if colorEmojiFontCache.count >= 32 { colorEmojiFontCache.removeAll(keepingCapacity: true) }
+        colorEmojiFontCache[size] = font
+        return font
+        #else
+        return nil
+        #endif
+    }
+
     /// Release optional process-wide drawing caches once the host has closed its
     /// last terminal. Rebuilt on demand; never changes terminal contents/fonts.
     public static func releaseSharedRenderCaches() {
         precondition(Thread.isMainThread)
         cgColorCache.removeAll(keepingCapacity: false)
         fallbackFontCache.removeAll(keepingCapacity: false)
+        #if os(macOS)
+        colorEmojiFontCache.removeAll(keepingCapacity: false)
+        #endif
         ctLineCache.removeAll(keepingCapacity: false)
     }
 }
@@ -1227,7 +1251,7 @@ extension TerminalView {
             let renderCodePoint = character.unicodeScalars.count == 1
                 ? character.unicodeScalars.first!.value : UInt32(ch.code)
 
-            let symbolFont = blinkHidden ? nil : privateUseFont(for: character,
+            let symbolFont = blinkHidden ? nil : cellFallbackFont(for: character,
                 base: (currentAttributes[.font] as? TTFont) ?? fontSet.normal)
 
             // Render Powerline separators independently of the font so their
@@ -1286,7 +1310,7 @@ extension TerminalView {
                 previousPlaceholder = placeholder
                 previousPlaceholderAttribute = attr
             } else if !blinkHidden && (symbolFont != nil || (bidiLayout != nil && TerminalBidi.needsCellIsolation(character))) {
-                // A missing private-use symbol gets an explicit single-cell
+                // A fallback symbol or emoji gets an explicit cell-anchored
                 // font run; CoreText otherwise ignores it in font cascades.
                 // In BiDi rows, Arabic-script cells and cells holding combining
                 // sequences or emoji are isolated into their own column-anchored

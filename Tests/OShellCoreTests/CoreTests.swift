@@ -396,6 +396,16 @@ final class CoreTests {
         XCTAssertTrue(KeyboardShortcut(122, 0).isValid)
         XCTAssertEqual(KeyboardShortcut(3, 13).display, "⌃⇧⌘F")
         XCTAssertEqual(Set(ShortcutKey.all.map(\.code)).count, ShortcutKey.all.count)
+        for action in [ShortcutAction.zoomPane, .nextPane, .previousPane, .quickSwitch] {
+            var upgraded = KeyboardShortcuts()
+            let binding = action.defaults[0]
+            upgraded.overrides[ShortcutAction.newBlank.rawValue] = .init(binding)
+            try upgraded.validate()
+            XCTAssertEqual(upgraded.action(for: binding), .newBlank)
+            XCTAssertTrue(upgraded.bindings(for: action).isEmpty)
+            upgraded.overrides[action.rawValue] = .init(binding)
+            XCTAssertThrowsError(try upgraded.validate())
+        }
         for action in ShortcutAction.allCases {
             for shortcut in action.defaults { XCTAssertTrue(shortcut.isValid) }
         }
@@ -816,6 +826,22 @@ final class CoreTests {
         XCTAssertTrue(restored.preferences.copyOnSelect && restored.preferences.rightClickPaste)
         XCTAssertEqual(restored.ftpProfiles, [ftp])
         var invalid = command; invalid.text = "bad\0"; XCTAssertThrowsError(try invalid.validate())
+    }
+    func testTerminalClockPreferences() throws {
+        let old = try JSONDecoder().decode(Preferences.self, from: Data("{}".utf8))
+        XCTAssertTrue(old.preferColorEmoji && !old.ambiguousCharactersAreWide)
+        var textPreferences = old; textPreferences.preferColorEmoji = false; textPreferences.ambiguousCharactersAreWide = true
+        let textRestored = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(textPreferences))
+        XCTAssertTrue(!textRestored.preferColorEmoji && textRestored.ambiguousCharactersAreWide)
+        XCTAssertTrue(!old.terminalClockEnabled)
+        XCTAssertEqual(old.terminalClockPosition, .topRight)
+        for position in TerminalClockPosition.allCases {
+            var prefs = old; prefs.terminalClockEnabled = true; prefs.terminalClockPosition = position
+            let restored = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(prefs))
+            XCTAssertTrue(restored.terminalClockEnabled); XCTAssertEqual(restored.terminalClockPosition, position)
+        }
+        let unknown = try JSONDecoder().decode(Preferences.self, from: Data("{\"terminalClockEnabled\":true,\"terminalClockPosition\":\"future-position\"}".utf8))
+        XCTAssertTrue(unknown.terminalClockEnabled); XCTAssertEqual(unknown.terminalClockPosition, .topRight)
     }
     func testCopyWhitespacePreferences() throws {
         let old = try JSONDecoder().decode(Preferences.self, from: Data("{}".utf8))
@@ -1937,6 +1963,7 @@ extension CoreTests {
         try tests.testArchiveValidationLimits()
         try tests.testPrivateAtomicFileAndFailedWrite()
         try tests.testOperatorPreferencesAndCommandsRoundTrip()
+        try tests.testTerminalClockPreferences()
         try tests.testCopyWhitespacePreferences()
         try tests.testPasteFramingAndPathValidation()
         try tests.testHighlightRulesAndRegexBudget()
@@ -1963,7 +1990,7 @@ extension CoreTests {
         tests.testInvalidZmodemHeadersRemainOrdinaryOutput()
         try tests.testLoggerFlushesEveryAcceptedChunk()
         tests.testCancellationDropsInFlightBytesAcrossEveryBoundary()
-        if failures.isEmpty { print("PASS: 67 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
+        if failures.isEmpty { print("PASS: 68 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
         else { failures.forEach { print("FAIL: \($0)") }; exit(1) }
     }
 }

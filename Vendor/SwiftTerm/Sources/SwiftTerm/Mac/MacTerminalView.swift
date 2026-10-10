@@ -350,6 +350,15 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     public var disableFullRedrawOnAnyChanges = false
     /// App-provided symbol font, used only for private-use characters missing
     /// from the selected text font. Shared by CoreGraphics and Metal rendering.
+    /// Prefer the system color font for emoji-presentation clusters. Text
+    /// presentation (including VS15) and ordinary symbols are unchanged.
+    public var preferColorEmoji: Bool = true {
+        didSet {
+            if oldValue != preferColorEmoji {
+                resetCaches(); terminal.updateFullScreen(); queuePendingDisplay(); updateCursorPosition()
+            }
+        }
+    }
     public var privateUseFallbackFont: NSFont? {
         didSet { resetFont() }
     }

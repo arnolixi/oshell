@@ -66,7 +66,7 @@ class CaretView: NSView, CALayerDelegate {
         var attributes = terminal?.getAttributedValue(ch.attribute,
             usingFg: terminal?.effectiveCaretColor ?? caretColor,
             andBg: terminal?.effectiveCaretTextColor ?? NSColor.black) ?? [:]
-        if let terminal, let fallback = terminal.privateUseFont(for: character,
+        if let terminal, let fallback = terminal.cellFallbackFont(for: character,
             base: (attributes[.font] as? NSFont) ?? terminal.font) { attributes[.font] = fallback }
         let res = NSAttributedString(string: UnicodeUtil.textPresentationAdjusted(character), attributes: attributes)
         ctline = CTLineCreateWithAttributedString(res)

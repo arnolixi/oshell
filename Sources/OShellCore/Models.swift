@@ -181,6 +181,10 @@ public struct Preferences: Codable {
     }
     public var metal: Bool = true
     public var autoZmodem: Bool = true
+    public var preferColorEmoji = true
+    public var ambiguousCharactersAreWide = false
+    public var terminalClockEnabled = false
+    public var terminalClockPosition: TerminalClockPosition = .topRight
     public var copyOnSelect = true
     public var copyTrimLeadingWhitespace = false
     public var copyTrimTrailingWhitespace = false
@@ -194,7 +198,7 @@ public struct Preferences: Codable {
     public var keyboardShortcuts = KeyboardShortcuts()
     public var highlightSetID: UUID? = HighlightSet.standardID
     public init() {}
-    private enum CodingKeys: String, CodingKey { case keyboardShortcuts, fontName, fontSize, scrollback, darkTheme, metal, autoZmodem, copyOnSelect, copyTrimLeadingWhitespace, copyTrimTrailingWhitespace, rightClickPaste, confirmMultilinePaste, updateRepository, automaticUpdateChecks, masterWarningAcknowledged, quickSendBarVisible, quickSendScope, highlightSetID, interfaceTheme, colorSchemeID, customColorSchemes }
+    private enum CodingKeys: String, CodingKey { case preferColorEmoji, ambiguousCharactersAreWide, terminalClockEnabled, terminalClockPosition, keyboardShortcuts, fontName, fontSize, scrollback, darkTheme, metal, autoZmodem, copyOnSelect, copyTrimLeadingWhitespace, copyTrimTrailingWhitespace, rightClickPaste, confirmMultilinePaste, updateRepository, automaticUpdateChecks, masterWarningAcknowledged, quickSendBarVisible, quickSendScope, highlightSetID, interfaceTheme, colorSchemeID, customColorSchemes }
     public init(from decoder: Decoder) throws {
         self.init()
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -208,6 +212,10 @@ public struct Preferences: Codable {
         if let requested, colorSchemes.contains(where: { $0.id == requested && (try? $0.validate()) != nil }) { colorSchemeID = requested }
         metal = try values.decodeIfPresent(Bool.self, forKey: .metal) ?? true
         autoZmodem = try values.decodeIfPresent(Bool.self, forKey: .autoZmodem) ?? true
+        preferColorEmoji = try values.decodeIfPresent(Bool.self, forKey: .preferColorEmoji) ?? true
+        ambiguousCharactersAreWide = try values.decodeIfPresent(Bool.self, forKey: .ambiguousCharactersAreWide) ?? false
+        terminalClockEnabled = try values.decodeIfPresent(Bool.self, forKey: .terminalClockEnabled) ?? false
+        terminalClockPosition = (try values.decodeIfPresent(String.self, forKey: .terminalClockPosition)).flatMap(TerminalClockPosition.init(rawValue:)) ?? .topRight
         copyOnSelect = try values.decodeIfPresent(Bool.self, forKey: .copyOnSelect) ?? true
         copyTrimLeadingWhitespace = try values.decodeIfPresent(Bool.self, forKey: .copyTrimLeadingWhitespace) ?? false
         copyTrimTrailingWhitespace = try values.decodeIfPresent(Bool.self, forKey: .copyTrimTrailingWhitespace) ?? false
@@ -223,6 +231,10 @@ public struct Preferences: Codable {
     }
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(preferColorEmoji, forKey: .preferColorEmoji)
+        try values.encode(ambiguousCharactersAreWide, forKey: .ambiguousCharactersAreWide)
+        try values.encode(terminalClockEnabled, forKey: .terminalClockEnabled)
+        try values.encode(terminalClockPosition.rawValue, forKey: .terminalClockPosition)
         try values.encode(keyboardShortcuts, forKey: .keyboardShortcuts)
         try values.encode(fontName, forKey: .fontName); try values.encode(fontSize, forKey: .fontSize)
         try values.encode(scrollback, forKey: .scrollback); try values.encode(darkTheme, forKey: .darkTheme)

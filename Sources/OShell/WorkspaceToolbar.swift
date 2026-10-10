@@ -64,7 +64,10 @@ extension WorkspaceController {
         let heading = menu.addItem(withTitle: "", action: nil, keyEquivalent: ""); heading.image = WorkspaceToolbarIcon.split.image
         for (title, action, hint) in [
             ("左右分屏", #selector(splitVertical), "使用当前会话配置新建左右终端分屏"),
-            ("上下分屏", #selector(splitHorizontal), "使用当前会话配置新建上下终端分屏")
+            ("上下分屏", #selector(splitHorizontal), "使用当前会话配置新建上下终端分屏"),
+            ("放大当前分屏", #selector(togglePaneZoom), "临时放大当前分屏，再次操作恢复布局和比例"),
+            ("下一个分屏", #selector(nextPane), "切换到当前标签中的下一个终端"),
+            ("上一个分屏", #selector(previousPane), "切换到当前标签中的上一个终端")
         ] {
             let item = menu.addItem(withTitle: title, action: action, keyEquivalent: ""); item.target = self; item.toolTip = hint
         }
@@ -79,7 +82,10 @@ extension WorkspaceController {
         currentPropertiesButton.toolTip = canEditCurrentSessionProfile ? "当前会话属性：" + (selectedTab?.activePane.profile.name ?? "") + "（保存后新建连接生效）" : "当前会话属性：请先选择 SSH 会话"
         defaultPropertiesButton.isEnabled = isSecurityUnlocked
         splitButton.isEnabled = isSecurityUnlocked && selectedTab?.activePane.isShutdown == false
-        for item in splitButton.menu?.items.dropFirst() ?? [] { item.isEnabled = splitButton.isEnabled }
+        for item in splitButton.menu?.items.dropFirst() ?? [] {
+            item.isEnabled = splitButton.isEnabled && validateMenuItem(item)
+            if item.action == #selector(togglePaneZoom) { item.toolTip = "临时放大 / 恢复原布局 · " + ShortcutRuntime.hint(.zoomPane) }
+        }
     }
     @objc func editCurrentSessionProfile() {
         guard canEditCurrentSessionProfile, let pane = selectedTab?.activePane else { return }
