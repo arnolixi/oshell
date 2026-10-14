@@ -14,7 +14,7 @@ project = Path(__file__).resolve().parent.parent
 with tempfile.TemporaryDirectory(prefix='oshell-progress-', dir='/tmp') as temporary:
     root = Path(temporary)
     helpers = root / 'helpers'; helpers.mkdir()
-    app_bundle = Path(os.environ.get('OSHELL_TEST_APP', str(project/'dist/OShell.app')))
+    app_bundle = Path(os.environ.get('OSHELL_TEST_APP', str(project/'work/test-app/OShell.app')))
     real = app_bundle/'Contents/Helpers'
     for name in ['lrz', 'OShellAskpass', 'OShellProxy']:
         (helpers / name).symlink_to(real / name)

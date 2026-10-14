@@ -487,7 +487,7 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
             let selection = fileSelection; clearFileSelection(); window?.orderOut(nil); selection?(profile)
         } else {
             window?.orderOut(nil)
-            for profile in profiles { workspace?.open(profile) }
+            workspace?.open(profiles)
             if profiles.contains(where: { !$0.kind.isFileSession }) { workspace?.show() }
         }
     }

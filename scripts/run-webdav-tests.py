@@ -54,7 +54,7 @@ class DAV(BaseHTTPRequestHandler):
         self.respond(201 if old is None else 204, etag='"' + hashlib.sha256(data).hexdigest() + '"')
 
 def main():
-    parser = argparse.ArgumentParser(); parser.add_argument('--flavor', choices=['arm64', 'legacy', 'both'], default='both'); args = parser.parse_args()
+    parser = argparse.ArgumentParser(); parser.add_argument('--flavor', choices=['arm64', 'legacy', 'both'], default='arm64'); args = parser.parse_args()
     (ROOT/'work').mkdir(exist_ok=True); (ROOT/'validation').mkdir(exist_ok=True)
     server = ThreadingHTTPServer(('127.0.0.1', 0), DAV); threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
@@ -62,7 +62,7 @@ def main():
             base = Path(temp); interchange = base/'cross-architecture-vault.json'
             for flavor in (['arm64', 'legacy'] if args.flavor == 'both' else [args.flavor]):
                 DAV.bodies.clear()
-                app = base/('OShell-'+flavor+'.app'); source = ROOT/('dist/OShell.app' if flavor == 'arm64' else 'work/release/legacy/OShell.app')
+                app = base/('OShell-'+flavor+'.app'); source = ROOT/('work/test-app/OShell.app' if flavor == 'arm64' else 'work/test-release/legacy/OShell.app')
                 subprocess.run(['ditto', str(source), str(app)], check=True)
                 info_path = app/'Contents/Info.plist'; info = plistlib.loads(info_path.read_bytes()); identity = 'app.oshell.webdav-test.'+uuid.uuid4().hex
                 info.update(CFBundleIdentifier=identity, CFBundleName='OShell WebDAV Test', SUDefaultsDomain=identity); info_path.write_bytes(plistlib.dumps(info))

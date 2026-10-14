@@ -12,8 +12,13 @@ struct RemoteFileEntry {
     let directory: Bool
     let symbolicLink: Bool
     let unknownType: Bool
-    init(name: String, size: UInt64, modified: Date?, directory: Bool, symbolicLink: Bool, unknownType: Bool = false) {
+    let permissions: UInt32?
+    let owner: String?
+    let group: String?
+    var permissionsText: String { permissions.map(RemoteFilePermissions.display) ?? "—" }
+    init(name: String, size: UInt64, modified: Date?, directory: Bool, symbolicLink: Bool, unknownType: Bool = false, permissions: UInt32? = nil, owner: String? = nil, group: String? = nil) {
         self.name = name; self.size = size; self.modified = modified; self.directory = directory; self.symbolicLink = symbolicLink; self.unknownType = unknownType
+        self.permissions = permissions; self.owner = owner; self.group = group
     }
 }
 protocol RemoteFileBackend: AnyObject {
@@ -150,17 +155,24 @@ struct SFTPPacket {
     mutating func read64() throws -> UInt64 { let high = try read32(), low = try read32(); return (UInt64(high) << 32) | UInt64(low) }
     mutating func readBytes() throws -> Data { let count = try read32(); guard count <= 4 * 1024 * 1024 else { throw ModelError.invalid("SFTP 字段过大。") }; return try take(Int(count)) }
     mutating func readString() throws -> String { guard let text = String(data: try readBytes(), encoding: .utf8) else { throw ModelError.invalid("服务器文件名不是 UTF-8，无法安全处理。"); }; return text }
-    mutating func attributes(name: String) throws -> RemoteFileEntry {
-        let flags = try read32(); var size: UInt64 = 0, mode: UInt32 = 0; var date: Date?
+    mutating func attributes(name: String, longName: String? = nil) throws -> RemoteFileEntry {
+        let flags = try read32(); var size: UInt64 = 0, mode: UInt32 = 0; var date: Date?; var uid: UInt32?, gid: UInt32?
         if flags & 1 != 0 { size = try read64() }
-        if flags & 2 != 0 { _ = try take(8) }
+        if flags & 2 != 0 { uid = try read32(); gid = try read32() }
         if flags & 4 != 0 { mode = try read32() }
         if flags & 8 != 0 { _ = try read32(); date = Date(timeIntervalSince1970: Double(try read32())) }
         if flags & 0x80000000 != 0 {
             let count = try read32(); guard count <= 64 else { throw ModelError.invalid("SFTP 扩展字段过多。") }
             for _ in 0..<count { _ = try readBytes(); _ = try readBytes() }
         }
-        return RemoteFileEntry(name: name, size: size, modified: date, directory: mode & 0xf000 == 0x4000, symbolicLink: mode & 0xf000 == 0xa000)
+        let listing = longName.flatMap(RemoteUnixListing.init)
+        // Names are display hints only. Reject a long listing that contradicts attributes.
+        let matchingListing = listing.flatMap { item in
+            (flags & 4 == 0 || item.mode == mode) && (flags & 1 == 0 || item.size == size) ? item : nil
+        }
+        return RemoteFileEntry(name: name, size: size, modified: date, directory: mode & 0xf000 == 0x4000, symbolicLink: mode & 0xf000 == 0xa000, unknownType: flags & 4 == 0,
+            permissions: flags & 4 != 0 ? mode : nil,
+            owner: matchingListing?.owner ?? uid.map { String($0) }, group: matchingListing?.group ?? gid.map { String($0) })
     }
 }
 final class SFTPBackend: RemoteFileBackend {
@@ -237,7 +249,7 @@ final class SFTPBackend: RemoteFileBackend {
                 let count = try response.1.read32(); guard count <= 20000, entries.count + Int(count) <= 100000 else { throw ModelError.invalid("目录项目过多，请进入子目录操作。") }
                 guard count > 0 else { break }
                 for _ in 0..<count {
-                    let name = try response.1.readString(); _ = try response.1.readString(); let entry = try response.1.attributes(name: name)
+                    let name = try response.1.readString(); let longName = try response.1.readString(); let entry = try response.1.attributes(name: name, longName: longName)
                     if RemotePath.safeName(name) { entries.append(entry) }
                 }
             } catch let error as SFTPStatus where error.code == 1 { break }

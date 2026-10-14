@@ -160,7 +160,7 @@ class FTP(socketserver.StreamRequestHandler):
                             if command in ('MLSD','NLST','LIST'):
                                 for name in sorted(os.listdir(target)):
                                     info=os.stat(os.path.join(target,name)); kind='dir' if os.path.isdir(os.path.join(target,name)) else 'file'
-                                    text=f'type={kind};size={info.st_size};modify=20261006000000; {name}' if command=='MLSD' else ((('drwxr-xr-x' if kind=='dir' else '-rw-r--r--')+f' 1 ftp ftp {info.st_size} Oct 6 08:00 {name}') if command=='LIST' else name)
+                                    text=f'type={kind};size={info.st_size};modify=20261006000000;unix.mode={info.st_mode & 0o7777:04o};unix.owner=deploy;unix.group=operators; {name}' if command=='MLSD' else ((('drwxr-xr-x' if kind=='dir' else '-rw-r--r--')+f' 1 ftp ftp {info.st_size} Oct 6 08:00 {name}') if command=='LIST' else name)
                                     conn.sendall((text+'\r\n').encode())
                             elif command=='RETR':
                                 with open(target,'rb') as source:

@@ -835,13 +835,26 @@ final class CoreTests {
         XCTAssertTrue(!textRestored.preferColorEmoji && textRestored.ambiguousCharactersAreWide)
         XCTAssertTrue(!old.terminalClockEnabled)
         XCTAssertEqual(old.terminalClockPosition, .topRight)
+        XCTAssertEqual(old.terminalClockFontName, ""); XCTAssertEqual(old.terminalClockFontSize, 12)
+        XCTAssertEqual(old.terminalClockColor, ""); XCTAssertEqual(old.terminalClockOpacity, 0.5)
         for position in TerminalClockPosition.allCases {
             var prefs = old; prefs.terminalClockEnabled = true; prefs.terminalClockPosition = position
+            prefs.terminalClockFontName = "Helvetica"; prefs.terminalClockFontSize = 36
+            prefs.terminalClockColor = "#00FF00"; prefs.terminalClockOpacity = 0.25
             let restored = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(prefs))
             XCTAssertTrue(restored.terminalClockEnabled); XCTAssertEqual(restored.terminalClockPosition, position)
+            XCTAssertEqual(restored.terminalClockFontName, "Helvetica"); XCTAssertEqual(restored.terminalClockFontSize, 36)
+            XCTAssertEqual(restored.terminalClockColor, "#00FF00"); XCTAssertEqual(restored.terminalClockOpacity, 0.25)
         }
         let unknown = try JSONDecoder().decode(Preferences.self, from: Data("{\"terminalClockEnabled\":true,\"terminalClockPosition\":\"future-position\"}".utf8))
         XCTAssertTrue(unknown.terminalClockEnabled); XCTAssertEqual(unknown.terminalClockPosition, .topRight)
+        var invalid = old; invalid.terminalClockFontSize = .infinity; invalid.terminalClockOpacity = .nan
+        invalid.terminalClockColor = "bad"; invalid.terminalClockFontName = "bad\nfont"; invalid.clamp()
+        XCTAssertEqual(invalid.terminalClockFontSize, 12); XCTAssertEqual(invalid.terminalClockOpacity, 0.5)
+        XCTAssertEqual(invalid.terminalClockColor, ""); XCTAssertEqual(invalid.terminalClockFontName, "")
+        let clamped = try JSONDecoder().decode(Preferences.self, from: Data("{\"terminalClockFontSize\":999,\"terminalClockOpacity\":-2,\"terminalClockColor\":\"invalid\"}".utf8))
+        XCTAssertEqual(clamped.terminalClockFontSize, 96); XCTAssertEqual(clamped.terminalClockOpacity, 0)
+        XCTAssertEqual(clamped.terminalClockColor, "")
     }
     func testCopyWhitespacePreferences() throws {
         let old = try JSONDecoder().decode(Preferences.self, from: Data("{}".utf8))

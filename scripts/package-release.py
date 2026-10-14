@@ -23,6 +23,7 @@ WORK = ROOT / 'work/release'
 OUT = ROOT / 'dist/installers'
 LOG = ROOT / 'validation'
 INFO = plistlib.loads((ROOT/'scripts/Info.plist').read_bytes())
+INCLUDE_TESTS = False
 VERSION = INFO['CFBundleShortVersionString']
 PROGRAMS = {'OShell':'MacOS/OShell', 'OShell-ZOC':'MacOS/OShell-ZOC',
     'OShell-FileZilla':'Helpers/OShell-FileZilla.app/Contents/MacOS/OShell-FileZilla',
@@ -39,7 +40,8 @@ def output(args):
 
 def build_swift(flavor, arch, minimum):
     base = ROOT / ('work/build-legacy' if flavor == 'legacy' else f'work/build-compat-{arch}' if flavor == 'compat' else f'work/build-modern-{arch}')
-    env = dict(os.environ, OSHELL_LEGACY='1' if flavor == 'legacy' else '0', OSHELL_MACOS_MINIMUM=minimum)
+    if INCLUDE_TESTS: base = ROOT / f'work/build-test-{flavor}-{arch}'
+    env = dict(os.environ, OSHELL_LEGACY='1' if flavor == 'legacy' else '0', OSHELL_MACOS_MINIMUM=minimum, OSHELL_TEST_HARNESS='1' if INCLUDE_TESTS else '0')
     args = ['swift','build','--package-path',ROOT,'--scratch-path',base/'swift','--cache-path',base/'cache',
         '--config-path',base/'config','--security-path',base/'security','--disable-sandbox','-c','release',
         '--triple',f'{arch}-apple-macosx{minimum}', '-Xlinker','-rpath','-Xlinker','@executable_path/../Frameworks',
@@ -85,6 +87,7 @@ def assemble(flavor, arches, minimum, binaries, helpers):
     for bundle in binaries[arches[0]].glob('*.bundle'):
         shutil.copytree(bundle,resources/bundle.name)
     info=dict(INFO,LSMinimumSystemVersion=minimum)
+    if INCLUDE_TESTS: info['OShellTestHarness'] = True
     (contents/'Info.plist').write_bytes(plistlib.dumps(info))
     bridge=contents/'Helpers/OShell-FileZilla.app'
     bridge_info=plistlib.loads((ROOT/'scripts/FileZilla-Info.plist').read_bytes());bridge_info['LSMinimumSystemVersion']=minimum
@@ -127,6 +130,8 @@ def assemble(flavor, arches, minimum, binaries, helpers):
     return app
 
 def package(flavor, arches, minimum, app, package_format="both"):
+    if plistlib.loads((app/'Contents/Info.plist').read_bytes()).get('OShellTestHarness'):
+        raise ValueError('Test applications cannot be packaged for release')
     run(['python3',ROOT/'scripts/check-public-source.py','--app',app],log=f'package-{flavor}-privacy.log')
     assert (app/'Contents/Resources/OShell-LICENSE.txt').read_bytes()==(ROOT/'LICENSE').read_bytes(), 'Rebuild the app with the project license before packaging'
 
@@ -177,7 +182,11 @@ def package(flavor, arches, minimum, app, package_format="both"):
     return artifacts
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--flavor',choices=[*TARGETS, 'all'],default='all');parser.add_argument('--repository',help='Public GitHub owner/repo to embed as the default update source');parser.add_argument('--apps-only',action='store_true');parser.add_argument('--package-only',action='store_true');parser.add_argument('--format',choices=['both','dmg'],default='both');parser.add_argument('--test-core',action='store_true');args=parser.parse_args()
+    global INCLUDE_TESTS, WORK
+    parser=argparse.ArgumentParser();parser.add_argument('--flavor',choices=[*TARGETS, 'all'],default='all');parser.add_argument('--repository',help='Public GitHub owner/repo to embed as the default update source');parser.add_argument('--apps-only',action='store_true');parser.add_argument('--package-only',action='store_true');parser.add_argument('--format',choices=['both','dmg'],default='both');parser.add_argument('--test-core',action='store_true');parser.add_argument('--tests',action='store_true',help='Include isolated UI tests; requires --apps-only');args=parser.parse_args()
+    if args.tests and not args.apps_only: parser.error('--tests requires --apps-only; test apps are never release packages')
+    INCLUDE_TESTS = args.tests
+    if INCLUDE_TESTS: WORK = ROOT/'work/test-release'
     if args.apps_only and args.package_only: parser.error('--apps-only and --package-only are mutually exclusive')
     if args.test_core and args.package_only: parser.error('--test-core requires a source build')
     if args.repository:

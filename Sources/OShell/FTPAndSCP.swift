@@ -62,29 +62,31 @@ final class FTPBackend: RemoteFileBackend {
             let kind = facts["type"]?.lowercased() ?? ""
             if kind == "cdir" || kind == "pdir" || !RemotePath.safeName(name) { continue }
             let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.timeZone = TimeZone(secondsFromGMT: 0); formatter.dateFormat = "yyyyMMddHHmmss"
-            entries.append(RemoteFileEntry(name: name, size: UInt64(facts["size"] ?? "") ?? 0, modified: facts["modify"].flatMap { formatter.date(from: String($0.prefix(14))) }, directory: kind == "dir", symbolicLink: kind.contains("slink")))
+            entries.append(RemoteFileEntry(name: name, size: UInt64(facts["size"] ?? "") ?? 0, modified: facts["modify"].flatMap { formatter.date(from: String($0.prefix(14))) }, directory: kind == "dir", symbolicLink: kind.contains("slink"),
+                permissions: RemoteFilePermissions.octal(facts["unix.mode"]).map { $0 | (kind == "dir" ? 0x4000 : kind.contains("slink") ? 0xa000 : 0x8000) },
+                owner: ["unix.ownername", "unix.owner", "unix.uid"].compactMap { facts[$0] }.first { !$0.isEmpty },
+                group: ["unix.groupname", "unix.group", "unix.gid"].compactMap { facts[$0] }.first { !$0.isEmpty }))
         }
         return entries
     }
     static func parseLIST(_ data: Data) throws -> [RemoteFileEntry] {
         guard let text = String(data: data, encoding: .utf8) else { throw ModelError.invalid("FTP 文件名不是 UTF-8。"); }
-        let unix = try NSRegularExpression(pattern: #"^([bcdlps-][rwxstST-]{9})[+@.]?\s+\d+\s+\S+\s+\S+\s+(\d+)\s+[A-Za-z]{3}\s+\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})\s+(.*)$"#)
         let dos = try NSRegularExpression(pattern: #"^\d{2}-\d{2}-\d{2,4}\s+\d{1,2}:\d{2}(?:AM|PM)\s+(<DIR>|\d+)\s+(.*)$"#, options: [.caseInsensitive])
         var entries = [RemoteFileEntry]()
         for line in text.components(separatedBy: .newlines) where !line.isEmpty && !line.hasPrefix("total ") {
             let string = line as NSString, range = NSRange(location: 0, length: (line as NSString).length)
             let name: String, directory: Bool, symbolic: Bool, size: UInt64
-            if let match = unix.firstMatch(in: line, range: range) {
-                let permissions = string.substring(with: match.range(at: 1))
-                symbolic = permissions.hasPrefix("l"); directory = permissions.hasPrefix("d")
-                let rawName = string.substring(with: match.range(at: 3))
-                name = symbolic ? rawName.components(separatedBy: " -> ")[0] : rawName
-                size = UInt64(string.substring(with: match.range(at: 2))) ?? 0
+            var permissions: UInt32?, owner: String?, group: String?
+            if let listing = RemoteUnixListing(line) {
+                permissions = listing.mode; owner = listing.owner; group = listing.group
+                symbolic = listing.mode & 0xf000 == 0xa000; directory = listing.mode & 0xf000 == 0x4000
+                name = symbolic ? listing.name.components(separatedBy: " -> ")[0] : listing.name
+                size = listing.size
             } else if let match = dos.firstMatch(in: line, range: range) {
                 let kind = string.substring(with: match.range(at: 1)); directory = kind.uppercased() == "<DIR>"; symbolic = false
                 size = UInt64(kind) ?? 0; name = string.substring(with: match.range(at: 2))
             } else { throw ModelError.invalid("FTP LIST 格式无法识别。"); }
-            if RemotePath.safeName(name) { entries.append(RemoteFileEntry(name: name, size: size, modified: nil, directory: directory, symbolicLink: symbolic)) }
+            if RemotePath.safeName(name) { entries.append(RemoteFileEntry(name: name, size: size, modified: nil, directory: directory, symbolicLink: symbolic, permissions: permissions, owner: owner, group: group)) }
         }
         return entries
     }

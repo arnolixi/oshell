@@ -4,9 +4,20 @@
 
 set -euo pipefail
 export OSHELL_LEGACY=0
+export OSHELL_MACOS_MINIMUM=13.0
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
-build_dir="${OSHELL_BUILD_DIR:-$project_root/work/build}"
-app_dir="$project_root/dist/OShell.app"
+export OSHELL_TEST_HARNESS=0
+if [ "$#" -gt 0 ]; then
+    if [ "$#" -eq 1 ] && [ "$1" = "--tests" ]; then export OSHELL_TEST_HARNESS=1
+    else echo 'Usage: bash scripts/build.sh [--tests]' >&2; exit 2; fi
+fi
+if [ "$OSHELL_TEST_HARNESS" = 1 ]; then
+    build_dir="${OSHELL_BUILD_DIR:-$project_root/work/build-tests}"
+    app_dir="$project_root/work/test-app/OShell.app"
+else
+    build_dir="${OSHELL_BUILD_DIR:-$project_root/work/build}"
+    app_dir="$project_root/dist/OShell.app"
+fi
 mkdir -p "$project_root/validation" "$build_dir" "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources" "$app_dir/Contents/Helpers"
 export CLANG_MODULE_CACHE_PATH="$build_dir/modules"
 export SWIFTPM_MODULECACHE_OVERRIDE="$build_dir/modules"
@@ -55,6 +66,9 @@ cp "$project_root/Vendor/SwiftTerm/LICENSE" "$app_dir/Contents/Resources/SwiftTe
 cp "$helper_source/COPYING" "$app_dir/Contents/Resources/lrzsz-COPYING.txt"
 cp "$project_root/Vendor/lrzsz-0.12.20.tar.gz" "$app_dir/Contents/Resources/"
 cp "$project_root/scripts/Info.plist" "$app_dir/Contents/Info.plist"
+if [ "$OSHELL_TEST_HARNESS" = 1 ]; then
+    /usr/libexec/PlistBuddy -c 'Add OShellTestHarness bool true' "$app_dir/Contents/Info.plist"
+fi
 swift "$project_root/scripts/icon.swift" "$build_dir/OShell.iconset"
 iconutil -c icns "$build_dir/OShell.iconset" -o "$app_dir/Contents/Resources/OShell.icns"
 # N_OSO debug maps contain object-file locations even with source-prefix mapping.

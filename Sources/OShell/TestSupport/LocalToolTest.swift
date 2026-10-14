@@ -55,6 +55,57 @@ enum LocalToolTest {
             }
             next(0)
         }
+        if CommandLine.arguments.contains("--command-connection-test") {
+            controller.newBlankTab(); let tab = controller.selectedTab!, pane = tab.activePane
+            func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+            func status() -> TabStripView.ConnectionStatus? {
+                controller.window?.contentView.flatMap { root in views(root).compactMap { $0 as? TabStripView.Item }.first { $0.id == tab.id }?.connectionStatus }
+            }
+            let known = root.appendingPathComponent("known_hosts").path
+            let ssh = "ssh -F /dev/null -oStrictHostKeyChecking=yes -oUserKnownHostsFile='\(known)' -oPubkeyAuthentication=no -oPreferredAuthentications=password -p \(f["sshPort"] as! Int) oshell-local-test@127.0.0.1\r"
+            checks["blankStartsRed"] = status() == .disconnected
+            send(pane, ssh)
+            wait("commandSSHRequestsAuthentication", { text(pane).lowercased().contains("password:") }) {
+                checks["authenticationShowsGreen"] = status() == .commandConnection && pane.tabConnectionStatus.color == .systemGreen
+                checks["tooltipDescribesCommandConnection"] = pane.connectionDetails.contains("命令行连接") && pane.connectionDetails.contains("协议：SSH")
+                send(pane, (f["password"] as! String) + "\r")
+                wait("commandSSHAuthenticated", { text(pane).contains("LOCAL_SSH_READY") }) {
+                    checks["authenticatedBlankTabStaysGreen"] = pane.isBlank && pane.ended && status() == .commandConnection
+                    checks["commandPasswordNotEchoed"] = !text(pane).contains(f["password"] as! String)
+                    send(pane, "hello\r")
+                    wait("commandSSHUsable", { text(pane).contains("LOCAL_SSH_ECHO_OK") }) {
+                        send(pane, "exit\r")
+                        wait("commandSSHExitReturnsRed", { !pane.isRunningLocalTool && status() == .disconnected }) {
+                            checks["sshExitKeepsBlankTab"] = controller.tabs.count == 1 && controller.selectedTab === tab
+                            send(pane, ssh)
+                            wait("secondCommandSSHWaiting", { pane.isRunningLocalTool && pane.terminal.getTerminal().getCursorLineText().lowercased().contains("password:") }) {
+                                checks["secondConnectionGreen"] = status() == .commandConnection
+                                send(pane, "\u{3}")
+                                wait("cancelledCommandSSHReturnsRed", { !pane.isRunningLocalTool && status() == .disconnected }) {
+                                    send(pane, "ssh -F /dev/null -oBatchMode=yes -oConnectTimeout=1 -p 1 127.0.0.1\r")
+                                    wait("failedCommandSSHReturnsRed", { !pane.isRunningLocalTool && status() == .disconnected }) {
+                                        send(pane, "ping 127.0.0.1\r")
+                                        wait("diagnosticCommandRunning", { pane.isRunningLocalTool && text(pane).contains("icmp_seq=0") }) {
+                                            checks["diagnosticCommandRemainsRed"] = status() == .disconnected
+                                            send(pane, "\u{3}")
+                                            wait("diagnosticCommandEnded", { !pane.isRunningLocalTool }) {
+                                                send(pane, "telnet 127.0.0.1 \(f["telnetPort"] as! Int)\r")
+                                                wait("commandTelnetConnected", { text(pane).contains("LOCAL_TELNET_READY") }) {
+                                                    checks["telnetConnectionGreen"] = status() == .commandConnection
+                                                    send(pane, "quit\r")
+                                                    wait("commandTelnetExitReturnsRed", { !pane.isRunningLocalTool && status() == .disconnected }) { finish() }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return
+        }
         controller.newLocal(); let pane = controller.selectedTab!.activePane
         controller.newLocal(); let peer = controller.selectedTab!.activePane
         for p in [pane, peer] { p.terminal.process.send(data: Array("exit\r".utf8)[...]) }

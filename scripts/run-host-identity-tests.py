@@ -106,7 +106,7 @@ with tempfile.TemporaryDirectory(prefix='oshell-identity-',dir='/tmp') as direct
     app=None
     try:
         with (project/'validation/host-identity-app.log').open('wb') as log:
-            app=subprocess.Popen([str(project/'dist/OShell.app/Contents/MacOS/OShell'),'--local-password-test' if local_password else ('--live-keepalive-test' if live_keepalive else '--host-identity-test')],env=env,stdout=log,stderr=log)
+            app=subprocess.Popen([str(project/'work/test-app/OShell.app/Contents/MacOS/OShell'),'--local-password-test' if local_password else ('--live-keepalive-test' if live_keepalive else '--host-identity-test')],env=env,stdout=log,stderr=log)
             app.wait(timeout=120)
         report=json.loads((root/'result.json').read_text());report['server']=facts
         report['checks']['noExecChannelOnBastion']=facts['execRequests']==0

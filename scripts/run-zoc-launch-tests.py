@@ -6,7 +6,7 @@
 import concurrent.futures, hashlib, json, os, pathlib, secrets, shutil, signal, socket, stat, subprocess, tempfile, threading, time
 import paramiko, re
 project=pathlib.Path(__file__).resolve().parent.parent
-app=project/'dist/OShell.app/Contents/MacOS/OShell'
+app=project/'work/test-app/OShell.app/Contents/MacOS/OShell'
 launcher=app.with_name('OShell-ZOC')
 with tempfile.TemporaryDirectory(prefix='oshell-zoc-',dir='/tmp') as folder:
     root=pathlib.Path(folder);key=paramiko.RSAKey.generate(2048)

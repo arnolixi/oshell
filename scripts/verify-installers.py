@@ -27,6 +27,7 @@ def version_parts(value):
 
 def verify_app(candidate, staged, target, expected, legacy):
     info = plistlib.loads((candidate/'Contents/Info.plist').read_bytes())
+    assert not info.get('OShellTestHarness'), 'Release payload contains developer test hooks'
     for key in ['CFBundleShortVersionString', 'CFBundleVersion']:
         assert info[key] == expected[key], (key, 'stale app metadata')
     assert info['LSMinimumSystemVersion'] == target.minimum

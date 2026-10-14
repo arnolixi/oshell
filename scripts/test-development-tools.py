@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (c) 2026 OShell contributors
+"""Safety checks for local cleanup and the isolated UI test entry point."""
+import importlib.util, plistlib, subprocess, tempfile, unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+def load(name):
+    spec = importlib.util.spec_from_file_location(name.replace('-', '_'), ROOT/'scripts'/f'{name}.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); return module
+CLEAN = load('clean-local-builds')
+UI = load('run-ui-tests')
+
+class DevelopmentToolsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.root = Path(self.tmp.name)
+    def tearDown(self): self.tmp.cleanup()
+    def file(self, name):
+        p = self.root/name; p.parent.mkdir(parents=True, exist_ok=True); p.write_text('fixture'); return p
+    def test_cleanup_keeps_app_sources_keys_and_dependency_environment(self):
+        keep = [self.file(p) for p in ['dist/OShell.app/Contents/MacOS/OShell','Sources/example.swift','.release-private/key','work/test-tools/bin/python','validation/.gitkeep','validation/latest-checks.json']]
+        self.file('work/build/swift/object.o'); self.file('work/release/legacy/OShell.app/binary'); self.file('validation/old.log')
+        paths = CLEAN.candidates(self.root)
+        self.assertIn(self.root/'work/build', paths)
+        self.assertIn(self.root/'work/release', paths)
+        for p in keep: self.assertFalse(any(p == q or q in p.parents for q in paths))
+    def test_cleanup_rejects_tracked_files(self):
+        p = self.file('work/build/valuable.txt').parent
+        with self.assertRaisesRegex(RuntimeError, 'tracked'):
+            CLEAN.validate_targets(self.root, [p], ['work/build/valuable.txt'], [])
+    def test_cleanup_rejects_active_process(self):
+        exe = self.file('work/test-app/OShell.app/Contents/MacOS/OShell')
+        with self.assertRaisesRegex(RuntimeError, 'in use'):
+            CLEAN.validate_targets(self.root, [self.root/'work/test-app'], [], [exe])
+    def test_cleanup_rejects_app_and_project_root(self):
+        for p in [self.root, self.root/'dist', self.root/'dist/OShell.app']:
+            with self.assertRaises(RuntimeError): CLEAN.validate_targets(self.root, [p], [], [])
+    def test_symlink_targets_are_not_traversed(self):
+        outside = self.root/'outside'; outside.mkdir(); (outside/'keep').write_text('keep')
+        link = self.root/'work/build'; link.parent.mkdir(); link.symlink_to(outside, target_is_directory=True)
+        CLEAN.validate_targets(self.root, [link], [], [])
+        link.unlink()
+        self.assertEqual((outside/'keep').read_text(), 'keep')
+    def test_ui_runner_rejects_production_app(self):
+        app = self.root/'OShell.app'; (app/'Contents').mkdir(parents=True)
+        (app/'Contents/Info.plist').write_bytes(plistlib.dumps({}))
+        with self.assertRaisesRegex(RuntimeError, 'test app first'): UI.run_case(app, 'terminal-clock', 1)
+    def test_read_only_cache_can_be_cleaned_without_following_links(self):
+        keep = self.file('outside/keep')
+        cache = self.file('work/cache/module/file').parents[1]
+        (cache/'module/alias').symlink_to(keep.parent, target_is_directory=True)
+        (cache/'module').chmod(0o555); cache.chmod(0o555)
+        CLEAN.remove_directory(cache)
+        self.assertFalse(cache.exists()); self.assertEqual(keep.read_text(), 'fixture')
+    def test_case_catalog_is_usable_without_an_app(self):
+        output = subprocess.check_output(['python3', str(ROOT/'scripts/run-ui-tests.py'), '--list'], text=True)
+        self.assertIn('directory-picker-stress', output); self.assertIn('encrypted-startup', output)
+    def test_test_packages_are_rejected_before_building(self):
+        result = subprocess.run(['python3', str(ROOT/'scripts/package-release.py'), '--tests'], capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b'requires --apps-only', result.stderr)
+
+if __name__ == '__main__': unittest.main()

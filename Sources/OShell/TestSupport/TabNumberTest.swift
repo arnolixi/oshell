@@ -103,7 +103,8 @@ enum TabNumberTest {
         } && titlesMatchNumbers() && workspace.tabNumbers[tabs[5].id] == 5 && workspace.tabNumbers[tabs[10].id] == 1 && workspace.tabNumbers[tabs[12].id] == 2
         _ = workspace.selectTab(number: 5)
         checks["shortcutFollowsUpdatedNumber"] = workspace.selectedTab === tabs[5]
-        workspace.duplicateTab(workspace.selectedTab!)
+        let copy = NSMenuItem(); copy.representedObject = workspace.selectedTab!.id
+        workspace.copyTabSession(copy)
         checks["newDuplicateGetsLastNumber"] = workspace.tabNumbers[workspace.selectedTab!.id] == workspace.numberedTabs.count && titlesMatchNumbers()
         workspace.select(tabs[9])
         let closingGroupID = workspace.activeTabGroupID

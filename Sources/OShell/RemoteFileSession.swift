@@ -64,7 +64,9 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         filter.placeholderString = "筛选当前目录"; filter.delegate = self
         let tools = NSStackView(views: [operatorButton("上传…", target: self, action: #selector(chooseUpload)), operatorButton("下载…", target: self, action: #selector(downloadSelected)), operatorButton("SCP…", target: self, action: #selector(standaloneSCP)), transferMode, NSView(), filter]); tools.spacing = 8
         filter.widthAnchor.constraint(equalToConstant: 220).isActive = true
-        for (id, title, width) in [("name", "名称", 350.0), ("type", "类型", 90.0), ("size", "大小", 120.0), ("modified", "修改时间", 230.0)] { let c = NSTableColumn(identifier: .init(id)); c.title = title; c.width = width; table.addTableColumn(c) }
+        for (id, title, width) in [("name", "名称", 250.0), ("type", "类型", 65.0), ("size", "大小", 85.0), ("permissions", "权限", 165.0), ("owner", "所属用户", 85.0), ("group", "所属组", 85.0), ("modified", "修改时间", 170.0)] { let c = NSTableColumn(identifier: .init(id)); c.title = title; c.width = width; c.minWidth = id == "name" ? 140 : 60; table.addTableColumn(c) }
+        table.columnAutoresizingStyle = .noColumnAutoresizing
+        table.intercellSpacing = NSSize(width: 3, height: 2)
         table.delegate = self; table.dataSource = self; table.target = self; table.doubleAction = #selector(openEntry); table.allowsMultipleSelection = true; table.rowHeight = 28; table.usesAlternatingRowBackgroundColors = true
         table.registerForDraggedTypes([.fileURL]); table.canDrop = { [weak self] in self?.connected == true && self?.busy == false }
         table.onDrop = { [weak self] urls, row in
@@ -72,7 +74,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
             self.upload(urls, to: destination)
         }
         table.context = { [weak self] row in self?.menu(for: row) }
-        let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
+        let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.autohidesScrollers = true; scroll.borderType = .bezelBorder
         let hint = NSTextField(labelWithString: "拖入文件或文件夹上传；右键下载、重命名、删除。重名传输默认自动编号。")
         hint.font = .systemFont(ofSize: 11); hint.textColor = .secondaryLabelColor
         status.font = .systemFont(ofSize: 11); status.lineBreakMode = .byTruncatingMiddle; status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -194,12 +196,20 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let entry = visibleEntries[row], text: String
         switch tableColumn?.identifier.rawValue {
-        case "name": text = (entry.directory ? "📁  " : "") + entry.name
-        case "type": text = entry.unknownType ? "未知" : entry.directory ? "目录" : entry.symbolicLink ? "链接" : "文件"
+        case "name":
+            let cell = tableView.makeView(withIdentifier: RemoteFileNameCell.reuseIdentifier, owner: self) as? RemoteFileNameCell ?? RemoteFileNameCell()
+            cell.configure(entry)
+            return cell
+        case "permissions": text = entry.permissionsText
+        case "owner": text = entry.owner ?? "—"
+        case "group": text = entry.group ?? "—"
+        case "type": text = RemoteFileKind(entry).rawValue
         case "size": text = entry.directory || entry.unknownType ? "—" : ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file)
         default: if let modified = entry.modified { text = DateFormatter.localizedString(from: modified, dateStyle: .short, timeStyle: .short) } else { text = "—" }
         }
-        let label = NSTextField(labelWithString: text); label.lineBreakMode = .byTruncatingMiddle; label.toolTip = text; return label
+        let label = NSTextField(labelWithString: text)
+        if tableColumn?.identifier.rawValue == "permissions" { label.font = .oshellMonospacedSystemFont(ofSize: 12, weight: .regular) }
+        label.lineBreakMode = .byTruncatingMiddle; label.toolTip = text; return label
     }
     @objc private func go() { navigate(path.stringValue) }
     @objc private func up() { navigate((directory as NSString).deletingLastPathComponent.isEmpty ? "/" : (directory as NSString).deletingLastPathComponent) }

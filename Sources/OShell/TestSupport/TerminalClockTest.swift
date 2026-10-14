@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (c) 2026 OShell contributors
 import AppKit
+import QuartzCore
 import OShellCore
 
 enum TerminalClockTest {
@@ -12,6 +13,25 @@ enum TerminalClockTest {
             RunLoop.main.add(timer, forMode: .common); RunLoop.main.add(timer, forMode: .modalPanel)
         }
         func views(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(views) }
+        func clockControls(_ root: NSView) -> TerminalClockSettingsView? {
+            views(root).compactMap { $0 as? NSTabView }.first?.selectTabViewItem(withIdentifier: "clock")
+            return views(root).compactMap { $0 as? TerminalClockSettingsView }.first
+        }
+        func snapshot(_ view: NSView, _ name: String) {
+            guard let output = ProcessInfo.processInfo.environment["OSHELL_CLOCK_OUTPUT"] else { return }
+            let previous = NSAppearance.current; NSAppearance.current = view.effectiveAppearance
+            defer { NSAppearance.current = previous }
+            view.wantsLayer = true
+            if view.window?.contentView === view { view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor }
+            view.layoutSubtreeIfNeeded(); view.displayIfNeeded(); CATransaction.flush()
+            let scale = view.window?.backingScaleFactor ?? 1
+            guard let context = CGContext(data: nil, width: Int(view.bounds.width * scale), height: Int(view.bounds.height * scale), bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+            context.scaleBy(x: scale, y: scale)
+            context.setFillColor(view.layer?.backgroundColor ?? NSColor.windowBackgroundColor.cgColor); context.fill(view.bounds)
+            view.layer?.render(in: context)
+            guard let image = context.makeImage() else { return }
+            try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: output).deletingLastPathComponent().appendingPathComponent(name + ".png"))
+        }
         func finish() {
             workspace.shutdown()
             checks["lastPaneStopsTimer"] = !TerminalClockTicker.shared.isRunning && TerminalClockTicker.shared.subscriberCount == 0
@@ -27,7 +47,7 @@ enum TerminalClockTest {
             checks["disabledByDefaultNoTimer"] = pane.clockView.isHidden && !TerminalClockTicker.shared.isRunning
             later {
                 guard let root = NSApp.modalWindow?.contentView,
-                      let controls = views(root).compactMap({ $0 as? TerminalClockSettingsView }).first else { return }
+                      let controls = clockControls(root) else { return }
                 checks["positionDisabledUntilEnabled"] = !controls.position.isEnabled
                 controls.enabled.performClick(nil); controls.position.selectItem(withTitle: TerminalClockPosition.bottomRight.title)
                 root.layoutSubtreeIfNeeded()
@@ -62,6 +82,41 @@ enum TerminalClockTest {
                         checks["mousePassesThrough-\(gpu)-\(position.rawValue)"] = pane.view.hitTest(pane.view.convert(click, to: pane.view.superview)) === pane.terminal
                     }
                 }
+                later {
+                    guard let root = NSApp.modalWindow?.contentView, let controls = clockControls(root) else { return }
+                    if let face = controls.font.itemArray.first(where: { ($0.representedObject as? String) == "Helvetica" }) { controls.font.select(face) }
+                    controls.size.stringValue = "24"; controls.followColor.state = .off
+                    controls.color.color = NSColor(hex: "#00FF00")!; controls.transparency.doubleValue = 75
+                    controls.changed(); root.layoutSubtreeIfNeeded()
+                    checks["styleControlsFitPage"] = [controls.font, controls.size, controls.color, controls.transparency, controls.preview].allSatisfy { root.bounds.contains($0.convert($0.bounds, to: root)) }
+                    checks["previewUsesCustomStyle"] = controls.previewClock.clockFont.pointSize == 24 && controls.previewClock.alphaValue == 0.25 && controls.previewClock.foreground.rgbHex == "#00FF00"
+                    snapshot(root, "terminal-clock-settings-review")
+                    views(root).compactMap { $0 as? NSButton }.first { $0.title == "应用" }?.performClick(nil)
+                }
+                workspace.showPreferences()
+                checks["clockStyleAppliesImmediately"] = pane.clockView.clockFont.fontName == "Helvetica" && pane.clockView.clockFont.pointSize == 24 && pane.clockView.alphaValue == 0.25 && pane.clockView.foreground.rgbHex == "#00FF00"
+                let stored = try? workspace.store.load().preferences
+                checks["clockStylePersists"] = stored?.terminalClockFontName == "Helvetica" && stored?.terminalClockFontSize == 24 && stored?.terminalClockColor == "#00FF00" && stored?.terminalClockOpacity == 0.25
+                for gpu in renderers {
+                    var prefs = workspace.configuration.preferences; prefs.metal = gpu
+                    for size in [8.0, 96.0] {
+                        prefs.terminalClockFontSize = size; pane.apply(prefs); window.contentView?.layoutSubtreeIfNeeded()
+                        let rect = pane.terminal.convert(pane.clockView.bounds, from: pane.clockView)
+                        checks["customSizeFits-\(gpu)-\(size)"] = pane.terminal.bounds.contains(rect) && pane.clockView.clockFont.pointSize == CGFloat(size)
+                        checks["clockAboveTerminal-\(gpu)-\(size)"] = (pane.clockView.layer?.zPosition ?? 0) > (pane.terminal.layer?.zPosition ?? 0) && pane.clockView.hitTest(.zero) == nil
+                    }
+                }
+                var preview = workspace.configuration.preferences; preview.metal = false; preview.terminalClockPosition = .topRight
+                preview.terminalClockOpacity = 0.5; preview.terminalClockFontSize = 32
+                pane.apply(preview)
+                pane.terminal.feed(text: "\u{1b}[2J\u{1b}[H" + String(repeating: String(repeating: "INFO  ", count: 80) + "\r\n", count: 30))
+                snapshot(pane.view, "terminal-clock-overlay-review")
+                var fallback = preview; fallback.terminalClockFontName = "OShell-Missing-Clock-Font"; fallback.terminalClockColor = ""; fallback.terminalClockOpacity = 0
+                pane.apply(fallback)
+                checks["missingFontFallsBack"] = pane.clockView.clockFont.pointSize == 32 && pane.clockView.clockFont.fontName != fallback.terminalClockFontName
+                checks["automaticColorFollowsPalette"] = pane.clockView.foreground.rgbHex == fallback.colorScheme.foreground.uppercased()
+                checks["fullyTransparentClockStopsTicker"] = !pane.clockView.needsClockUpdates && !TerminalClockTicker.shared.isRunning
+                pane.apply(workspace.configuration.preferences)
                 workspace.splitVertical(); let other = tab.activePane
                 checks["splitClocksShareOneTicker"] = TerminalClockTicker.shared.subscriberCount == 2 && other.clockView.enabled
                 workspace.togglePaneZoom()
@@ -73,7 +128,7 @@ enum TerminalClockTest {
                 workspace.select(tab); next.activePane.sendManaged(Array("exit\r".utf8))
                 checks["switchBackKeepsClocks"] = TerminalClockTicker.shared.subscriberCount == 2
                 later {
-                    guard let root = NSApp.modalWindow?.contentView, let controls = views(root).compactMap({ $0 as? TerminalClockSettingsView }).first else { return }
+                    guard let root = NSApp.modalWindow?.contentView, let controls = clockControls(root) else { return }
                     controls.enabled.performClick(nil)
                     _ = PopupKeyboard.dismiss(window: NSApp.modalWindow!)
                 }

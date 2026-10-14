@@ -8,7 +8,26 @@ import OShellCore
 /// intrinsic size of a stack view inside an unconstrained clip view.
 final class TabStripView: InterfaceSurfaceView {
     static let barHeight: CGFloat = 30
+    enum ConnectionStatus {
+        case disconnected, connecting, connected, commandConnection
+        var title: String { switch self { case .disconnected: return "未连接 / 已断开"; case .connecting: return "正在连接 / 等待认证"; case .connected: return "已连接"; case .commandConnection: return "命令行连接运行中" } }
+        var color: NSColor { self == .disconnected ? .systemRed : .systemGreen }
+    }
+    class MenuButton: NSButton {
+        var makeMenu: (() -> NSMenu?)?
+        override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
+    }
+    private final class MenuPopUp: NSPopUpButton {
+        var makeMenu: (() -> NSMenu?)?
+        override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
+    }
+    private final class Clip: NSClipView {
+        var makeMenu: (() -> NSMenu?)?
+        override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
+    }
     private final class Scroll: NSScrollView {
+        var makeMenu: (() -> NSMenu?)?
+        override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
         override func scrollWheel(with event: NSEvent) {
             guard let documentView else { return }
             let delta = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) ? event.scrollingDeltaX : event.scrollingDeltaY
@@ -17,19 +36,23 @@ final class TabStripView: InterfaceSurfaceView {
             contentView.scroll(to: NSPoint(x: x, y: 0)); reflectScrolledClipView(contentView)
         }
     }
-    private final class Document: NSView { override var isFlipped: Bool { true } }
+    private final class Document: NSView {
+        var makeMenu: (() -> NSMenu?)?
+        override var isFlipped: Bool { true }
+        override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
+    }
     final class Item: NSView, NSDraggingSource {
-        final class TitleButton: NSButton {
-            var makeMenu: (() -> NSMenu?)?
+        final class TitleButton: MenuButton {
             var trackDrag: ((NSEvent) -> Bool)?
+            var onDoubleClick: (() -> Void)?
             override func mouseDown(with event: NSEvent) {
+                if event.clickCount == 2, !event.modifierFlags.contains(.control) { onDoubleClick?(); return }
                 if trackDrag?(event) == true { return }; super.mouseDown(with: event)
             }
-            override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
         }
         let id: UUID
         let selectButton = TitleButton()
-        let closeButton = NSButton()
+        let closeButton = MenuButton()
         var onSelect: (() -> Void)?
         var onClose: (() -> Void)?
         var onDuplicate: (() -> Void)?
@@ -57,6 +80,7 @@ final class TabStripView: InterfaceSurfaceView {
         func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { onDragEnd?() }
         var selected = false { didSet { needsDisplay = true } }
         var hasUnreadOutput = false { didSet { if oldValue != hasUnreadOutput { needsDisplay = true } } }
+        var connectionStatus: ConnectionStatus? { didSet { if oldValue != connectionStatus { needsDisplay = true } } }
         var preferredWidth: CGFloat = 160
         init(id: UUID) {
             self.id = id
@@ -67,10 +91,12 @@ final class TabStripView: InterfaceSurfaceView {
             selectButton.target = self; selectButton.action = #selector(selectItem)
             selectButton.makeMenu = { [weak self] in self?.makeMenu?() }
             selectButton.trackDrag = { [weak self] in self?.track($0) ?? false }
+            selectButton.onDoubleClick = { [weak self] in self?.onDuplicate?() }
             closeButton.isBordered = false
             closeButton.image = NSImage(oshellSymbolName: "xmark", accessibilityDescription: "关闭标签")
             closeButton.imageScaling = .scaleProportionallyDown
             closeButton.target = self; closeButton.action = #selector(closeItem)
+            closeButton.makeMenu = { [weak self] in self?.makeMenu?() }
             addSubview(selectButton); addSubview(closeButton)
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -84,25 +110,28 @@ final class TabStripView: InterfaceSurfaceView {
             NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4).fill()
             if selected {
                 TerminalChrome.flame.setFill()
-                NSBezierPath(roundedRect: NSRect(x: 18, y: 0, width: min(32, max(0, bounds.width - 36)), height: 2), xRadius: 1, yRadius: 1).fill()
+                NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: bounds.width, height: 2), xRadius: 1, yRadius: 1).fill()
             }
-            if hasUnreadOutput {
+            if let connectionStatus {
+                connectionStatus.color.setFill()
+                NSBezierPath(ovalIn: NSRect(x: 9, y: floor((bounds.height - 6) / 2), width: 6, height: 6)).fill()
+            } else if hasUnreadOutput {
                 NSColor.systemOrange.setFill()
                 NSBezierPath(ovalIn: NSRect(x: 9, y: floor((bounds.height - 6) / 2), width: 6, height: 6)).fill()
             }
         }
-        @objc private func selectItem() { if NSApp.currentEvent?.clickCount == 2 { onDuplicate?() } else { onSelect?() } }
+        @objc private func selectItem() { onSelect?() }
         @objc private func closeItem() { onClose?() }
         override func mouseDown(with event: NSEvent) { if track(event) { return }; if event.clickCount == 2 { onDuplicate?() } else { onSelect?() } }
         override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
     }
     private let scroll = Scroll()
     private let document = Document()
-    private let addButton = NSButton()
-    private let groupButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let addButton = MenuButton()
+    private let groupButton = MenuPopUp(frame: .zero, pullsDown: true)
     private var groupWidth: CGFloat = 0
     var backgroundMenu: (() -> NSMenu?)?
-    private let listButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let listButton = MenuPopUp(frame: .zero, pullsDown: true)
     private(set) var items = [Item]()
     private var selectedID: UUID?
     var onSelect: ((UUID) -> Void)?
@@ -119,6 +148,10 @@ final class TabStripView: InterfaceSurfaceView {
         scroll.drawsBackground = false; scroll.hasHorizontalScroller = false
         scroll.scrollerStyle = .overlay; scroll.autohidesScrollers = true
         scroll.horizontalScrollElasticity = .none; scroll.verticalScrollElasticity = .none
+        let clip = Clip(); clip.drawsBackground = false; scroll.contentView = clip
+        let background: () -> NSMenu? = { [weak self] in self?.backgroundMenu?() }
+        scroll.makeMenu = background; clip.makeMenu = background; document.makeMenu = background
+        addButton.makeMenu = background; groupButton.makeMenu = background; listButton.makeMenu = background
         scroll.documentView = document
         addButton.image = NSImage(oshellSymbolName: "plus", accessibilityDescription: "新建本地标签")
         addButton.isBordered = false; addButton.toolTip = "新建本地标签"
@@ -146,13 +179,15 @@ final class TabStripView: InterfaceSurfaceView {
         let detail: String
         var hasUnreadOutput = false
         var number: Int? = nil
+        var connectionStatus: ConnectionStatus? = nil
     }
     func setAddDescription(_ title: String) { addButton.toolTip = title; addButton.setAccessibilityLabel(title) }
     func update(tabs: [TerminalTab], selected: TerminalTab?, numbers: [UUID: Int]? = nil) {
         let numbers = numbers ?? Dictionary(uniqueKeysWithValues: tabs.enumerated().map { ($0.element.id, $0.offset + 1) })
         update(entries: tabs.map { tab in
             let title = tab.activePane.title
-            return Entry(id: tab.id, title: title, detail: tab.activePane.connectionDetails + "\n\n\(tab.layout.panes.count) 个终端 · 双击新建相同会话", hasUnreadOutput: tab.hasUnreadOutput, number: numbers[tab.id])
+            let action = tab.activePane.canDuplicateConnection ? "双击新建相同会话" : "当前状态不响应双击"
+            return Entry(id: tab.id, title: title, detail: tab.activePane.connectionDetails + "\n\n\(tab.layout.panes.count) 个终端 · " + action, hasUnreadOutput: tab.hasUnreadOutput, number: numbers[tab.id], connectionStatus: tab.activePane.tabConnectionStatus)
         }, selectedID: selected?.id)
     }
     func update(entries: [Entry], selectedID: UUID?) {
@@ -175,12 +210,13 @@ final class TabStripView: InterfaceSurfaceView {
             let item = items[index], number = entry.number ?? index + 1
             let title = entry.number.map { "\($0)  \(entry.title)" } ?? entry.title
             item.selectButton.title = title; item.hasUnreadOutput = entry.hasUnreadOutput
+            item.connectionStatus = entry.connectionStatus
             item.selectButton.oshellContentTintColor = entry.hasUnreadOutput ? .systemOrange : .labelColor
             item.selected = entry.id == selectedID
             item.selectButton.font = .systemFont(ofSize: 12, weight: item.selected || entry.hasUnreadOutput ? .semibold : .regular)
             item.selectButton.setAccessibilityLabel("标签 \(number)：\(entry.title)")
-            item.selectButton.setAccessibilityValue((item.selected ? "已选中" : "未选中") + (entry.hasUnreadOutput ? "，有未读输出" : ""))
-            item.toolTip = "\(number). \(entry.title)\n" + (entry.hasUnreadOutput ? "有新输出，切换查看后清除提示\n" : "") + entry.detail
+            item.selectButton.setAccessibilityValue((item.selected ? "已选中" : "未选中") + (entry.connectionStatus.map { "，" + $0.title } ?? "") + (entry.hasUnreadOutput ? "，有未读输出" : ""))
+            item.toolTip = "\(number). \(entry.title)\n" + (entry.connectionStatus.map { "连接状态：" + $0.title + "\n" } ?? "") + (entry.hasUnreadOutput ? "有新输出，切换查看后清除提示\n" : "") + entry.detail
             if let number = entry.number { item.toolTip = (item.toolTip ?? "") + (number <= 9 ? "\n" + ShortcutRuntime.hint(ShortcutAction(rawValue: "tab\(number)")!) + " 跳转" : "\n" + ShortcutRuntime.hint(.tabNumber) + " 输入编号跳转") }
             item.selectButton.toolTip = item.toolTip
             item.closeButton.toolTip = "关闭“\(title)”"; item.closeButton.setAccessibilityLabel("关闭“\(title)”")
@@ -198,16 +234,23 @@ final class TabStripView: InterfaceSurfaceView {
     override func layout() {
         super.layout()
         let leading = groupButton.isHidden ? 0 : groupWidth + 4
-        groupButton.frame = NSRect(x: 2, y: 2, width: groupWidth, height: max(0, bounds.height - 4))
-        scroll.frame = NSRect(x: leading, y: 0, width: max(0, bounds.width - 60 - leading), height: bounds.height)
-        let buttonHeight = min(24, bounds.height), buttonY = floor((bounds.height - buttonHeight) / 2)
-        addButton.frame = NSRect(x: bounds.width - 56, y: buttonY, width: 24, height: buttonHeight)
-        listButton.frame = NSRect(x: bounds.width - 28, y: buttonY, width: 24, height: buttonHeight)
         let contentWidth = items.reduce(CGFloat(5)) { $0 + $1.preferredWidth + 3 }
+        let availableWidth = max(0, bounds.width - 60 - leading)
+        groupButton.frame = NSRect(x: 2, y: 2, width: groupWidth, height: max(0, bounds.height - 4))
+        // Follow the final tab until the strip fills; keep the add button
+        // outside the scrolling document so it remains reachable on overflow.
+        scroll.frame = NSRect(x: leading, y: 0, width: min(contentWidth, availableWidth), height: bounds.height)
+        let buttonHeight = min(24, bounds.height), buttonY = floor((bounds.height - buttonHeight) / 2)
+        addButton.frame = NSRect(x: scroll.frame.maxX + 4, y: buttonY, width: 24, height: buttonHeight)
+        listButton.frame = NSRect(x: bounds.width - 28, y: buttonY, width: 24, height: buttonHeight)
         document.setFrameSize(NSSize(width: max(scroll.contentSize.width, contentWidth), height: scroll.contentSize.height))
         scroll.tile()
         let height = scroll.contentSize.height
         document.setFrameSize(NSSize(width: max(scroll.contentSize.width, contentWidth), height: height))
+        let offset = min(max(0, scroll.contentView.bounds.minX), max(0, contentWidth - scroll.contentSize.width))
+        if offset != scroll.contentView.bounds.minX {
+            scroll.contentView.scroll(to: NSPoint(x: offset, y: 0)); scroll.reflectScrolledClipView(scroll.contentView)
+        }
         let itemHeight = min(26, max(0, height - 4))
         var x: CGFloat = 4
         for item in items {

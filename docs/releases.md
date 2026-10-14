@@ -34,52 +34,25 @@ GitHub API 只使用自动提供的 `GITHUB_TOKEN`，无需额外 PAT。发布�
 
 参考：[GitHub 托管 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)、[macOS 15 工具链清单](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md)、[GitHub CLI Release 命令](https://cli.github.com/manual/gh_release_create)。
 
-## 安装包
+## 本地构建与 CI 安装包
 
-先在 `scripts/Info.plist` 更新版本号，并递增 build 编号。按目标生成 PKG 和 DMG：
+日常开发仅运行 `bash scripts/build.sh`，保留本机架构的 `dist/OShell.app`。四种兼容安装包通过上方 Actions 流程生成；需要构建但暂不发布时关闭 `publish`。
 
-```sh
-python3 scripts/package-release.py --flavor arm64
-python3 scripts/package-release.py --flavor legacy
-python3 scripts/verify-installers.py --flavor arm64 --flavor legacy
-```
+流水线使用 `package-release.py --flavor <目标> --format dmg --test-core`，并用 `verify-installers.py` 校验。高级手动打包命令仍可用于排查 CI，但不会由本地默认构建触发。带 UI 测试标记的应用不能打包或通过发布验证。
 
-使用 `--flavor compat` 构建 macOS 11 Universal，`--flavor intel` 构建 macOS 13 x86_64；`--flavor all` 构建上述四种发行目标。原有 macOS 13 Universal 仍可通过 `--flavor modern` 单独构建。加 `--format dmg` 仅生成 DMG；`--test-core` 同时运行构建机原生架构的核心检查。产物位于 `dist/installers/`；`--apps-only` 只组装应用，随后可用 `verify-installers.py --flavor compat --app-only` 检查部署目标。仅 DMG 校验使用 `verify-installers.py --flavor compat --format dmg`。安装包校验会只读展开或挂载载荷，不执行安装。
+## 内置更新
 
-默认使用本地 ad-hoc 签名，不代表 Developer ID 签名或 Apple 公证。公开二进制发布说明必须准确注明签名、公证和系统验证状态。向旧系统发布前，除编译与转译检查外，还应安排真实目标系统验收。
+当前客户端通过 `https://<owner>.github.io/<repository>/updates/latest.json` 获取已签名的更新信息，不调用匿名 GitHub Releases REST API，也不要求用户配置 Token。标准 Pages 地址由“更新仓库”的 `owner/repository` 推导；Pages 部署步骤见下方。
 
-## GitHub Releases 更新
+安装包仍存放在 GitHub Releases。CI 将四种目标的签名元数据嵌入 Release 说明的 `oshell-update-v1` 隐藏注释，再生成 Pages 静态索引；修改发布说明时必须保留这些注释。不会生成独立 XML 或 `*-update.zip` 附件。
 
-从 0.2.61 起，客户端通过 GitHub 的 `repos/<owner>/<repo>/releases/latest` API 读取最新正式 Release，按照系统和架构选择 DMG。Release 只需发布四个 DMG 和对应源码包，不再生成独立 XML 或 `*-update.zip` 附件。自动检查默认关闭。
+Sparkle 2.9.6 负责校验签名、下载、安装及重启。客户端通过随机路径的本机回环适配通道交给 Sparkle 处理，保留 `SURequireSignedFeed`、`SUVerifyUpdateBeforeExtraction` 及原有公钥。校验失败不降级。更新签名不等同于 Apple Developer ID 签名或公证。
 
-签名更新信息由流水线嵌入 Release 说明中的 `oshell-update-v1` 隐藏注释。不要删除或编辑这些注释；修改普通版本说明时应完整保留。下载地址、文件大小、版本和最低系统都包含在签名信息中。客户端还核对其是否匹配本仓库实际上传的附件。
+Apple Silicon 的 macOS 13+ 使用 arm64 包，macOS 11/12 使用 Universal 包；Intel 的 macOS 13+ 使用 x86_64 包，更早系统使用 macOS 10.13 Intel 包。客户端只下载匹配目标的 DMG。
 
-Sparkle 2.9.6 继续负责签名验证、下载、安装和重新启动，以保留 macOS 10.13 支持。应用只在本机回环地址提供一个随机路径的临时适配通道，将 Release 中原样保留的签名数据交给 Sparkle；没有公开更新服务或额外服务器。`SURequireSignedFeed`、`SUVerifyUpdateBeforeExtraction` 和原有公钥保持启用，签名失败不会降级。
+CI 使用 `OSHELL_UPDATE_SIGNING_KEY` Secret。维护者本地的 `.release-private/` 不属于构建缓存，清理脚本不会删除其中的私钥。现有发行线不能随意替换公钥或生成新密钥；独立 fork 应使用自己的更新密钥。
 
-架构选择：Apple Silicon 的 macOS 13+ 使用 arm64 包，macOS 11/12 使用 Universal 包；Intel 的 macOS 13+ 使用 x86_64 包，更早系统使用 macOS 10.13 Intel 包。不会下载全部安装包。
-
-**不兼容旧客户端的更新方式。** 从旧版升级需手动安装 0.2.61 或更新版本一次，此后使用程序内检查更新。历史 Release 不会被重写；新发布流程不生成旧客户端的过渡附件。
-
-发布依赖：
-
-```sh
-python3 -m venv work/release-tools
-work/release-tools/bin/pip install -r scripts/requirements-release.txt
-```
-
-本机签名私钥位于 `.release-private/sparkle-ed25519.key`，必须保持 0600 权限并独立备份，不能进入源码、日志或 Release。GitHub Actions 使用同一密钥的加密 Secret `OSHELL_UPDATE_SIGNING_KEY`。不要重新生成密钥替代现有公钥对应的密钥。
-
-本机生成发布签名元数据的示例（替换仓库与版本）：
-
-```sh
-python3 scripts/package-release.py --flavor all --format dmg
-python3 scripts/verify-installers.py --format dmg
-work/release-tools/bin/python scripts/publish-updates.py --repository owner/repository --tag v0.2.61
-```
-
-签名脚本验证 DMG 与安装校验报告一致，然后仅生成内部 JSON 元数据；不创建额外应用包，不上传附件。CI 收集这些数据写入 Release 说明，并验证远端说明及全部附件完整后才公开发布。
-
-建立独立的新发行线或 fork 时，应配置自己的更新公钥与签名密钥；这不能作为替换现有用户信任密钥的办法。签名更新不等于 Apple Developer ID 签名或 Apple 公证。
+签名工具依赖见 `scripts/requirements-release.txt`。`publish-updates.py` 只生成内部签名元数据，不上传或发布；正常发布应交给 Actions 完成校验和发布流程。
 
 ## 对应源代码与许可
 
@@ -100,7 +73,7 @@ python3 scripts/export-public-source.py --ref HEAD --output dist/source/OShell-s
 
 打开 DMG 后，`OShell.app` 旁边提供 `release-manifest.json` 和 `SHA256SUMS.txt`。前者记录该包的版本、构建号、系统目标、架构、源码提交和签名状态；后者校验包内应用、安装说明及清单文件。它不校验自身或外层 DMG，避免循环依赖。可在挂载卷根目录运行 `shasum -a 256 -c SHA256SUMS.txt`。
 
-流水线仍计算外层 DMG、源码包的校验值用于发布前验证，但这些流程内部文件不展示为 Release 附件。更新客户端从 Release 说明读取签名信息并使用 DMG；包内清单不替代更新签名或 Apple 公证。
+流水线仍计算外层 DMG、源码包的校验值用于发布前验证，但这些流程内部文件不展示为 Release 附件。更新客户端从 Pages 索引获取相同的签名信息并使用 DMG；包内清单不替代更新签名或 Apple 公证。
 
 ## 静态更新站点（GitHub Pages）
 

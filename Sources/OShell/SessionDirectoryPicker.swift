@@ -5,6 +5,21 @@ import AppKit
 import OShellCore
 
 final class SessionDirectoryTree: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate {
+    private final class Cell: NSTableCellView {
+        override var acceptsFirstResponder: Bool { false }
+        override var canBecomeKeyView: Bool { false }
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            identifier = .init("session.directory.cell")
+            let label = NSTextField(labelWithString: ""), icon = NSImageView()
+            label.font = .systemFont(ofSize: 13); label.lineBreakMode = .byTruncatingMiddle
+            icon.image = NSImage(oshellSymbolName: "folder", accessibilityDescription: nil)
+            textField = label; imageView = icon
+            for view in [icon, label] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+            NSLayoutConstraint.activate([icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3), icon.centerYAnchor.constraint(equalTo: centerYAnchor), icon.widthAnchor.constraint(equalToConstant: 16), icon.heightAnchor.constraint(equalToConstant: 16), label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6), label.centerYAnchor.constraint(equalTo: centerYAnchor), label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6)])
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    }
     private final class Node: NSObject {
         let path: String
         var children = [Node]()
@@ -15,6 +30,7 @@ final class SessionDirectoryTree: NSView, NSOutlineViewDataSource, NSOutlineView
     private let root: Node
     private var nodes = [String: Node]()
     private let excluded: [String]
+    var onSelectionChanged: (() -> Void)?
     var selectedDirectory: String? { (outline.item(atRow: outline.selectedRow) as? Node)?.path }
 
     init(directories: [String], selected: String, excluded: [String] = [], rootDirectory: String = "") {
@@ -57,6 +73,7 @@ final class SessionDirectoryTree: NSView, NSOutlineViewDataSource, NSOutlineView
     func outlineViewSelectionDidChange(_ notification: Notification) {
         selectionLabel.stringValue = selectedDirectory.map { "当前选择：" + SessionDirectory.display($0) } ?? "请选择目录"
         selectionLabel.toolTip = selectionLabel.stringValue
+        onSelectionChanged?()
     }
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int { (item as? Node)?.children.count ?? 1 }
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any { (item as? Node)?.children[index] ?? root }
@@ -64,23 +81,73 @@ final class SessionDirectoryTree: NSView, NSOutlineViewDataSource, NSOutlineView
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { selectable((item as! Node).path) }
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         let node = item as! Node
-        let cell = NSTableCellView(), label = NSTextField(labelWithString: node === root ? (node.path.isEmpty ? "/（根目录）" : SessionDirectory.display(node.path)) : String(node.path.split(separator: "/").last!))
-        let icon = NSImageView(); icon.image = NSImage(oshellSymbolName: "folder", accessibilityDescription: nil)
-        label.font = .systemFont(ofSize: 13); label.lineBreakMode = .byTruncatingMiddle
-        label.textColor = selectable(node.path) ? .labelColor : .disabledControlTextColor
-        cell.textField = label; cell.imageView = icon; cell.toolTip = SessionDirectory.display(node.path)
-        for view in [icon, label] { view.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(view) }
-        NSLayoutConstraint.activate([icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 3), icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor), icon.widthAnchor.constraint(equalToConstant: 16), icon.heightAnchor.constraint(equalToConstant: 16), label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6), label.centerYAnchor.constraint(equalTo: cell.centerYAnchor), label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6)])
+        let cell = (outlineView.makeView(withIdentifier: .init("session.directory.cell"), owner: self) as? Cell) ?? Cell(frame: .zero)
+        cell.textField?.stringValue = node === root ? (node.path.isEmpty ? "/（根目录）" : SessionDirectory.display(node.path)) : String(node.path.split(separator: "/").last!)
+        cell.textField?.textColor = selectable(node.path) ? .labelColor : .disabledControlTextColor
+        cell.toolTip = SessionDirectory.display(node.path)
         return cell
+    }
+    func dispose() {
+        onSelectionChanged = nil
+        outline.delegate = nil; outline.dataSource = nil
     }
     static func choose(directories: [String], selected: String, excluded: [String] = [], title: String = "选择会话目录", rootDirectory: String = "") -> String? {
         let tree = SessionDirectoryTree(directories: directories, selected: selected, excluded: excluded, rootDirectory: rootDirectory)
-        let alert = PopupAlert(); alert.messageText = title
-        alert.informativeText = rootDirectory.isEmpty ? "展开目录并选择目标位置；/ 表示根目录。" : "快捷引用统一保存在 /Links 下，请选择目标目录。"
-        alert.addButton(withTitle: "选择"); alert.addButton(withTitle: "取消")
-        alert.accessoryView = tree; alert.window.initialFirstResponder = tree.outline
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return tree.selectedDirectory
+        let picker = SessionDirectoryWindow(tree: tree, title: title, restricted: !rootDirectory.isEmpty)
+        return picker.run()
+    }
+}
+
+/// Only stable controls participate in the key loop. Virtualized outline rows
+/// must not leave NSAlert's automatically constructed loop with stale views.
+private final class SessionDirectoryWindow: NSObject, NSWindowDelegate {
+    let window: PopupWindow
+    private let tree: SessionDirectoryTree
+    private let chooseButton = NSButton(title: "选择", target: nil, action: nil)
+    private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
+    init(tree: SessionDirectoryTree, title: String, restricted: Bool) {
+        self.tree = tree
+        window = PopupWindow(contentRect: NSRect(x: 0, y: 0, width: 488, height: 450), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        super.init()
+        window.title = title; window.isReleasedWhenClosed = false; window.delegate = self
+        window.minSize = NSSize(width: 400, height: 350); window.autorecalculatesKeyViewLoop = false
+        let root = window.contentView!
+        let note = NSTextField(wrappingLabelWithString: restricted ? "快捷引用统一保存在 /Links 下，请选择目标目录。" : "展开目录并选择目标位置；/ 表示根目录。")
+        note.font = .systemFont(ofSize: 12); note.textColor = .secondaryLabelColor
+        for view in [note, tree, cancelButton, chooseButton] { view.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(view) }
+        for button in [cancelButton, chooseButton] { button.bezelStyle = .rounded; button.target = self }
+        chooseButton.action = #selector(choose); chooseButton.keyEquivalent = "\r"
+        cancelButton.action = #selector(cancel); cancelButton.keyEquivalent = "\u{1b}"
+        window.defaultButtonCell = chooseButton.cell as? NSButtonCell
+        tree.onSelectionChanged = { [weak self] in self?.updateSelection() }; updateSelection()
+        NSLayoutConstraint.activate([
+            note.topAnchor.constraint(equalTo: root.topAnchor, constant: 16), note.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24), note.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+            tree.topAnchor.constraint(equalTo: note.bottomAnchor, constant: 12), tree.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24), tree.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24), tree.bottomAnchor.constraint(equalTo: chooseButton.topAnchor, constant: -12),
+            chooseButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20), chooseButton.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14), chooseButton.widthAnchor.constraint(equalToConstant: 84),
+            cancelButton.trailingAnchor.constraint(equalTo: chooseButton.leadingAnchor, constant: -10), cancelButton.centerYAnchor.constraint(equalTo: chooseButton.centerYAnchor), cancelButton.widthAnchor.constraint(equalToConstant: 84)
+        ])
+        tree.outline.nextKeyView = chooseButton; chooseButton.nextKeyView = cancelButton; cancelButton.nextKeyView = tree.outline
+        window.initialFirstResponder = tree.outline
+    }
+    private func updateSelection() { chooseButton.isEnabled = tree.selectedDirectory != nil }
+    @objc private func choose() { if tree.selectedDirectory != nil { NSApp.stopModal(withCode: .OK) } }
+    @objc private func cancel() { NSApp.stopModal(withCode: .cancel) }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { cancel(); return false }
+    func run() -> String? {
+        PopupKeyboard.install()
+        let token = PopupKeyboard.register(window: window) { [weak self] in self?.cancel() }
+        defer {
+            PopupKeyboard.unregister(window: window, token: token)
+            // Break the loop while every member is strongly owned, before any
+            // autoreleased window or recycled row starts deallocating.
+            window.makeFirstResponder(nil); window.initialFirstResponder = nil
+            tree.outline.nextKeyView = nil; chooseButton.nextKeyView = nil; cancelButton.nextKeyView = nil
+            tree.dispose(); window.delegate = nil; window.orderOut(nil)
+        }
+        if let owner = PopupPresentation.owner(excluding: window) { window.present(over: owner) }
+        else { window.center(); window.makeKeyAndOrderFront(nil) }
+        window.makeFirstResponder(tree.outline)
+        return NSApp.runModal(for: window) == .OK ? tree.selectedDirectory : nil
     }
 }
 

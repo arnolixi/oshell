@@ -5,11 +5,15 @@ import AppKit
 import OShellCore
 import Darwin
 
-// Explicit, isolated transfer harnesses can exercise offscreen AppKit views
-// without taking keyboard focus from the user's foreground application.
-private let backgroundTransferTest = ProcessInfo.processInfo.environment["OSHELL_BACKGROUND_TEST"] == "1"
-    && ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] != nil
-    && CommandLine.arguments.contains(where: { ["--login-password-save-test", "--third-party-import-test", "--keyboard-shortcuts-test", "--toolbar-actions-test", "--quicksend-groups-test", "--tab-behavior-test", "--layout-test", "--zmodem-progress-test", "--zmodem-regression-test", "--file-feature-test", "--search-test", "--host-identity-test", "--session-links-test", "--session-defaults-test", "--shell-integration-test", "--live-keepalive-test", "--appearance-test", "--quicksend-persistence-test", "--local-password-test", "--management-test", "--startup-protection-test", "--tab-drag-test", "--tab-actions-test", "--master-removal-test", "--update-feature-test", "--update-integration-test", "--terminal-focus-test", "--terminal-symbols-test", "--session-directory-test", "--quicksend-focus-test", "--arrangement-scroll-test", "--tab-number-test", "--links-catalog-test", "--named-tab-groups-test"].contains($0) })
+private let testRequested = CommandLine.arguments.dropFirst().contains { $0.hasSuffix("-test") || $0.hasPrefix("--memory-") || $0 == "--compact-layout-preview" }
+    || ProcessInfo.processInfo.environment.keys.contains { $0.hasPrefix("OSHELL_") && $0.hasSuffix("_TEST_ROOT") }
+#if OSHELL_TEST_HARNESS
+private let isTestSession = testRequested && ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] != nil
+private let backgroundTransferTest = AppTestHarness.background
+#else
+private let isTestSession = false
+private let backgroundTransferTest = false
+#endif
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: WorkspaceController!
@@ -19,7 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Load the bundled brand explicitly instead of a stale LaunchServices icon.
         if let url = Bundle.main.url(forResource: "OShell", withExtension: "icns"), let icon = NSImage(contentsOf: url) { NSApp.applicationIconImage = icon }
         PopupKeyboard.install()
-        if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.install() }
+        #if OSHELL_TEST_HARNESS
+        AppTestHarness.prepare()
+        #endif
         let directory: URL
         var openingMaster: String?
         if let override = ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] { directory = URL(fileURLWithPath: override) }
@@ -49,7 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        let harness = ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] != nil && (CommandLine.arguments.contains(where: { $0.hasSuffix("-test") || $0.hasPrefix("--memory-") }) || ProcessInfo.processInfo.environment.keys.contains { $0.hasSuffix("_TEST_ROOT") })
+        let harness = isTestSession
         let shared = !harness && ((try? StorageLocation().syncDirectory()) != nil || FileManager.default.fileExists(atPath: WebDAVSync.settingsURL.path))
         BiometricUnlock.shared.configure(directory: directory)
         let store = ConfigurationStore(directory: directory, masterPassword: openingMaster, requiresMasterProtection: shared)
@@ -77,97 +83,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         launchServer?.workspaceProvider = { [weak self] in self?.windows?.externalWorkspace() }
         buildMenu()
         windows.activate(controller)
-        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-test") }) { windows.webDAV.schedule() }
-        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-test") }) { do { try controller.appUpdater.configure() } catch { Dialogs.message(error.localizedDescription) } }
+        if !isTestSession { windows.webDAV.schedule() }
+        if !isTestSession { do { try controller.appUpdater.configure() } catch { Dialogs.message(error.localizedDescription) } }
         if !backgroundTransferTest { controller.show(); NSApp.activate(ignoringOtherApps: true) }
-        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-test") }), SharedConflictDrafts.exists(for: controller.store) {
+        if !isTestSession, SharedConflictDrafts.exists(for: controller.store) {
             DispatchQueue.main.async {
                 if NSApp.modalWindow == nil { Dialogs.message("本机有尚未处理的同步草稿，请通过“会话 → 处理同步冲突…”选择保留的版本。草稿处理前不会自动载入或覆盖共享数据。") }
             }
         }
-        if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_SFTP_REUSE_TEST_ROOT"] != nil { SFTPReuseTest.run(controller) }
-        if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_ZOC_CLONE_TEST_ROOT"] != nil { SSHCloneTest.run(controller) }
-        if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_ZOC_TEST_ROOT"] != nil { ZOCLaunchTest.run(controller) }
-        if CommandLine.arguments.contains("--external-launch-service"), ProcessInfo.processInfo.environment["OSHELL_FILE_LAUNCH_TEST_ROOT"] != nil { FileLaunchTest.run(controller) }
-        if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.complete(controller) }
-        if CommandLine.arguments.contains("--command-input-test") { CommandInputTest.run(controller) }
-        if CommandLine.arguments.contains("--paste-scroll-test") { PasteScrollTest.run(controller) }
-        if CommandLine.arguments.contains("--password-selection-test") { PasswordSelectionTest.run(controller) }
-        if CommandLine.arguments.contains("--automatic-biometric-test") { AutomaticBiometricPromptTest.run(controller) }
-        if CommandLine.arguments.contains("--biometric-unlock-test") { BiometricUnlockTest.run(controller) }
-        if CommandLine.arguments.contains("--terminal-scroller-test") { TerminalScrollerTest.run(controller) }
-        if CommandLine.arguments.contains("--theme-audit-test") { ThemeAuditTest.run(controller) }
-        if CommandLine.arguments.contains("--terminal-chrome-test") { TerminalChromePreview.run(controller) }
-        if CommandLine.arguments.contains("--focus-fullscreen-test") { FocusFullscreenTest.run(controller) }
-        if CommandLine.arguments.contains("--unicode-display-test") { UnicodeDisplayTest.run(controller) }
-        if CommandLine.arguments.contains("--tunnel-ownership-test") { TunnelOwnershipTest.run(controller) }
-        if CommandLine.arguments.contains("--terminal-clock-test") { TerminalClockTest.run(controller) }
-        if CommandLine.arguments.contains("--navigation-experience-test") { NavigationExperienceTest.run(controller) }
-        if CommandLine.arguments.contains("--pane-close-test") { PaneCloseTest.run(controller) }
-        if CommandLine.arguments.contains("--proxy-catalog-test") { ProxyCatalogTest.run(controller) }
-        if CommandLine.arguments.contains("--directory-sync-test") { DirectorySyncTest.run(controller) }
-        if CommandLine.arguments.contains("--webdav-test") { WebDAVFeatureTest.run(controller) }
-        if CommandLine.arguments.contains("--shared-conflict-test") { SharedConflictTest.run(controller) }
-        if CommandLine.arguments.contains("--storage-sync-test") { StorageSyncTest.run(controller) }
-        if CommandLine.arguments.contains("--multi-window-test") { MultiWindowTest.run(controller) }
-        if CommandLine.arguments.contains("--named-tab-groups-test") { NamedTabGroupsTest.run(controller) }
-        if CommandLine.arguments.contains("--links-catalog-test") { LinksCatalogTest.run(controller) }
-        if CommandLine.arguments.contains("--tab-number-test") { TabNumberTest.run(controller) }
-        if CommandLine.arguments.contains("--arrangement-scroll-test") { ArrangementScrollTest.run(controller) }
-        if CommandLine.arguments.contains("--login-password-save-test") { LoginPasswordSavingTest.run(controller) }
-        if CommandLine.arguments.contains("--third-party-import-test") { ThirdPartyImportTest.run(controller) }
-        if CommandLine.arguments.contains("--keyboard-shortcuts-test") { KeyboardShortcutsTest.run(controller) }
-        if CommandLine.arguments.contains("--toolbar-actions-test") { ToolbarActionsTest.run(controller) }
-        if CommandLine.arguments.contains("--quicksend-groups-test") { QuickSendGroupsTest.run(controller) }
-        if CommandLine.arguments.contains("--quicksend-focus-test") { QuickSendFocusTest.run(controller) }
-        if CommandLine.arguments.contains("--session-directory-test") { SessionDirectoryTest.run(controller) }
-        if CommandLine.arguments.contains("--terminal-symbols-test") { TerminalSymbolsTest.run(controller) }
-        if CommandLine.arguments.contains("--terminal-focus-test") { TerminalFocusTest.run(controller) }
-        if CommandLine.arguments.contains("--update-feature-test") { UpdateFeatureTest.run(controller) }
-        if CommandLine.arguments.contains("--update-integration-test") { UpdateIntegrationTest.run(controller) }
-        if CommandLine.arguments.contains("--master-removal-test") { MasterRemovalTest.run(controller) }
-        if CommandLine.arguments.contains("--tab-actions-test") { TabActionsTest.run(controller) }
-        if CommandLine.arguments.contains("--tab-drag-test") { TabDragTest.run(controller) }
-        if CommandLine.arguments.contains("--startup-protection-test") { StartupProtectionTest.run(controller) }
-        if CommandLine.arguments.contains("--local-password-test") { LocalPasswordFeatureTest.run(controller) }
-        if CommandLine.arguments.contains("--quicksend-persistence-test") { QuickSendPersistenceTest.run(controller) }
-        if CommandLine.arguments.contains("--appearance-test") { AppearanceFeatureTest.run(controller) }
-        if CommandLine.arguments.contains("--live-keepalive-test") { LiveKeepAliveTest.run(controller) }
-        if CommandLine.arguments.contains("--shell-integration-test") { ShellIntegrationTest.run(controller) }
-        if CommandLine.arguments.contains("--session-defaults-test") { SessionDefaultsTest.run(controller) }
-        if CommandLine.arguments.contains("--session-links-test") { SessionLinksTest.run(controller) }
-        if CommandLine.arguments.contains("--search-test") { SearchFeatureTest.run(controller) }
-        if CommandLine.arguments.contains("--smoke-test") { SmokeTest.run(controller) }
-        if CommandLine.arguments.contains("--integration-test") { IntegrationTest.run(controller) }
-        if CommandLine.arguments.contains("--stress-test") { StressTest.run(controller) }
-        if CommandLine.arguments.contains("--password-test") { PasswordTest.run(controller) }
-        if CommandLine.arguments.contains("--session-test") { SessionFeatureTest.run(controller) }
-        if CommandLine.arguments.contains("--zmodem-progress-test") { ZmodemProgressUITest.run(controller) }
-        if CommandLine.arguments.contains("--zmodem-regression-test") { ZmodemRegressionTest.run(controller) }
-        if CommandLine.arguments.contains("--ended-session-test") { EndedSessionTest.run(controller) }
-        if CommandLine.arguments.contains("--file-feature-test") { FileFeatureTest.run(controller) }
-        if CommandLine.arguments.contains("--operator-input-test") { OperatorInputTest.run(controller) }
-        if CommandLine.arguments.contains("--operator-ui-test") { OperatorUITest.run(controller) }
-        if CommandLine.arguments.contains("--session-fullscreen-test") { SessionFullscreenTest.run(controller) }
-        if CommandLine.arguments.contains("--popup-keyboard-test") { PopupKeyboardTest.run(controller) }
-        if CommandLine.arguments.contains("--memory-profile") { MemoryProfile.run(controller) }
-        if CommandLine.arguments.contains("--memory-cycles") { MemoryCycleProfile.run(controller) }
-        if CommandLine.arguments.contains("--idle-memory-test") { IdleMemoryTest.run(controller) }
-        if CommandLine.arguments.contains("--tab-behavior-test") { TabBehaviorTest.run(controller) }
-        if CommandLine.arguments.contains("--compact-layout-preview") { CompactLayoutPreview.run(controller) }
-        if CommandLine.arguments.contains("--host-identity-test") { HostIdentityTest.run(controller) }
-        if CommandLine.arguments.contains("--session-list-test") { SessionListUITest.run(controller) }
-        if CommandLine.arguments.contains("--management-test") { ManagementUITest.run(controller) }
-        if CommandLine.arguments.contains("--quicksend-test") { QuickSendTest.run(controller) }
-        if CommandLine.arguments.contains("--filetabs-test") { FileTabsTest.run(controller) }
-        if CommandLine.arguments.contains("--unread-output-test") { UnreadOutputTest.run(controller) }
-        if CommandLine.arguments.contains("--ended-broadcast-test") { EndedBroadcastTest.run(controller) }
-        if CommandLine.arguments.contains("--local-tool-test") { LocalToolTest.run(controller) }
-        if CommandLine.arguments.contains("--filetabs-integration-test") { FileTabsIntegrationTest.run(controller) }
-        if CommandLine.arguments.contains("--layout-test") { LayoutTest.run(controller) }
+        #if OSHELL_TEST_HARNESS
+        AppTestHarness.run(controller)
+        #endif
     }
     func applicationDidBecomeActive(_ notification: Notification) {
-        guard !CommandLine.arguments.contains(where: { $0.hasSuffix("-test") }) else { return }
+        guard !isTestSession else { return }
         windows?.reloadSharedConfiguration(interactive: false)
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -289,7 +218,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+#if OSHELL_TEST_HARNESS
 if UpdateIntegrationTest.finishRelaunchFixtureIfNeeded() { exit(0) }
+#endif
 
 // FileZilla-compatible direct URLs/site references use the file launcher.
 if let first = CommandLine.arguments.dropFirst().first,
@@ -306,6 +237,16 @@ if CommandLine.arguments.dropFirst().contains(where: { $0.hasPrefix("/") || $0.l
     let values = ([bridge] + Array(CommandLine.arguments.dropFirst())).map { strdup($0) } + [nil]
     values.withUnsafeBufferPointer { buffer in _ = execv(bridge, UnsafeMutablePointer(mutating: buffer.baseAddress!)) }
     FileHandle.standardError.write(Data("OShell-ZOC 启动文件缺失，请使用完整应用包。\n".utf8)); exit(1)
+}
+// Reject diagnostic invocations before opening any application data.
+if testRequested {
+    #if OSHELL_TEST_HARNESS
+    guard ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"]?.isEmpty == false else {
+        FileHandle.standardError.write(Data("测试必须指定独立的 OSHELL_DATA_DIR。\n".utf8)); exit(64)
+    }
+    #else
+    FileHandle.standardError.write(Data("正式应用不包含测试入口；请使用 bash scripts/build.sh --tests。\n".utf8)); exit(64)
+    #endif
 }
 let app = NSApplication.shared
 signal(SIGPIPE, SIG_IGN)

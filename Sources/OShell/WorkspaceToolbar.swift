@@ -8,7 +8,7 @@ import OShellCore
 final class WorkspaceToolbar: NSStackView {
     var compactButtons = [NSButton]()
     override func layout() {
-        let position: NSControl.ImagePosition = bounds.width < 980 ? .imageOnly : .imageLeading
+        let position: NSControl.ImagePosition = bounds.width < 1080 ? .imageOnly : .imageLeading
         for button in compactButtons where button.imagePosition != position { button.imagePosition = position }
         super.layout()
     }

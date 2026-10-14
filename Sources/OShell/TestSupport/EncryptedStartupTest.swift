@@ -9,6 +9,13 @@ enum EncryptedStartupTest {
     static func install() {
         guard let directory = ProcessInfo.processInfo.environment["OSHELL_DATA_DIR"] else { return }
         let file = URL(fileURLWithPath: directory).appendingPathComponent("configuration.json")
+        if !FileManager.default.fileExists(atPath: file.path) {
+            do {
+                var config = Configuration(profiles: [SessionProfile(name: "dav-a", host: "a.example.test")])
+                config.masterPasswordVerifier = try MasterPasswordProtection.createVerifier(master)
+                try PrivateFile.write(SharedVault.encode(config, password: master), to: file)
+            } catch { fatalError("Cannot create isolated encrypted-startup fixture") }
+        }
         original = try? Data(contentsOf: file)
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
         let value = Timer(timeInterval: 0.1, repeats: true) { _ in

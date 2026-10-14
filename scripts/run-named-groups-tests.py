@@ -67,7 +67,7 @@ with tempfile.TemporaryDirectory(prefix='oshell-named-groups-', dir='/tmp') as f
     env = os.environ.copy(); env.update(OSHELL_DATA_DIR=str(config), OSHELL_BACKGROUND_TEST='1', OSHELL_NAMED_GROUPS_ROOT=folder)
     try:
         with open(project/'validation/named-groups-test.log', 'w') as log:
-            result = subprocess.run([str(pathlib.Path(os.environ.get('OSHELL_TEST_APP', str(project/'dist/OShell.app')))/'Contents/MacOS/OShell'), '--named-tab-groups-test'], env=env, stdout=log, stderr=log, timeout=100)
+            result = subprocess.run([str(pathlib.Path(os.environ.get('OSHELL_TEST_APP', str(project/'work/test-app/OShell.app')))/'Contents/MacOS/OShell'), '--named-tab-groups-test'], env=env, stdout=log, stderr=log, timeout=100)
         report = json.loads((root/'result.json').read_text())
         report['server'] = facts
         report['checks'].update(oneTransport=facts['transports']==1, oneAuthentication=facts['authenticated']==1, oneShellChannel=facts['shells']==1, noRemoteExec=facts['exec']==0, appExited=result.returncode==0)

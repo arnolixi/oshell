@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='oshell-tab-actions-', dir='/tmp') as fo
     env = os.environ.copy(); env.update(OSHELL_DATA_DIR=str(config), OSHELL_BACKGROUND_TEST='1', OSHELL_TAB_ACTIONS_ROOT=folder)
     try:
         with open(project/'validation/tab-actions-test.log', 'w') as log:
-            result = subprocess.run([str(project/'dist/OShell.app/Contents/MacOS/OShell'), '--tab-actions-test'], env=env, stdout=log, stderr=log, timeout=100)
+            result = subprocess.run([str(project/'work/test-app/OShell.app/Contents/MacOS/OShell'), '--tab-actions-test'], env=env, stdout=log, stderr=log, timeout=100)
         report = json.loads((root/'result.json').read_text())
         report['server'] = facts
         report['checks'].update(fourTransports=facts['transports']==4, fourAuthentications=facts['authenticated']==4, fiveShellChannels=facts['shells']==5, noRemoteExec=facts['exec']==0, refusalExercised=facts['rejected']==1, appExited=result.returncode==0)

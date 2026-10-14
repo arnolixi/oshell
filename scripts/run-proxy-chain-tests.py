@@ -41,9 +41,8 @@ def safe(handler,c):
  except Exception:c.close()
 def main():
  parser=argparse.ArgumentParser();parser.add_argument('--flavor',choices=['arm64','legacy'],default='arm64');args=parser.parse_args()
- app=ROOT/('dist/OShell.app' if args.flavor=='arm64' else 'work/release/legacy/OShell.app');helper=app/'Contents/MacOS/OShellProxy'
- # Helpers are packaged in Resources on current builds.
- helper=next(app.rglob('OShellProxy'));askpass=next(app.rglob('OShellAskpass'))
+ app=ROOT/('work/test-app/OShell.app' if args.flavor=='arm64' else 'work/test-release/legacy/OShell.app')
+ helper=app/'Contents/Helpers/OShellProxy';askpass=app/'Contents/Helpers/OShellAskpass'
  with tempfile.TemporaryDirectory(prefix='oshell-proxy-chain-',dir='/tmp') as raw:
   root=Path(raw);hostkey=paramiko.RSAKey.generate(2048);clientkey=paramiko.RSAKey.generate(2048)
   key=root/'private key';clientkey.write_private_key_file(str(key));key.chmod(0o600)

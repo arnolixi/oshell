@@ -31,7 +31,9 @@ enum FileFeatureTest {
                     let tree = local.appendingPathComponent("tree"); try FileManager.default.createDirectory(at: tree.appendingPathComponent("子目录"), withIntermediateDirectories: true)
                     try Data("hidden".utf8).write(to: tree.appendingPathComponent(".env")); try payload.prefix(4096).write(to: tree.appendingPathComponent("子目录/a b.bin"))
                     for (name, backend) in [("sftp", sftp as RemoteFileBackend), ("ftp", ftpBackend as RemoteFileBackend)] {
-                        try backend.connect(); checks[name + "ConnectAndList"] = try backend.list("/").contains { $0.name == "seed.txt" }
+                        try backend.connect(); let seed = try backend.list("/").first { $0.name == "seed.txt" }
+                        checks[name + "ConnectAndList"] = seed != nil
+                        checks[name + "Metadata"] = seed?.permissions != nil && seed?.owner != nil && seed?.group != nil
                         let directory = "/" + name + "-test"; try backend.mkdir(directory)
                         let remote = RemotePath.join(directory, source.lastPathComponent)
                         try backend.upload(source, to: remote) { _, _ in }
@@ -54,6 +56,7 @@ enum FileFeatureTest {
                     try ftpBackend.mkdir("/list-only/subdir")
                     try ftpBackend.upload(source, to: "/list-only/test.bin") { _, _ in }
                     let fallback = try ftpBackend.list("/list-only")
+                    checks["ftpLISTMetadata"] = fallback.allSatisfy { $0.permissions != nil && $0.owner == "ftp" && $0.group == "ftp" }
                     checks["ftpUnixListFallback"] = fallback.contains { $0.name == "subdir" && $0.directory } && fallback.contains { $0.name == "test.bin" && $0.size == UInt64(payload.count) }
                     let dos = try FTPBackend.parseLIST(Data("10-06-26  08:00AM       <DIR>          folder name\r\n10-06-26  08:00AM               12     file name.txt\r\n".utf8))
                     checks["ftpDOSListParsing"] = dos.count == 2 && dos[0].directory && dos[1].size == 12

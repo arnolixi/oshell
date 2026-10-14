@@ -15,7 +15,7 @@ private final class TabTestBackend: RemoteFileBackend {
     func canonicalPath(_ path: String) throws -> String { path }
     func list(_ path: String) throws -> [RemoteFileEntry] {
         if isCancelled { throw ModelError.invalid("已取消") }
-        return [RemoteFileEntry(name: description + "-" + path.replacingOccurrences(of: "/", with: "") + ".txt", size: 12, modified: nil, directory: false, symbolicLink: false)]
+        return [RemoteFileEntry(name: description + "-" + path.replacingOccurrences(of: "/", with: "") + ".txt", size: 12, modified: nil, directory: false, symbolicLink: false, permissions: 0o100640, owner: "deploy", group: "operators")]
     }
     func upload(_ local: URL, to remote: String, progress: @escaping (UInt64, UInt64) -> Void) throws {
         lock.lock(); uploading = true; lock.unlock(); progress(1, 10)
@@ -110,6 +110,16 @@ enum FileTabsTest {
         manager.showWindow(nil); manager.open(sftp, directory: "/one"); let first = manager.selectedSession!
         manager.open(ftp, directory: "/two"); let second = manager.selectedSession!
         wait("bothConnected", { first.connected && second.connected }) {
+            manager.window?.contentView?.layoutSubtreeIfNeeded(); manager.select(first); first.view.layoutSubtreeIfNeeded()
+            let table = descendants(first.view).compactMap { $0 as? NSTableView }.first!
+            for (id, value) in [("permissions", "-rw-r----- (0640)"), ("owner", "deploy"), ("group", "operators")] {
+                let column = table.tableColumns.first { $0.identifier.rawValue == id }
+                checks["metadataColumn-" + id] = column != nil && (first.tableView(table, viewFor: column, row: 0) as? NSTextField)?.stringValue == value
+            }
+            print("File table geometry", table.tableColumns.map { $0.width }, table.intercellSpacing, table.enclosingScrollView?.contentSize ?? .zero)
+            checks["defaultColumnsFitWindow"] = table.tableColumns.reduce(CGFloat(0)) { $0 + $1.width + table.intercellSpacing.width } <= (table.enclosingScrollView?.contentSize.width ?? 0)
+            checks["lastColumnVisible"] = table.rect(ofColumn: table.numberOfColumns - 1).maxX <= (table.enclosingScrollView?.contentSize.width ?? 0)
+            checks["metadataHorizontalScroll"] = table.enclosingScrollView?.hasHorizontalScroller == true && table.columnAutoresizingStyle == .noColumnAutoresizing
             first.filterText = "SFTP"; second.filterText = "FTP"
             manager.select(first)
             checks["tabRestoresState"] = first.directory == "/one" && second.directory == "/two" && first.filterText == "SFTP" && second.filterText == "FTP"

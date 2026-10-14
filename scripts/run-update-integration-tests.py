@@ -22,7 +22,7 @@ for mode in args.modes:
     key=root/'test-private.key';key.write_bytes(base64.b64encode(seed));key.chmod(0o600)
     public=base64.b64encode(private.public_key().public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)).decode()
     bundle_id='app.oshell.update-test.'+uuid.uuid4().hex
-    run(['ditto',ROOT/'dist/OShell.app',live])
+    run(['ditto',ROOT/'work/test-app/OShell.app',live])
     info_path=live/'Contents/Info.plist';info=plistlib.loads(info_path.read_bytes());old_build=int(info['CFBundleVersion']);new_build=old_build+10000
     info.update(CFBundleIdentifier=bundle_id,SUPublicEDKey=public);info.pop('SUDefaultsDomain',None)
     info_path.write_bytes(plistlib.dumps(info));run(['codesign','--force','--sign','-',live])

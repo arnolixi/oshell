@@ -160,6 +160,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         connect.toolTip = "会话管理（Esc 关闭）"
         quickButton.bezelStyle = .texturedRounded; quickButton.setAccessibilityLabel("快捷连接")
         let local = iconButton("本地", "terminal", #selector(newLocal))
+        let files = iconButton("文件管理", "folder.fill", #selector(showFiles))
+        files.identifier = .init("toolbar.fileManager")
+        files.setAccessibilityLabel("文件管理")
+        files.toolTip = "文件管理：使用当前 SSH 连接打开 SFTP，或选择其他 SFTP / FTP 会话"
         arrangementButton.bezelStyle = .texturedRounded
         arrangementButton.toolTip = "排列已打开的标签"
         arrangementButton.setAccessibilityLabel("选项卡排列")
@@ -185,10 +189,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         recordButton.imagePosition = .imageLeading; recordButton.bezelStyle = .texturedRounded
         let settings = iconButton("", "gearshape", #selector(showPreferences)); settings.toolTip = "设置"
         configurePropertyButtons()
-        let toolbar = WorkspaceToolbar(views: [connect, quickButton, new, local, currentPropertiesButton, defaultPropertiesButton, tools, tabGroupButton, splitButton, arrangementButton, syncIndicator, stopSyncButton, NSView(), find, recordButton, settings])
+        let toolbar = WorkspaceToolbar(views: [connect, quickButton, new, local, files, currentPropertiesButton, defaultPropertiesButton, tools, tabGroupButton, splitButton, arrangementButton, syncIndicator, stopSyncButton, NSView(), find, recordButton, settings])
         topToolbar = toolbar
         toolbar.identifier = .init("workspace.toolbar")
-        toolbar.compactButtons = [new, local, find, recordButton]
+        toolbar.compactButtons = [new, local, files, find, recordButton]
         for (button, label) in [(new, "新建会话"), (local, "本地终端"), (find, "搜索终端"), (recordButton, "记录终端日志")] {
             button.toolTip = label; button.setAccessibilityLabel(label)
         }
@@ -238,6 +242,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
             self.duplicateTab(tab)
         }
         strip.contextMenu = { [weak self] in self?.sessionTabContextMenu($0) }
+        strip.backgroundMenu = { [weak self] in self?.tabBarContextMenu() }
         strip.setAddDescription("新建空白标签页")
         strip.onAdd = { [weak self] in self?.newBlankTab() }
     }
@@ -425,7 +430,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         quickMenu?.removeAllItems(); if let quickMenu { populate(quickMenu, directory: ""); quickMenu.addItem(.separator()); quickMenu.addItem(withTitle: "管理会话…", action: #selector(showSessionManager), keyEquivalent: "").target = self }
     }
     func duplicateTab(_ tab: TerminalTab) {
+        guard isSecurityUnlocked, tabs.contains(where: { $0 === tab }), tab.activePane.canDuplicateConnection else { return }
         guard let pane = replica(of: tab.activePane) else { return }
+        activeTabGroupID = customTabLayout?.group(containing: tab.id)?.id
         let duplicate = TerminalTab(pane); tabs.append(duplicate); selectedTab = duplicate
         rebuildWorkspace(); select(duplicate)
     }
@@ -461,8 +468,22 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         let copy = TerminalTab(pane); tabs.append(copy); selectedTab = copy; rebuildWorkspace(); select(copy)
     }
     @objc func newBlankFromTab(_ sender: NSMenuItem) {
-        if let id = sender.representedObject as? UUID { activeTabGroupID = customTabLayout?.group(containing: id)?.id }
+        if let id = sender.representedObject as? UUID {
+            activeTabGroupID = customTabLayout?.group(containing: id)?.id ?? customTabLayout?.groups.first(where: { $0.id == id })?.id
+        }
         newBlankTab()
+    }
+    @objc func reconnectTabFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID, let tab = tabs.first(where: { $0.id == id }) else { return }
+        select(tab); reconnect()
+    }
+    @objc func closeTabFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID, let tab = tabs.first(where: { $0.id == id }) else { return }
+        close(tab)
+    }
+    @objc func splitPaneFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID, let tab = tabs.first(where: { $0.id == id }) else { return }
+        select(tab); split(vertical: sender.tag == 0)
     }
     @objc func newLocal() { open(configuration.profiles.first(where: { $0.kind == .local }) ?? .local) }
     private func makePane(_ profile: SessionProfile, oneTimePassword: String? = nil, terminalType: String? = nil, connectionGroup: SSHConnectionGroup? = nil, reuseConnection: Bool = false, blank: Bool = false) -> TerminalPane {
@@ -509,19 +530,42 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         pane.applyHighlights(configuration.highlightSets.first { $0.id == configuration.preferences.highlightSetID })
         pane.onError = { message in Dialogs.message(message) }
     }
-    func open(_ profile: SessionProfile) {
+    /// Reuse only the selected idle leaf, keeping its tab identity and group.
+    /// A tool launched from OShell > still owns the leaf until it exits.
+    private func presentConnection(_ pane: TerminalPane, reusingIdlePane: Bool = true) {
+        if reusingIdlePane, let tab = selectedTab, tabs.contains(where: { $0 === tab }),
+           !tab.activePane.isShutdown, !tab.activePane.hasActiveProcess, !tab.activePane.isTransferring {
+            let old = tab.activePane
+            let wasZoomed = tab.restoreZoom()
+            if wasZoomed { rebuildWorkspace() }
+            old.shutdown()
+            tab.layout = tab.layout.replacing(old.id, with: .pane(pane)); tab.activePane = pane
+            if wasZoomed { tab.zoom(pane) }
+            rebuildWorkspace(); select(tab)
+        } else {
+            let tab = TerminalTab(pane); tabs.append(tab); selectedTab = tab
+            rebuildWorkspace(); select(tab)
+        }
+    }
+    func open(_ profile: SessionProfile, reusingIdlePane: Bool = true) {
         guard isSecurityUnlocked else { return }
         if profile.kind.isFileSession { openFiles(for: profile, directory: profile.initialDirectory); return }
-        let tab = TerminalTab(makePane(profile)); tabs.append(tab); selectedTab = tab
-        rebuildWorkspace(); select(tab)
+        presentConnection(makePane(profile), reusingIdlePane: reusingIdlePane)
+    }
+    func open(_ profiles: [SessionProfile]) {
+        var reuse = true
+        for profile in profiles {
+            open(profile, reusingIdlePane: reuse)
+            // Even an immediate connection failure must retain its own tab.
+            if !profile.kind.isFileSession { reuse = false }
+        }
     }
     func openExternal(_ request: ZOCLaunchRequest) {
         guard isSecurityUnlocked else { return }
         do {
             let profile = try request.profile()
             let group = try SSHConnectionGroup(profile: profile, external: true)
-            let tab = TerminalTab(makePane(profile, oneTimePassword: request.password, terminalType: request.terminalType, connectionGroup: group))
-            tabs.append(tab); selectedTab = tab; rebuildWorkspace(); select(tab)
+            presentConnection(makePane(profile, oneTimePassword: request.password, terminalType: request.terminalType, connectionGroup: group))
             show(); NSApp.activate(ignoringOtherApps: true)
         } catch { Dialogs.message("无法打开外部启动会话，请检查连接参数。") }
     }
@@ -882,6 +926,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         shutdown(); return true
     }
     func shutdown() { sessionManager?.close(); sessionManager = nil; commandManager?.close(); commandManager = nil; highlightManager?.close(); highlightManager = nil; customTabLayout = nil; groupStrips.removeAll(); terminalHost.clearPreview(); idleMemoryReclaimer.cancel(); fileWindows.forEach { $0.close() }; fileWindows = []; syncTargets = []; tabs.flatMap { $0.layout.panes }.forEach { $0.shutdown() }; tabs = []; selectedTab = nil }
+    #if OSHELL_TEST_HARNESS
     var diagnosticSnapshot: [String: Any] {
         let panes = tabs.flatMap { $0.layout.panes }
         return ["tabs": tabs.count, "panes": panes.count, "composerCreated": loadedComposer != nil, "arrangement": arrangement.title,
@@ -889,4 +934,5 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
                 "running": panes.filter(\.hasActiveProcess).count, "scrollback": configuration.preferences.scrollback,
                 "receivedBytes": panes.map(\.receivedBytes)]
     }
+    #endif
 }

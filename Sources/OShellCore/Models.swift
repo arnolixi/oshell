@@ -185,6 +185,11 @@ public struct Preferences: Codable {
     public var ambiguousCharactersAreWide = false
     public var terminalClockEnabled = false
     public var terminalClockPosition: TerminalClockPosition = .topRight
+    public var terminalClockFontName = ""
+    public var terminalClockFontSize: Double = 12
+    /// Empty follows the terminal foreground; explicit colors use #RRGGBB.
+    public var terminalClockColor = ""
+    public var terminalClockOpacity: Double = 0.5
     public var copyOnSelect = true
     public var copyTrimLeadingWhitespace = false
     public var copyTrimTrailingWhitespace = false
@@ -198,7 +203,7 @@ public struct Preferences: Codable {
     public var keyboardShortcuts = KeyboardShortcuts()
     public var highlightSetID: UUID? = HighlightSet.standardID
     public init() {}
-    private enum CodingKeys: String, CodingKey { case preferColorEmoji, ambiguousCharactersAreWide, terminalClockEnabled, terminalClockPosition, keyboardShortcuts, fontName, fontSize, scrollback, darkTheme, metal, autoZmodem, copyOnSelect, copyTrimLeadingWhitespace, copyTrimTrailingWhitespace, rightClickPaste, confirmMultilinePaste, updateRepository, automaticUpdateChecks, masterWarningAcknowledged, quickSendBarVisible, quickSendScope, highlightSetID, interfaceTheme, colorSchemeID, customColorSchemes }
+    private enum CodingKeys: String, CodingKey { case preferColorEmoji, ambiguousCharactersAreWide, terminalClockEnabled, terminalClockPosition, terminalClockFontName, terminalClockFontSize, terminalClockColor, terminalClockOpacity, keyboardShortcuts, fontName, fontSize, scrollback, darkTheme, metal, autoZmodem, copyOnSelect, copyTrimLeadingWhitespace, copyTrimTrailingWhitespace, rightClickPaste, confirmMultilinePaste, updateRepository, automaticUpdateChecks, masterWarningAcknowledged, quickSendBarVisible, quickSendScope, highlightSetID, interfaceTheme, colorSchemeID, customColorSchemes }
     public init(from decoder: Decoder) throws {
         self.init()
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -216,6 +221,11 @@ public struct Preferences: Codable {
         ambiguousCharactersAreWide = try values.decodeIfPresent(Bool.self, forKey: .ambiguousCharactersAreWide) ?? false
         terminalClockEnabled = try values.decodeIfPresent(Bool.self, forKey: .terminalClockEnabled) ?? false
         terminalClockPosition = (try values.decodeIfPresent(String.self, forKey: .terminalClockPosition)).flatMap(TerminalClockPosition.init(rawValue:)) ?? .topRight
+        terminalClockFontName = try values.decodeIfPresent(String.self, forKey: .terminalClockFontName) ?? ""
+        terminalClockFontSize = try values.decodeIfPresent(Double.self, forKey: .terminalClockFontSize) ?? 12
+        terminalClockColor = try values.decodeIfPresent(String.self, forKey: .terminalClockColor) ?? ""
+        terminalClockOpacity = try values.decodeIfPresent(Double.self, forKey: .terminalClockOpacity) ?? 0.5
+        clampClockStyle()
         copyOnSelect = try values.decodeIfPresent(Bool.self, forKey: .copyOnSelect) ?? true
         copyTrimLeadingWhitespace = try values.decodeIfPresent(Bool.self, forKey: .copyTrimLeadingWhitespace) ?? false
         copyTrimTrailingWhitespace = try values.decodeIfPresent(Bool.self, forKey: .copyTrimTrailingWhitespace) ?? false
@@ -235,6 +245,10 @@ public struct Preferences: Codable {
         try values.encode(ambiguousCharactersAreWide, forKey: .ambiguousCharactersAreWide)
         try values.encode(terminalClockEnabled, forKey: .terminalClockEnabled)
         try values.encode(terminalClockPosition.rawValue, forKey: .terminalClockPosition)
+        try values.encode(terminalClockFontName, forKey: .terminalClockFontName)
+        try values.encode(terminalClockFontSize, forKey: .terminalClockFontSize)
+        try values.encode(terminalClockColor, forKey: .terminalClockColor)
+        try values.encode(terminalClockOpacity, forKey: .terminalClockOpacity)
         try values.encode(keyboardShortcuts, forKey: .keyboardShortcuts)
         try values.encode(fontName, forKey: .fontName); try values.encode(fontSize, forKey: .fontSize)
         try values.encode(scrollback, forKey: .scrollback); try values.encode(darkTheme, forKey: .darkTheme)
@@ -252,7 +266,14 @@ public struct Preferences: Codable {
         try values.encode(interfaceTheme.rawValue, forKey: .interfaceTheme); try values.encode(colorSchemeID, forKey: .colorSchemeID)
         try values.encode(customColorSchemes, forKey: .customColorSchemes)
     }
+    public mutating func clampClockStyle() {
+        terminalClockFontSize = terminalClockFontSize.isFinite ? min(96, max(8, terminalClockFontSize)) : 12
+        terminalClockOpacity = terminalClockOpacity.isFinite ? min(1, max(0, terminalClockOpacity)) : 0.5
+        if !TerminalColorScheme.isHex(terminalClockColor) { terminalClockColor = "" }
+        if terminalClockFontName.utf8.count > 256 || terminalClockFontName.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) { terminalClockFontName = "" }
+    }
     public mutating func clamp() {
+        clampClockStyle()
         var ids = Set(TerminalColorScheme.presets.map(\.id))
         customColorSchemes = Array(customColorSchemes.filter { (try? $0.validate()) != nil && ids.insert($0.id).inserted }.prefix(64))
         if !colorSchemes.contains(where: { $0.id == colorSchemeID }) { colorSchemeID = "oshell-dark" }

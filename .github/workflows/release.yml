@@ -51,6 +51,7 @@ jobs:
         run: |
           python3 scripts/check-public-source.py --history HEAD
           python3 scripts/test-ci-release.py
+          python3 scripts/test-development-tools.py
       - name: Resolve version and prepare immutable release tag
         id: meta
         env:

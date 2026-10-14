@@ -6,7 +6,7 @@
 import hashlib,json,os,pathlib,secrets,shutil,signal,socket,stat,subprocess,tempfile,threading,time
 import paramiko,re,errno,shlex
 project=pathlib.Path(__file__).resolve().parent.parent
-launcher=pathlib.Path(os.environ.get('OSHELL_TEST_APP',str(project/'dist/OShell.app')))/'Contents/MacOS/OShell-ZOC'
+launcher=pathlib.Path(os.environ.get('OSHELL_TEST_APP',str(project/'work/test-app/OShell.app')))/'Contents/MacOS/OShell-ZOC'
 with tempfile.TemporaryDirectory(prefix='oshell-sftp-reuse-',dir='/tmp') as folder:
     root=pathlib.Path(folder).resolve();key=paramiko.RSAKey.generate(2048)
     remote_root=root/'remote';remote_root.mkdir();(remote_root/'seed.txt').write_text('seed fixture\n')

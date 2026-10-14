@@ -136,6 +136,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     private var logger: SessionLogger?
     private var transfer: ZmodemTransfer?
     private var selectionPending = false
+    private var selectionDirection: TransferDirection?
     private var selectionBytes = Data()
     private var chooser: NSOpenPanel?
     private var transferToken = UUID()
@@ -163,6 +164,9 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     private(set) var skipsDuplicateTunnels = false
     let reusesSSHConnection: Bool
     let isBlank: Bool
+    #if OSHELL_TEST_HARNESS
+    var transferChooserForTesting: NSOpenPanel? { chooser }
+    #endif
     var transferSelection: ((TransferDirection) -> (files: [URL], directory: URL?)?)?
     var onFocus: ((TerminalPane) -> Void)?
     var onState: (() -> Void)?
@@ -204,6 +208,21 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     var localToolPID: pid_t { localTool?.pid ?? 0 }
     var isRunningLocalTool: Bool { localTool != nil }
     var hasActiveProcess: Bool { !ended || isRunningLocalTool }
+    var connectionIsActive: Bool { !isBlank && !isShutdown && !ended && started && terminal.process.running }
+    var canDuplicateConnection: Bool {
+        guard connectionIsActive, profile.kind == .local || sessionReady else { return false }
+        return sshConnectionGroup?.isExternal != true || sshConnectionGroup?.isAvailable == true
+    }
+    var tabConnectionStatus: TabStripView.ConnectionStatus {
+        // Present the main-thread lifecycle, refreshed by onState. PTY.running
+        // can change on the exit queue before its UI notification is delivered.
+        guard !isShutdown else { return .disconnected }
+        // OShell > owns a separate PTY. The original pane remains blank/ended
+        // while its interactive SSH/Telnet command is still running.
+        if let tool = interactiveTool, tool.pid > 0 { return .commandConnection }
+        guard !isBlank, !ended else { return .disconnected }
+        return (profile.kind == .local && started) || sessionReady ? .connected : .connecting
+    }
     var usesPTYInput: Bool { !ended || isRunningLocalTool }
     var blocksManagedToolInput: Bool { localTool.map { !$0.permitsManagedInput } ?? false }
     var transferDiagnosticState: String { transfer?.diagnosticState ?? "no helper; finishing=\(finishingTransfer)" }
@@ -239,6 +258,9 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
             String(value.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }.joined().prefix(256))
         }
         var lines = ["当前主机", "主机名：" + title, "主机 IP：" + (remoteAddress ?? "未获取"), "识别方式：" + profile.titleMode.title]
+        if let tool = interactiveTool {
+            lines += ["", "命令行连接", "协议：" + tool.command.name.uppercased(), "状态：连接命令运行中，退出后返回 OShell >"]
+        }
         if profile.kind == .ssh {
             lines += ["", ended ? "原 SSH 连接（已结束）" : "初始 SSH 连接", "会话：" + display(profile.name),
                       "配置地址：" + display(profile.host), "端口：\(profile.port)", "用户名：" + (profile.username.isEmpty ? "使用 SSH 默认配置" : display(profile.username))]
@@ -254,8 +276,8 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
             if profile.tunnels.contains(where: \.enabled) {
                 lines.append("隧道策略：" + (reusesSSHConnection ? "复用原 SSH 连接，不重复开启" : skipsDuplicateTunnels ? "同一会话配置已有隧道连接，本连接不重复开启" : "由首次连接启用"))
             }
-            lines.append("状态：" + (ended ? "已结束，当前为本机工具模式" : (sessionReady ? "已连接" : "连接中")))
-        } else { lines += ["", "本地终端", "会话：" + display(profile.name)] }
+            lines.append("状态：" + (ended ? "原连接已结束" : (sessionReady ? "已连接" : "连接中")))
+        } else if interactiveTool == nil { lines += ["", "本地终端", "会话：" + display(profile.name)] }
         return lines.joined(separator: "\n")
     }
     private func observeTransportPeer() {
@@ -380,6 +402,9 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
             focusStripe.leadingAnchor.constraint(equalTo: view.leadingAnchor), focusStripe.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         ])
         clockView.constrain(to: terminal)
+        // The clock overlays terminal glyphs (including Metal) without taking
+        // rows or pointer events; actionable transfer controls stay above it.
+        transferProgress.wantsLayer = true; transferProgress.layer?.zPosition = 2
         let progressWidth = transferProgress.widthAnchor.constraint(equalToConstant: 360)
         progressWidth.priority = .defaultHigh; progressWidth.isActive = true
         apply(preferences)
@@ -595,7 +620,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
             DispatchQueue.main.async { [weak self] in self?.chooseTransfer(direction, initial: initial) }
             return
         }
-        selectionPending = true; selectionBytes = initial; transferToken = UUID()
+        selectionPending = true; selectionDirection = direction; selectionBytes = initial; transferToken = UUID()
         let token = transferToken
         transferProgress.begin(direction == .upload ? "选择要上传的文件…" : "选择下载保存文件夹…"); onState?()
         let panel = NSOpenPanel(); chooser = panel
@@ -609,7 +634,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
             self.chooser = nil
             guard response == .OK, !panel.urls.isEmpty else { self.cancelTransfer(); return }
             let initialBytes = self.selectionBytes
-            self.selectionBytes = Data(); self.selectionPending = false
+            self.selectionBytes = Data(); self.selectionPending = false; self.selectionDirection = nil
             self.beginTransfer(direction, files: direction == .upload ? panel.urls : [], directory: direction == .download ? panel.url : nil, initialData: initialBytes)
         }
     }
@@ -626,7 +651,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         catch { cancelTransfer(); onError?("无法开始 ZMODEM 传输：\(error.localizedDescription)") }
     }
     private func finishTransfer(code: Int32) {
-        transfer = nil; selectionPending = false; selectionBytes = Data(); detector = ZmodemDetector()
+        transfer = nil; selectionPending = false; selectionDirection = nil; selectionBytes = Data(); detector = ZmodemDetector()
         finishMessage = code == 0 ? "传输完成" : "传输已中断或失败（\(code)）"
         finishingTransfer = true; transferProgress.status("正在恢复终端…", completed: code == 0)
         if code != 0 { sendAbortSequence() }
@@ -661,14 +686,19 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
     @objc private func cancelAction() { cancelTransfer() }
     func cancelTransfer() {
         if !ended, finishingTransfer, transfer == nil, !selectionPending { return }
+        // No sender has started while the upload picker is open, so the remote
+        // rz cannot have file payload in flight. Some rz versions return directly
+        // to the shell without CAN; requiring that ACK would discard the prompt
+        // and incorrectly terminate a healthy SSH process after two seconds.
+        let cancelledBeforeUpload = selectionPending && selectionDirection == .upload && transfer == nil
         transferToken = UUID(); chooser?.cancel(nil); chooser = nil
         let wasActive = isTransferring
         transfer?.onEnd = nil; transfer?.onBytes = nil; transfer?.onProgress = nil; transfer?.onTerminalBytes = nil; transfer?.cancel(); transfer = nil
-        selectionPending = false; selectionBytes = Data(); detector = ZmodemDetector()
+        selectionPending = false; selectionDirection = nil; selectionBytes = Data(); detector = ZmodemDetector()
         remoteReady = false
         if wasActive, terminal.process.running, !ended {
-            abortDrain = AbortDrain()
-            finishingTransfer = true; finishMessage = "传输已取消，部分文件可能保留。"
+            abortDrain = cancelledBeforeUpload ? nil : AbortDrain()
+            finishingTransfer = true; finishMessage = cancelledBeforeUpload ? "已取消上传，未发送文件。" : "传输已取消，部分文件可能保留。"
             transferProgress.status("正在取消传输…")
             cancellationDeadline = DispatchTime.now().uptimeNanoseconds + 500_000_000
             sendAbortSequence()
@@ -676,7 +706,9 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
                 guard let self, self.transferToken == token, self.finishingTransfer, self.terminal.process.running,
                       self.transfer == nil, !self.selectionPending else { return }
-                self.terminal.process.send(data: [3, 13][...])
+                // Interrupt a still-waiting rz, but never synthesize Return: rz may
+                // already have restored the shell's command line.
+                self.terminal.process.send(data: [3][...])
             }
         } else {
             finishingTransfer = false; transferProgress.hide()

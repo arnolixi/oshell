@@ -1,14 +1,30 @@
 # 开发与测试
 
-## 构建
+## 本机应用
 
-需要现代 macOS、Swift 6 工具链、Xcode Command Line Tools、Python 3，以及系统提供的构建/打包工具。旧系统是运行目标，不是推荐的构建环境。
+需要现代 macOS、Swift 6 工具链、Xcode Command Line Tools 和 Python 3。依赖固定在 `Vendor/`。
 
 ```sh
 bash scripts/build.sh
+open dist/OShell.app
 ```
 
-输出为 `dist/OShell.app`，缓存位于 `work/build/`。依赖固定在 `Vendor/`；不要直接用上游最新版本替换本地修改过的终端组件。构建脚本将源码路径映射到统一前缀，避免把构建者的主目录写入二进制。
+默认只构建当前 Mac 的原生架构，输出 `dist/OShell.app`，不生成 DMG、PKG 或其他架构的应用。编译缓存位于 `work/build/`。源码路径会映射为统一前缀，避免将构建者的主目录写入二进制。
+
+正式 app 不编入 UI 测试、内存诊断或预览入口。兼容版发布交给 [GitHub Actions](releases.md)。
+
+## 开发测试应用
+
+```sh
+bash scripts/build.sh --tests
+python3 scripts/run-ui-tests.py --list
+python3 scripts/run-ui-tests.py directory-picker-stress terminal-clock tab-bar-menu
+python3 scripts/run-ui-tests.py --group sessions
+```
+
+测试应用单独输出到 `work/test-app/OShell.app`，缓存位于 `work/build-tests/`，不会覆盖正式 app。通用 UI 运行器会复制应用、分配独立 Bundle ID 和临时数据目录，结束时清理测试副本；结果写入 `validation/ui-*.json`。可用 `--app` 指定其他带测试标记的应用。`tabs`、`sessions`、`memory` 分组替代原来重复的批量包装脚本。`stress` 输出性能采样，不代表所有负载下的性能保证。
+
+测试入口必须显式指定独立的 `OSHELL_DATA_DIR`；正式应用会在读取数据前拒绝测试参数。不要将开发测试指向实际会话目录或真实服务器。UI 检查需要 macOS 图形会话。
 
 核心检查：
 
@@ -17,29 +33,44 @@ binary_dir="$(swift build --scratch-path work/build/swift -c release --show-bin-
 "$binary_dir/OShellCoreChecks"
 ```
 
-## 集成检查
+需要本机 SSH / FTP / WebDAV 测试服务的场景使用对应脚本：
 
 ```sh
 python3 -m venv work/test-tools
 work/test-tools/bin/pip install -r scripts/requirements-test.txt
 work/test-tools/bin/python scripts/run-tab-actions-tests.py
 work/test-tools/bin/python scripts/run-ssh-clone-tests.py
-work/test-tools/bin/python scripts/run-update-integration-tests.py
+work/test-tools/bin/python scripts/run-local-tool-tests.py --connection-status-only
+work/test-tools/bin/python scripts/run-webdav-tests.py
 ```
 
-这些脚本使用临时数据、一次性账号和本机服务。测试输出写入 `validation/`，不应提交。运行 UI 检查需要可用的 macOS 图形会话；旧版 Intel 运行检查还需要对应硬件或 Rosetta。不要把开发测试指向真实服务器，也不要去掉临时数据目录设置后运行测试入口。
+这些脚本默认使用测试应用和一次性本地账号。更新、文件传输、代理、隧道和内存循环等专用脚本继续保留；它们与通用 UI 检查的测试服务需求不同。加密启动测试会自行生成临时样本，不依赖维护者工作目录中的文件。
+
+确实需要单独调试 Intel 兼容 UI 时，可使用 `package-release.py --flavor legacy --apps-only --tests`，输出 `work/test-release/legacy/OShell.app`；测试应用禁止打包或发布。常规开发无需执行此步骤。
+
+## 清理构建历史
+
+```sh
+python3 scripts/clean-local-builds.py
+python3 scripts/clean-local-builds.py --apply
+```
+
+第一条只列出目标；第二条执行清理。保留当前本机架构的正式 `dist/OShell.app`、源码、Git、依赖及工具环境、发布密钥和最后一次检查摘要。旧构建、测试副本、安装包、过期工作记录和生成缓存会被删除。清理前验证 app 签名与架构，拒绝删除受 Git 跟踪或正在运行的文件，清理后再次核对 app 内容。`work/`、`dist/` 和 `validation/` 是开发产物目录，不用于存放个人会话数据。
+
+清理不会变更系统中已安装的 OShell 或 `~/Library/Application Support/OShell`。之后重新编译会重建缓存。
 
 ## 项目结构
 
-- `Sources/OShell/`：原生界面、终端会话、文件管理和应用更新。
-- `Sources/OShellCore/`：配置、密码保护、协议参数、目录和输入模型。
-- `Sources/OShell*/`：认证、代理和外部启动辅助程序。
-- `Tests/`：核心行为检查。
-- `scripts/`：构建、测试、打包和发布工具。
+- `Sources/OShell/`：原生界面、终端、文件管理、更新与同步。
+- `Sources/OShell/TestSupport/`：显式测试构建才启用的 UI 回归和诊断实现。
+- `Sources/OShellCore/`：配置、密码保护、协议参数和数据模型。
+- 其他 `Sources/OShell*/`：认证、代理和外部启动辅助程序。
+- `Tests/OShellCoreTests/`：核心行为检查。
+- `scripts/`：构建、隔离测试、源码检查和发布工具。
 - `shell-integration/`：可选的远端 Shell 集成。
-- `Vendor/`：第三方依赖、许可证和对应来源。
+- `Vendor/`：固定依赖、上游源码和许可证，不能当作构建历史删除。
 
-## 发布前检查
+## 提交前
 
 ```sh
 python3 scripts/check-public-source.py --working-tree
@@ -48,6 +79,4 @@ python3 scripts/check-public-source.py --history main
 python3 scripts/check-public-source.py --app dist/OShell.app
 ```
 
-默认规则拒绝构建缓存、私钥、会话文件、本地报告、个人主目录和明显令牌。第三方原有版权署名不会被自动改写。规则检查不能替代人工检查：截图、压缩附件和示例数据也需要逐项确认。
-
-提交前应检查 `git diff --cached`。测试数据使用保留示例域名和地址，不能直接粘贴真实终端记录。变更说明放在 `CHANGELOG.md`；完整调试时间线和机器测试记录留在忽略的本地目录中。
+同时人工检查 `git diff --cached`。不要提交真实会话、密码、密钥、令牌、机器日志或未脱敏截图。第三方版权署名保持原样；变更说明放在 `CHANGELOG.md`，调试记录留在忽略的本地目录中。

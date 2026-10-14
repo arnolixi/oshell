@@ -381,6 +381,12 @@ class ReleaseTests(unittest.TestCase):
         (root/'OShell.app/Contents/unexpected').write_text('extra')
         with self.assertRaises(ValueError): installer_metadata.verify(root, **options)
 
+    def test_developer_app_cannot_be_packaged(self):
+        app = self.root/'developer.app'; (app/'Contents').mkdir(parents=True)
+        (app/'Contents/Info.plist').write_bytes(plistlib.dumps({'OShellTestHarness': True}))
+        with self.assertRaisesRegex(ValueError, 'cannot be packaged'):
+            PACK.package('arm64', ['arm64'], '13.0', app, 'dmg')
+
     def test_dmg_only_skips_pkg_tools(self):
         root = self.root/'package'; root.mkdir(); (root/'LICENSE').write_text('license fixture')
         app = root/'app/OShell.app'; resources = app/'Contents/Resources'; resources.mkdir(parents=True)

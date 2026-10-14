@@ -15,11 +15,11 @@ with tempfile.TemporaryDirectory(prefix='oshell-files-',dir='/tmp') as folder:
             deadline=time.time()+10
             while not (root/'fixture.json').exists() and time.time()<deadline: time.sleep(.05)
             env=os.environ.copy();env.update(OSHELL_DATA_DIR=str(root/'Application Support'/'OShell'),OSHELL_FILE_TEST_ROOT=folder,LANG='en_US.UTF-8',LC_CTYPE='UTF-8',LC_ALL='C')
-            app=pathlib.Path(os.environ.get('OSHELL_TEST_APP',str(project/'dist/OShell.app')))
+            app=pathlib.Path(os.environ.get('OSHELL_TEST_APP',str(project/'work/test-app/OShell.app')))
             if not preview: env['OSHELL_BACKGROUND_TEST']='1'
             if preview:
                 import shutil,plistlib
-                app=root/'OShellPreview.app';shutil.copytree(project/'dist/OShell.app',app)
+                app=root/'OShellPreview.app';shutil.copytree(project/'work/test-app/OShell.app',app)
                 plist=app/'Contents/Info.plist';info=plistlib.loads(plist.read_bytes());info['CFBundleIdentifier']='app.oshell.operator-preview';info['CFBundleName']='OShellPreview';info['CFBundleDisplayName']='OShellPreview';plist.write_bytes(plistlib.dumps(info))
                 subprocess.run(['codesign','--force','--sign','-',str(app)],check=True,capture_output=True)
                 print('PREVIEW_APP='+str(app),flush=True)

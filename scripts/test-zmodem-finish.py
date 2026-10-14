@@ -11,7 +11,7 @@ mode = sys.argv[1] if len(sys.argv) > 1 else 'burst'
 label = sys.argv[2] if len(sys.argv) > 2 else mode
 with tempfile.TemporaryDirectory(prefix='oshell-zfin-', dir='/tmp') as temporary:
     root = pathlib.Path(temporary); helpers = root/'helpers'; helpers.mkdir()
-    app_bundle = pathlib.Path(os.environ.get('OSHELL_TEST_APP', str(project/'dist/OShell.app')))
+    app_bundle = pathlib.Path(os.environ.get('OSHELL_TEST_APP', str(project/'work/test-app/OShell.app')))
     real_helpers = app_bundle/'Contents/Helpers'
     for name in ['OShellAskpass', 'OShellProxy']: (helpers/name).symlink_to(real_helpers/name)
     if mode in ('burst', 'early-exit'):

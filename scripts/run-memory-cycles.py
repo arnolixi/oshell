@@ -61,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix='oshell-memory-cycles-', dir='/tmp') as 
     env=os.environ.copy(); env.update(OSHELL_DATA_DIR=str(root/'config'),OSHELL_MEMORY_CYCLE_ROOT=str(root))
     app=None
     try:
-        binary=os.environ.get('OSHELL_MEMORY_BINARY',str(project/'dist/OShell.app/Contents/MacOS/OShell'))
+        binary=os.environ.get('OSHELL_MEMORY_BINARY',str(project/'work/test-app/OShell.app/Contents/MacOS/OShell'))
         with (project/'validation'/f'{label}.log').open('wb') as log:
             app=subprocess.Popen([binary,'--memory-cycles'],env=env,stdout=log,stderr=log)
             print(f'Test PID {app.pid}; fixture {root}',flush=True)

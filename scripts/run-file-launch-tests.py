@@ -5,7 +5,7 @@
 """Exact USM --site launch contract with disposable XML/SFTP/FTP fixtures."""
 import base64,concurrent.futures,hashlib,json,os,pathlib,plistlib,signal,subprocess,sys,tempfile,time,urllib.parse,xml.etree.ElementTree as ET
 project=pathlib.Path(__file__).resolve().parent.parent
-app=project/'dist/OShell.app';bridge=app/'Contents/Helpers/OShell-FileZilla.app/Contents/MacOS/OShell-FileZilla'
+app=project/'work/test-app/OShell.app';bridge=app/'Contents/Helpers/OShell-FileZilla.app/Contents/MacOS/OShell-FileZilla'
 with tempfile.TemporaryDirectory(prefix='oshell-file-launch-',dir='/tmp') as folder:
     root=pathlib.Path(folder);server=None;pid=None
     try:

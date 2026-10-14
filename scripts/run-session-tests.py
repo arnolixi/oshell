@@ -15,7 +15,7 @@ with tempfile.TemporaryDirectory(prefix='oshell-session-', dir='/tmp') as folder
             while not (root/'fixture.json').exists() and time.time() < deadline: time.sleep(.05)
             env = os.environ.copy(); env.update(OSHELL_DATA_DIR=str(root/'client'), OSHELL_SESSION_TEST_ROOT=folder,
                                                LANG='en_US.UTF-8', LC_CTYPE='UTF-8', LC_ALL='C')
-            client = subprocess.Popen([str(project/'dist/OShell.app/Contents/MacOS/OShell'), '--session-test'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            client = subprocess.Popen([str(project/'work/test-app/OShell.app/Contents/MacOS/OShell'), '--session-test'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             tunnels = subprocess.run([sys.executable, str(project/'scripts/check-session-tunnels.py'), folder], capture_output=True, timeout=40)
             output, _ = client.communicate(timeout=40)
             result = json.loads((root/'client-result.json').read_text())

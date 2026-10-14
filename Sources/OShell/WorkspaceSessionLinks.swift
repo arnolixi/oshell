@@ -87,7 +87,13 @@ extension WorkspaceController {
     @objc func toggleSessionLinkBar() {
         var value = configuration; value.sessionLinks.visible.toggle(); _ = saveConfiguration(value)
     }
-    func sessionTabContextMenu(_ id: UUID) -> NSMenu {
+    func tabBarContextMenu(groupID: UUID? = nil) -> NSMenu {
+        let tabID: UUID?
+        if let groupID { tabID = customTabLayout?.groups.first(where: { $0.id == groupID })?.active }
+        else { tabID = selectedTab?.id }
+        return sessionTabContextMenu(tabID ?? UUID(), groupID: groupID)
+    }
+    func sessionTabContextMenu(_ id: UUID, groupID: UUID? = nil) -> NSMenu {
         let menu = NSMenu(); menu.autoenablesItems = false
         let tab = tabs.first { $0.id == id }
         for (title, action, enabled, hint) in [
@@ -98,25 +104,40 @@ extension WorkspaceController {
             let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
             item.target = self; item.representedObject = id; item.isEnabled = enabled; item.toolTip = hint
         }
+        if tab == nil, let groupID { menu.items.first?.representedObject = groupID }
+        let createGroup = NSMenuItem(title: "新建标签组…", action: #selector(newNamedTabGroup), keyEquivalent: "")
+        createGroup.target = self; menu.insertItem(createGroup, at: 1)
+        let manager = NSMenuItem(title: "会话管理…", action: #selector(showSessionManager), keyEquivalent: "")
+        manager.target = self; menu.insertItem(manager, at: 2)
+        let newWindow = NSMenuItem(title: "新建窗口", action: #selector(WorkspaceController.newWindow), keyEquivalent: "")
+        newWindow.target = self; newWindow.isEnabled = windowCoordinator != nil; menu.insertItem(newWindow, at: 3)
         menu.addItem(.separator())
         let moveWindow = menu.addItem(withTitle: "移动到新窗口", action: #selector(moveTabToNewWindow(_:)), keyEquivalent: "")
         moveWindow.target = self; moveWindow.representedObject = id
         moveWindow.isEnabled = tab != nil && windowCoordinator != nil && window?.attachedSheet == nil
         let moveGroup = menu.addItem(withTitle: "移动到标签组", action: nil, keyEquivalent: "")
-        moveGroup.submenu = tabMoveGroupMenu(id)
-        if let group = customTabLayout?.group(containing: id) {
+        moveGroup.submenu = tabMoveGroupMenu(id); moveGroup.isEnabled = tab != nil
+        if let group = customTabLayout?.group(containing: id) ?? customTabLayout?.groups.first(where: { $0.id == groupID }) {
             let manageGroup = menu.addItem(withTitle: "当前标签组", action: nil, keyEquivalent: "")
             manageGroup.submenu = tabGroupContextMenu(group.id)
         }
         let add = menu.addItem(withTitle: "添加到快捷链接…", action: #selector(addTabSessionLink(_:)), keyEquivalent: "")
-        add.target = self; add.representedObject = id; add.isEnabled = tabs.contains { $0.id == id }
+        add.target = self; add.representedObject = id; add.isEnabled = tab.map { !$0.activePane.isBlank && !$0.activePane.isShutdown } ?? false
         let properties = menu.addItem(withTitle: "当前会话属性…", action: #selector(showTabSessionProperties(_:)), keyEquivalent: "")
         properties.target = self; properties.representedObject = id
         properties.isEnabled = tabs.first { $0.id == id }?.activePane.canEditLiveKeepAlive == true
         menu.addItem(.separator())
+        let newSplit = menu.addItem(withTitle: "新建分屏", action: nil, keyEquivalent: "")
+        newSplit.isEnabled = tab != nil
+        let splitMenu = NSMenu(); splitMenu.autoenablesItems = false
+        for (index, title) in ["垂直分屏（左右）", "水平分屏（上下）"].enumerated() {
+            let item = splitMenu.addItem(withTitle: title, action: #selector(splitPaneFromMenu(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = id; item.tag = index; item.isEnabled = tab != nil
+        }
+        newSplit.submenu = splitMenu
         for (index, title) in ["垂直分割（左右）", "水平分割（上下）"].enumerated() {
             let item = menu.addItem(withTitle: title, action: #selector(splitTabFromMenu(_:)), keyEquivalent: "")
-            item.target = self; item.representedObject = id; item.tag = index; item.isEnabled = canSplitTab(id)
+            item.target = self; item.representedObject = id; item.tag = index; item.isEnabled = tab != nil && canSplitTab(id)
             item.toolTip = "移动现有标签到独立分区，保持会话连接"
         }
         let merge = menu.addItem(withTitle: "合并为单组选项卡", action: #selector(mergeTabGroups), keyEquivalent: "")
@@ -139,6 +160,15 @@ extension WorkspaceController {
             close.target = self; close.representedObject = id
             close.toolTip = "关闭此标签中选中的分屏，保留其他会话"
         }
+        menu.addItem(.separator())
+        let reconnect = menu.addItem(withTitle: "重新连接", action: #selector(reconnectTabFromMenu(_:)), keyEquivalent: "")
+        reconnect.target = self; reconnect.representedObject = id; reconnect.isEnabled = tab.map { !$0.activePane.isBlank } ?? false
+        let close = menu.addItem(withTitle: "关闭标签页", action: #selector(closeTabFromMenu(_:)), keyEquivalent: "")
+        close.target = self; close.representedObject = id; close.isEnabled = tab != nil
+        menu.addItem(.separator())
+        let defaults = menu.addItem(withTitle: "默认会话属性…", action: #selector(showSessionDefaults), keyEquivalent: ""); defaults.target = self
+        let links = menu.addItem(withTitle: "显示快捷链接栏", action: #selector(toggleSessionLinkBar), keyEquivalent: "")
+        links.target = self; links.state = configuration.sessionLinks.visible ? .on : .off
         return menu
     }
     @objc private func addTabSessionLink(_ sender: NSMenuItem) {

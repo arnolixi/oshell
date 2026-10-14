@@ -6,7 +6,7 @@
 import hashlib,json,os,pathlib,secrets,shutil,signal,socket,stat,subprocess,tempfile,threading,time
 import paramiko,re
 project=pathlib.Path(__file__).resolve().parent.parent
-launcher=project/'dist/OShell.app/Contents/MacOS/OShell-ZOC'
+launcher=project/'work/test-app/OShell.app/Contents/MacOS/OShell-ZOC'
 with tempfile.TemporaryDirectory(prefix='oshell-clone-',dir='/tmp') as folder:
     root=pathlib.Path(folder);key=paramiko.RSAKey.generate(2048)
     user='clone-user#asset';password='one-use!@:'+secrets.token_urlsafe(20)

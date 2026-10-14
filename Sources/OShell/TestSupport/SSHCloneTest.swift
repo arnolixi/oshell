@@ -84,8 +84,8 @@ enum SSHCloneTest {
                                             }
                                             wait("transportLossDetected", { controller.inputPanes.allSatisfy(\.ended) && !group.isAvailable }) {
                                                 let count = controller.tabs.count
-                                                modal(accept: false) { controller.duplicateTab(nextTab) }
-                                                checks["expiredTransportDoesNotPromptForPasswordOrCreateTab"] = controller.tabs.count == count
+                                                controller.duplicateTab(nextTab)
+                                                checks["disconnectedDoubleClickDoesNotPromptOrCreateTab"] = controller.tabs.count == count
                                                 controller.shutdown()
                                                 wait("lastCloseRemovesControlDirectory", { !FileManager.default.fileExists(atPath: group.directory.path) }) { finish() }
                                             }

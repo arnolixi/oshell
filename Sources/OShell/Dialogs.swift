@@ -19,6 +19,7 @@ enum Dialogs {
         gpu.state = .off; gpu.isEnabled = false; gpu.title = "旧系统使用标准终端渲染"
         #endif
         let clock = TerminalClockSettingsView(current)
+        defer { clock.dispose() }
         let zmodem = NSButton(checkboxWithTitle: "自动识别 rz/sz 文件传输", target: nil, action: nil); zmodem.state = current.autoZmodem ? .on : .off
         let autoCopy = NSButton(checkboxWithTitle: "选中终端文本后自动复制", target: nil, action: nil); autoCopy.state = current.copyOnSelect ? .on : .off
         let trimTrailing = NSButton(checkboxWithTitle: "复制时删除尾部空白", target: nil, action: nil)
@@ -35,7 +36,7 @@ enum Dialogs {
         let appearanceView = AppearanceSettingsView(preferences: current)
         defer { appearanceView.dispose() }
         let tabs = NSTabView(frame: NSRect(x: 0, y: 0, width: 840, height: 550))
-        let basic = GeneralSettingsView(font: font, size: size, history: history, gpu: gpu, input: [zmodem, autoCopy, trimOptions, rightPaste, previewPaste], clock: clock)
+        let basic = GeneralSettingsView(font: font, size: size, history: history, gpu: gpu, input: [zmodem, autoCopy, trimOptions, rightPaste, previewPaste])
         let general = NSTabViewItem(identifier: "general"); general.label = "常规"; general.view = basic; tabs.addTabViewItem(general)
         let colors = NSTabViewItem(identifier: "appearance"); colors.label = "主题与配色"; colors.view = appearanceView; tabs.addTabViewItem(colors)
         let updatesView = UpdateSettingsView(preferences: current)
@@ -46,6 +47,7 @@ enum Dialogs {
         }
         let textView = TerminalTextSettingsView(current)
         let textTab = NSTabViewItem(identifier: "text"); textTab.label = "文字"; textTab.view = textView; tabs.addTabViewItem(textTab)
+        let clockTab = NSTabViewItem(identifier: "clock"); clockTab.label = "时钟"; clockTab.view = clock; tabs.addTabViewItem(clockTab)
         if let securityView {
             let security = NSTabViewItem(identifier: "security"); security.label = "安全"; security.view = securityView; tabs.addTabViewItem(security)
         }

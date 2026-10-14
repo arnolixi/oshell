@@ -195,7 +195,7 @@ extension WorkspaceController {
     func configureGroupHeading(_ strip: TabStripView, group: TabGroupNode) {
         let unread = tabs.contains { group.tabs.contains($0.id) && $0.hasUnreadOutput }
         strip.setGroup(title: groupName(group.id) + " · \(group.tabs.count)", menu: tabGroupContextMenu(group.id), active: activeTabGroupID == group.id, unread: unread)
-        strip.backgroundMenu = { [weak self, weak group] in guard let group else { return nil }; return self?.tabGroupContextMenu(group.id) }
+        strip.backgroundMenu = { [weak self, weak group] in guard let group else { return nil }; return self?.tabBarContextMenu(groupID: group.id) }
     }
     func refreshTabGroupMenu() {
         let menu = NSMenu(); menu.autoenablesItems = false

@@ -3,9 +3,14 @@
 # Copyright (c) 2026 OShell contributors
 
 """Disposable loopback endpoints for the app's local ping/curl/telnet/ssh tests."""
-import http.server, json, os, pathlib, secrets, socket, socketserver, struct, subprocess, tempfile, threading, time
+import argparse, http.server, json, os, pathlib, secrets, socket, socketserver, struct, subprocess, tempfile, threading, time
 import paramiko
 project = pathlib.Path(__file__).resolve().parent.parent
+parser = argparse.ArgumentParser()
+parser.add_argument('--connection-status-only', action='store_true')
+parser.add_argument('--app', type=pathlib.Path, default=project/'work/test-app/OShell.app')
+options = parser.parse_args()
+report_name = 'command-connection' if options.connection_status_only else 'local-tools'
 class HTTP(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         data = (('LOCAL_CURL_BODY_' + 'x'*32 + '\n') * 25000 + 'LOCAL_CURL_TAIL\n').encode()
@@ -85,13 +90,13 @@ with tempfile.TemporaryDirectory(prefix='oshell-local-tools-',dir='/tmp') as dir
     env=os.environ.copy();env.update(OSHELL_DATA_DIR=str(root/'config'),OSHELL_LOCAL_TOOL_ROOT=str(root),LANG='en_US.UTF-8',LC_CTYPE='UTF-8',LC_ALL='C')
     app=None
     try:
-        app=subprocess.Popen([str(project/'dist/OShell.app/Contents/MacOS/OShell'),'--local-tool-test'],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+        app=subprocess.Popen([str(options.app/'Contents/MacOS/OShell'),'--command-connection-test' if options.connection_status_only else '--local-tool-test'],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
         output,_=app.communicate(timeout=100)
         result=json.loads((root/'result.json').read_text())
         result['checks']['clientLocaleNotForwarded']=not locale_requests
         result['passed']=result['passed'] and all(result['checks'].values())
-        (project/'validation/local-tools-result.json').write_text(json.dumps(result,indent=2))
-        (project/'validation/local-tools-app.log').write_bytes(output)
+        (project/'validation'/f'{report_name}-result.json').write_text(json.dumps(result,indent=2))
+        (project/'validation'/f'{report_name}-app.log').write_bytes(output)
         print(json.dumps(result,indent=2))
         if not result['passed'] or app.returncode:raise SystemExit(1)
     finally:
