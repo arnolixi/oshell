@@ -36,7 +36,14 @@ final class LoginPasswordSavingTest {
                 let option = views.first { $0.identifier?.rawValue == "ssh.auth.savePassword" } as? NSButton
                 checks[label + "DefaultNotSaved"] = option?.state == .off
                 checks[label + "SaveOptionEnabled"] = option?.isEnabled == (enabled ?? save)
-                if let answer { input.stringValue = answer }
+                if let answer {
+                    input.stringValue = answer
+                    if label == "accepted", let entry = views.compactMap({ $0 as? PasswordEntryView }).first {
+                        checks["loginPasswordStartsMasked"] = !entry.isRevealed
+                        entry.revealButton.performClick(nil)
+                        checks["loginPasswordRevealKeepsInput"] = entry.visibleField.stringValue == answer
+                    }
+                }
                 if save { option?.state = .on }
                 if cancel, let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) }
                 else { views.compactMap { $0 as? NSButton }.first { $0.title == "确定" }?.performClick(nil) }

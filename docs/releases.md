@@ -30,7 +30,7 @@ GitHub API 只使用自动提供的 `GITHUB_TOKEN`，无需额外 PAT。发布�
 
 构建机使用 GitHub 托管的 `macos-15`（arm64）与 `macos-15-intel`，固定选择 Xcode 16.4，避免 `macos-latest` 标签更换架构或默认工具链变动影响旧系统构建。第三方 Actions 已固定到官方版本提交。若 GitHub 将来移除该 Xcode，需要更新固定工具链并重新验证旧目标；构建机版本不等于安装包的最低运行版本。
 
-当前沿用 ad-hoc 签名，**没有 Developer ID 签名和 Apple 公证**，Release 说明会明确标注。部署目标校验不等于真实 macOS 10.13/11 的运行验收。流水线发布的 DMG 同时用于手动安装和内置更新；也可按下方步骤在本机签名。不会自动创建或更换发布密钥。
+正式构建使用固定自签名代码签名证书，**没有 Developer ID 签名和 Apple 公证**，Release 说明会明确标注。部署目标校验不等于真实 macOS 10.13/11 的运行验收。流水线发布的 DMG 同时用于手动安装和内置更新；也可按下方步骤在本机签名。不会自动创建或更换发布密钥。
 
 参考：[GitHub 托管 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)、[macOS 15 工具链清单](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md)、[GitHub CLI Release 命令](https://cli.github.com/manual/gh_release_create)。
 
@@ -39,6 +39,20 @@ GitHub API 只使用自动提供的 `GITHUB_TOKEN`，无需额外 PAT。发布�
 日常开发仅运行 `bash scripts/build.sh`，保留本机架构的 `dist/OShell.app`。四种兼容安装包通过上方 Actions 流程生成；需要构建但暂不发布时关闭 `publish`。
 
 流水线使用 `package-release.py --flavor <目标> --format dmg --test-core`，并用 `verify-installers.py` 校验。高级手动打包命令仍可用于排查 CI，但不会由本地默认构建触发。带 UI 测试标记的应用不能打包或通过发布验证。
+
+## 固定代码签名身份
+
+本地正式构建与 Actions 共用同一张证书，以 `scripts/code-signing.json` 中的公开指纹固定身份。签名要求同时绑定证书和应用标识，升级后不随可执行文件哈希变化；四种安装包必须使用同一身份。缺少私钥或证书指纹不匹配时构建失败，不自动生成新证书或回退 ad-hoc 签名。
+
+维护者的加密 PKCS#12 文件和密码保存在 `.release-private/code-signing/`，目录权限 0700、文件权限 0600，须另外安全备份。首次创建使用带 cryptography 的 Python 运行 `scripts/init-code-signing.py`；该命令拒绝覆盖已有身份，日常构建和 CI 不会调用它。私钥及其密码不得进入源码、日志、构建产物或 Release。
+
+GitHub Actions 使用仓库 Secret `OSHELL_CODESIGN_P12`（加密 PKCS#12 的 Base64）和 `OSHELL_CODESIGN_PASSWORD`。这两个 Secret 与更新签名密钥 `OSHELL_UPDATE_SIGNING_KEY` 各自独立，不能互相替换。签名时将证书导入随机密码保护的临时独立钥匙串，仅授权签名工具使用；结束后删除临时钥匙串，不修改系统证书信任或用户原有钥匙串条目。
+
+公开指纹仅用于验证，其他开发者没有维护者的私钥时，可用 `OSHELL_ALLOW_ADHOC=1 bash scripts/build.sh` 构建个人开发版；`bash scripts/build.sh --tests` 也使用 ad-hoc 签名，避免让测试版本继承正式 App 的签名身份。官方流水线设置 `OSHELL_REQUIRE_FIXED_SIGNING=1`，拒绝这些开发构建。独立 fork 应建立自己的签名身份，不能冒用上游身份。
+
+从旧 ad-hoc 版本首次切换到固定证书版本，可能仍需授权或重新启用 Touch ID 一次。之后使用相同证书和应用标识的正常升级可以延续钥匙串身份；正常指纹验证继续保留。证书过期、更换证书或用户修改钥匙串访问策略时需要单独处理。自签名不等于 Apple 信任，不能替代 Developer ID / 公证或保证消除 Gatekeeper 提醒。
+
+验证固定身份：`python3 scripts/sign-app.py --verify dist/OShell.app`。签名政策回归使用 `python3 scripts/test-code-signing.py`；跨版本钥匙串回归使用 `python3 scripts/test-signing-upgrade.py`，只操作可自动清理的临时测试钥匙串，交互授权处于禁用状态。
 
 ## 内置更新
 

@@ -28,7 +28,8 @@ enum UpdateFeatureTest {
                 if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) }
             }
             RunLoop.main.add(timer, forMode: .modalPanel); let before = workspace.configurationRevision
-            workspace.checkForUpdates(); timer.invalidate()
+            workspace.updateButton.performClick(nil); timer.invalidate()
+            checks["toolbarCheckAvailable"] = workspace.updateButton.isEnabled && workspace.updateButton.toolTip?.contains("升级确认") == true
             checks["unconfiguredCheckOpensCancellableSettings"] = workspace.configurationRevision == before && !workspace.appUpdater.started
             let defaultsDomain = (Bundle.main.object(forInfoDictionaryKey: "SUDefaultsDomain") as? String ?? Bundle.main.bundleIdentifier!) as CFString
             CFPreferencesSetAppValue("SUFeedURL" as CFString, "https://example.invalid/old-appcast.xml" as CFString, defaultsDomain)
@@ -44,6 +45,7 @@ enum UpdateFeatureTest {
             checks["settingsPersisted"] = try workspace.store.load().preferences.updateRepository == "example/project"
             checks["oldFeedOverrideCleared"] = CFPreferencesCopyAppValue("SUFeedURL" as CFString, defaultsDomain) == nil
             checks["checksUseStaticPages"] = try UpdateSource("example/project").staticMetadataURL.absoluteString == "https://example.github.io/project/updates/latest.json"
+            checks["configuredButtonIsAvailable"] = workspace.updateButton.isEnabled
             checks["configuredManualUpdaterStarts"] = workspace.appUpdater.started && !workspace.appUpdater.isBusy
             workspace.newLocal(); let pane = workspace.selectedTab!.activePane, pid = pane.terminal.process.shellPid
             timer = Timer(timeInterval: 0.03, repeats: true) { _ in if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) } }

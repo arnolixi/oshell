@@ -161,7 +161,7 @@ enum PopupKeyboard {
               event.modifierFlags.intersection([.command, .option, .control, .shift]) == .control,
               trackingMenus.isEmpty,
               let editor = window.firstResponder as? NSTextView, editor.isFieldEditor, !editor.hasMarkedText(),
-              let field = editor.delegate as? NSSecureTextField,
+              let field = editor.delegate as? NSTextField, field is NSSecureTextField || field is RevealedPasswordTextField,
               field.isEnabled, field.isEditable, field.currentEditor() === editor else { return false }
         editor.selectAll(nil)
         return true
@@ -178,6 +178,7 @@ enum PopupKeyboard {
         // The shared color panel can be key while an alert remains modal.
         if let panel = window as? NSColorPanel { panel.orderOut(nil); PopupPresentation.detach(panel); return true }
         if let modal = NSApp.modalWindow, modal !== window { return false }
+        if let handled = (window.windowController as? SessionManager)?.inlineRenameEscape() { return handled }
         if let cancellation = alerts[ObjectIdentifier(window)]?.1 { cancellation(); return true }
         if let panel = window as? NSSavePanel { panel.cancel(nil); return true }
         if window is PopupWindow { window.performClose(nil); return true }

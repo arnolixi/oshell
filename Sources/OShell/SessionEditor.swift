@@ -12,7 +12,7 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
     private let alert = PopupAlert()
     private let pages = NSTabView()
     private let name = NSTextField(), directory = SessionDirectoryPicker(), host = NSTextField(), port = NSTextField(), user = NSTextField(), key = NSTextField()
-    private let password = NSSecureTextField(), remember = NSButton(checkboxWithTitle: "保存密码", target: nil, action: nil)
+    private let password = PasswordEntryView(identifier: "session.password"), remember = NSButton(checkboxWithTitle: "保存密码", target: nil, action: nil)
     private let passwordProtection = NSPopUpButton()
     private let proxyPicker = NSPopUpButton()
     private let proxyRouteNote = NSTextField(wrappingLabelWithString: "")
@@ -50,9 +50,9 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
         port.stringValue = String(profile.port); user.stringValue = profile.username
         user.placeholderString = "留空使用 SSH 默认用户"
         key.stringValue = profile.identityFile; key.placeholderString = "可选，例如 ~/.ssh/id_rsa"
-        password.placeholderString = profile.encryptedPassword == nil ? "留空则在连接时输入" : "已保存；留空保留，填写新值替换"
+        password.placeholderString = profile.encryptedPassword == nil ? "留空则在连接时输入" : "已保存（不回显）；留空沿用，填写新值替换"
         remember.state = profile.encryptedPassword == nil ? .off : .on
-        password.identifier = .init("session.password"); remember.identifier = .init("session.remember")
+        remember.identifier = .init("session.remember")
         passwordProtection.identifier = .init("session.passwordProtection")
         for popup in [passwordProtection] { popup.addItems(withTitles: PasswordProtection.allCases.map(\.title)) }
         passwordProtection.selectItem(at: profile.encryptedPassword != nil && profile.encryptedPassword?.localKeyID == nil ? 1 : 0)
@@ -68,7 +68,7 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
         protocolKind.selectItem(at: [.ssh, .sftp, .ftp].firstIndex(of: profile.kind) ?? 0)
         protocolKind.target = self; protocolKind.action = #selector(protocolChanged)
         remoteDirectory.stringValue = profile.initialDirectory
-        addPage("连接", rows: [("协议", protocolKind), ("名称", name), ("目录", directory), ("主机", host), ("端口", port), ("用户名", user), ("私钥", key), ("密码", password), ("密码保存", passwordStorage), ("文件初始目录", remoteDirectory), ("兼容性", legacy)], note: "本机自动加密的密文和随机密钥均由 OShell 保存在数据目录，复制整个目录可能同时带走密钥。主密码模式保护更强。旧密码留空切换时需解锁一次，也可重新填写会话密码。")
+        addPage("连接", rows: [("协议", protocolKind), ("名称", name), ("目录", directory), ("主机", host), ("端口", port), ("用户名", user), ("私钥", key), ("密码", password), ("密码保存", passwordStorage), ("文件初始目录", remoteDirectory), ("兼容性", legacy)], note: "本机自动加密的密文和随机密钥均由 OShell 保存在数据目录，复制整个目录可能同时带走密钥。主密码模式保护更强。已保存密码不回显；留空并勾选保存密码时沿用，修改主机或账号后也会沿用。填写新值可替换，取消勾选可清除。")
         proxyRouteNote.maximumNumberOfLines = 3; proxyRouteNote.lineBreakMode = .byTruncatingMiddle
         proxyPicker.identifier = .init("session.sharedProxy")
         proxyPicker.target = self; proxyPicker.action = #selector(proxyChanged)
@@ -187,6 +187,7 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
         keepAliveChanged()
     }
     func run() -> SessionProfile? {
+        defer { password.clear() }
         while alert.runModal() == .alertFirstButtonReturn {
             profile.kind = [.ssh, .sftp, .ftp][protocolKind.indexOfSelectedItem]
             profile.initialDirectory = remoteDirectory.stringValue
@@ -217,12 +218,11 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
                     var identity: SSHIdentity? = explicitIdentity ? SSHIdentity(host: destination.host, user: destination.username, port: destination.port) : nil
                     if secret.isEmpty {
                         guard let old, let envelope = old.encryptedPassword else { throw ModelError.invalid("请填写要保存的密码。"); }
-                        guard old.host == destination.host, old.port == destination.port, old.username == destination.username,
-                              old.kind.usesSSH == destination.kind.usesSSH else { throw ModelError.invalid("连接目标已改变，请重新输入密码或取消保存。"); }
+                        let sameTarget = old.host == destination.host && old.port == destination.port && old.username == destination.username && old.kind.usesSSH == destination.kind.usesSSH
                         let oldMode: PasswordProtection = envelope.localKeyID == nil ? .master : .local
-                        if mode == oldMode { return PasswordVault.shared.currentCredential(old).encryptedPassword }
+                        if sameTarget && mode == oldMode { return PasswordVault.shared.currentCredential(old).encryptedPassword }
                         let resolved = try identity ?? SSHIdentity.resolve(destination)
-                        guard resolved == envelope.identity else { throw ModelError.invalid("SSH 配置解析出的目标已改变，请重新输入密码。"); }
+                        if sameTarget && resolved != envelope.identity { throw ModelError.invalid("SSH 配置解析出的目标已改变，请重新输入密码。") }
                         identity = resolved
                         guard let value = try PasswordVault.shared.readSavedPassword(old) else { return nil }; secret = value
                     }
@@ -233,10 +233,10 @@ final class SessionEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate 
                     guard let encrypted = try protect(password.stringValue, destination: profile, old: original, selection: passwordProtection, explicitIdentity: profile.kind == .ftp) else { continue }
                     profile.encryptedPassword = encrypted
                 } else { profile.encryptedPassword = nil }
-                password.stringValue = ""; return profile
+                return profile
             } catch { Dialogs.message(error.localizedDescription) }
         }
-        password.stringValue = ""; return nil
+        return nil
     }
     func numberOfRows(in tableView: NSTableView) -> Int { profile.tunnels.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {

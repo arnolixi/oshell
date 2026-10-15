@@ -87,11 +87,11 @@ enum LinksCatalogTest {
         nextModal { _ in if let window = NSApp.modalWindow { _ = PopupKeyboard.dismiss(window: window) } }
         invoke(action("链接属性…", row: table.selectedRow))
         checks["cancelLinkEditDoesNotSave"] = workspace.configurationRevision == revision
-        nextModal { root in
-            descendants(root).compactMap { $0 as? NSTextField }.first { $0.isEditable }?.stringValue = "运维新"
-            press(root, "确定")
-        }
-        invoke(action("重命名…", row: row("运维")))
+        invoke(action("重命名", row: row("运维")))
+        let rename = input(manager.window!.contentView!, "session.inlineName")
+        (rename?.currentEditor() as? NSTextView)?.string = "运维新"
+        rename?.stringValue = "运维新"
+        checks["inlineFolderRenameSaved"] = manager.commitInlineRename()
         checks["managerFolderRenameUpdatesNestedLinks"] = workspace.configuration.sessionLinks.entries.first { $0.id == bLink }?.folder == "运维新/内网" && workspace.sessionLinkBar.buttons.contains { $0.title == "运维新" }
         checks["folderRenameKeepsSourceProfiles"] = workspace.configuration.profiles.first { $0.id == b.id } == b
         nextModal { root in input(root, "session.directory.name")?.stringValue = "共享"; press(root, "确定") }
@@ -106,7 +106,7 @@ enum LinksCatalogTest {
         manager.reload()
         checks["toolbarFolderDeleteDoesNotReappear"] = row("子目录") < 0 && !SessionDirectory.all(workspace.configuration).contains("Links/共享/子目录")
         manager.revealDirectory("")
-        checks["linksRootIsReserved"] = action("重命名…", row: row("Links"))?.isEnabled == false && manager.tableView(table, pasteboardWriterForRow: row("Links")) == nil
+        checks["linksRootIsReserved"] = action("重命名", row: row("Links"))?.isEnabled == false && manager.tableView(table, pasteboardWriterForRow: row("Links")) == nil
         let sourceDrag = drag([row(local.name)])
         checks["dragIntoLinksShowsReferenceOperation"] = manager.tableView(table, validateDrop: sourceDrag, proposedRow: row("Links"), proposedDropOperation: .on) == .link
         checks["dragIntoLinksAddsReference"] = manager.tableView(table, acceptDrop: sourceDrag, row: row("Links"), dropOperation: .on)

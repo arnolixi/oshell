@@ -70,6 +70,9 @@ extension WorkspaceController {
         let active = entries.first { $0.id == node.active } ?? entries.first
         node.active = active?.id
         let strip = TabStripView(); configureTerminalTabStrip(strip)
+        strip.onReorderTab = { [weak self, weak node] id, before in
+            guard let node else { return false }; return self?.reorderTab(id, before: before, inGroup: node.id) ?? false
+        }
         strip.onAdd = { [weak self, weak node] in self?.activeTabGroupID = node?.id; self?.newBlankTab() }
         strip.update(tabs: entries, selected: active, numbers: tabNumbers); configureGroupHeading(strip, group: node); groupStrips.append((node, strip))
         let view = TerminalTabGroupView(strip: strip, content: active?.displayView ?? emptyTabGroupView(node))

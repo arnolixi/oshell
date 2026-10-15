@@ -52,6 +52,46 @@ enum FileFeatureTest {
                         try backend.mkdir(directory + "/empty"); try backend.remove(directory + "/empty", directory: true)
                         checks[name + "DeleteEmptyDirectory"] = try !backend.list(directory).contains { $0.name == "empty" }
                     }
+                    for (name, backend) in [("sftp", sftp as RemoteFileBackend), ("ftp", ftpBackend as RemoteFileBackend)] {
+                        let small = local.appendingPathComponent(name+"-rate.bin"); try payload.prefix(65536).write(to:small)
+                        backend.setTransferRateLimit(65536)
+                        let fixedStart = ProcessInfo.processInfo.systemUptime
+                        try backend.upload(small,to:"/"+name+"-fixed-rate.bin") { _,_ in }
+                        checks[name+"FixedUploadLimit"] = ProcessInfo.processInfo.systemUptime-fixedStart >= 0.65
+                        backend.setTransferRateLimit(32768); var uploadChanged = false
+                        let upStart = ProcessInfo.processInfo.systemUptime
+                        try backend.upload(source,to:"/"+name+"-live-rate.bin") { bytes,total in
+                            if !uploadChanged && bytes >= 8192 && bytes < total { uploadChanged = true; backend.setTransferRateLimit(0) }
+                        }
+                        checks[name+"LiveUploadLimit"] = uploadChanged && ProcessInfo.processInfo.systemUptime-upStart < 4
+                        backend.setTransferRateLimit(32768); var downloadChanged = false
+                        let received = local.appendingPathComponent(name+"-live-rate-download.bin"), downStart = ProcessInfo.processInfo.systemUptime
+                        try backend.download("/"+name+"-live-rate.bin",to:received) { bytes,total in
+                            if !downloadChanged && bytes >= 8192 && bytes < total { downloadChanged = true; backend.setTransferRateLimit(0) }
+                        }
+                        checks[name+"LiveDownloadLimit"] = downloadChanged && ProcessInfo.processInfo.systemUptime-downStart < 4
+                        checks[name+"RateLimitedContentMatches"] = try Data(contentsOf:received) == payload
+                        let empty = local.appendingPathComponent(name+"-empty.bin"); try Data().write(to:empty)
+                        try backend.upload(empty,to:"/"+name+"-empty.bin") { _,_ in }
+                        let emptyDownload = local.appendingPathComponent(name+"-empty-download.bin")
+                        try backend.download("/"+name+"-empty.bin",to:emptyDownload) { _,_ in }
+                        checks[name+"EmptyFilesStillTransfer"] = try Data(contentsOf:emptyDownload).isEmpty
+                    }
+                    do { try ftpBackend.upload(source,to:"/missing-parent/rate-failure.bin") { _,_ in }; checks["ftpUploadFailureReported"] = false }
+                    catch { checks["ftpUploadFailureReported"] = true }
+                    try ftpBackend.upload(source,to:"/after-rate-failure.bin") { _,_ in }
+                    checks["ftpUploadRecoversAfterFailure"] = try ftpBackend.list("/").contains { $0.name == "after-rate-failure.bin" && $0.size == UInt64(payload.count) }
+                    let cancelledUpload = FTPBackend(profile:ftp,password:password)
+                    try cancelledUpload.connect(); cancelledUpload.setTransferRateLimit(1024)
+                    let uploadCancelStart = ProcessInfo.processInfo.systemUptime
+                    DispatchQueue.global().asyncAfter(deadline:.now()+0.2) { cancelledUpload.cancel() }
+                    do { try cancelledUpload.upload(source,to:"/cancel-limited-upload.bin") { _,_ in }; checks["ftpUploadCancelInterruptsWait"] = false }
+                    catch { checks["ftpUploadCancelInterruptsWait"] = ProcessInfo.processInfo.systemUptime-uploadCancelStart < 2 }
+                    let limitedSCP = try SCPTransfer(profile:profile,knownHosts:known,rateLimit:65536)
+                    let scpRateStart = ProcessInfo.processInfo.systemUptime
+                    try limitedSCP.run(local:source,remote:"/scp-rate.bin",upload:true)
+                    checks["scpNativeRateLimit"] = ProcessInfo.processInfo.systemUptime-scpRateStart >= 2
+                    limitedSCP.cancel()
                     try ftpBackend.mkdir("/list-only")
                     try ftpBackend.mkdir("/list-only/subdir")
                     try ftpBackend.upload(source, to: "/list-only/test.bin") { _, _ in }
@@ -67,9 +107,13 @@ enum FileFeatureTest {
                     try scp.run(local: scpOutput, remote: "/scp 'quote' file.bin", upload: false)
                     checks["scpRoundTripAndRepeatedAuthentication"] = try Data(contentsOf: scpOutput) == payload
                     let sftpPartial = local.appendingPathComponent("cancel-sftp.bin")
-                    do { try sftp.download("/slow.bin", to: sftpPartial) { bytes, _ in if bytes >= 32768 { sftp.cancel() } }; checks["sftpCancel"] = false } catch { checks["sftpCancel"] = !FileManager.default.fileExists(atPath: sftpPartial.path) }
+                    sftp.setTransferRateLimit(1024); let sftpCancelStart = ProcessInfo.processInfo.systemUptime
+                    DispatchQueue.global().asyncAfter(deadline:.now()+0.2) { sftp.cancel() }
+                    do { try sftp.download("/slow.bin", to: sftpPartial) { _, _ in }; checks["sftpCancel"] = false } catch { checks["sftpCancel"] = !FileManager.default.fileExists(atPath: sftpPartial.path) && ProcessInfo.processInfo.systemUptime-sftpCancelStart < 2 }
                     let ftpPartial = local.appendingPathComponent("cancel-ftp.bin")
-                    do { try ftpBackend.download("/slow.bin", to: ftpPartial) { bytes, _ in if bytes >= 32768 { ftpBackend.cancel() } }; checks["ftpCancel"] = false } catch { checks["ftpCancel"] = !FileManager.default.fileExists(atPath: ftpPartial.path) }
+                    ftpBackend.setTransferRateLimit(1024); let ftpCancelStart = ProcessInfo.processInfo.systemUptime
+                    DispatchQueue.global().asyncAfter(deadline:.now()+0.2) { ftpBackend.cancel() }
+                    do { try ftpBackend.download("/slow.bin", to: ftpPartial) { _, _ in }; checks["ftpCancel"] = false } catch { checks["ftpCancel"] = !FileManager.default.fileExists(atPath: ftpPartial.path) && ProcessInfo.processInfo.systemUptime-ftpCancelStart < 2 }
                     let config = String(decoding: try Data(contentsOf: controller.store.url), as: UTF8.self)
                     checks["noPlaintextCredentialsInConfiguration"] = !config.contains(password) && !config.contains(master)
                 } catch { failures.append(error.localizedDescription) }

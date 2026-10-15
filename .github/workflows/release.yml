@@ -52,6 +52,7 @@ jobs:
           python3 scripts/check-public-source.py --history HEAD
           python3 scripts/test-ci-release.py
           python3 scripts/test-development-tools.py
+          python3 scripts/test-code-signing.py
       - name: Resolve version and prepare immutable release tag
         id: meta
         env:
@@ -93,6 +94,7 @@ jobs:
       RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
       RELEASE_COMMIT: ${{ needs.metadata.outputs.commit }}
       FLAVOR: ${{ matrix.flavor }}
+      OSHELL_REQUIRE_FIXED_SIGNING: "1"
       PUBLISH_RELEASE: ${{ needs.metadata.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -106,7 +108,19 @@ jobs:
           xcodebuild -version
           swift --version
           uname -m
+      - name: Require fixed code signing identity
+        env:
+          OSHELL_CODESIGN_P12: ${{ secrets.OSHELL_CODESIGN_P12 }}
+          OSHELL_CODESIGN_PASSWORD: ${{ secrets.OSHELL_CODESIGN_PASSWORD }}
+        run: |
+          if [ -z "$OSHELL_CODESIGN_P12" ] || [ -z "$OSHELL_CODESIGN_PASSWORD" ]; then
+            echo '::error::Configure OSHELL_CODESIGN_P12 and OSHELL_CODESIGN_PASSWORD with the pinned signing identity. Never generate a replacement certificate in CI.'
+            exit 1
+          fi
       - name: Build application, run core checks and create DMG
+        env:
+          OSHELL_CODESIGN_P12: ${{ secrets.OSHELL_CODESIGN_P12 }}
+          OSHELL_CODESIGN_PASSWORD: ${{ secrets.OSHELL_CODESIGN_PASSWORD }}
         run: python3 scripts/package-release.py --flavor "$FLAVOR" --format dmg --test-core
       - name: Verify DMG payload, architectures and deployment targets
         run: python3 scripts/verify-installers.py --flavor "$FLAVOR" --format dmg
@@ -162,6 +176,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
       RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+      OSHELL_REQUIRE_FIXED_SIGNING: "1"
       RELEASE_COMMIT: ${{ needs.metadata.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

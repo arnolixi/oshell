@@ -125,6 +125,18 @@ final class TabStripView: InterfaceSurfaceView {
         override func mouseDown(with event: NSEvent) { if track(event) { return }; if event.clickCount == 2 { onDuplicate?() } else { onSelect?() } }
         override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
     }
+    private final class InsertionMarker: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func draw(_ dirtyRect: NSRect) {
+            TerminalChrome.flame.setFill(); NSBezierPath(roundedRect: bounds, xRadius: 1, yRadius: 1).fill()
+        }
+    }
+    private let insertionMarker = InsertionMarker()
+    private var lastDragScroll: TimeInterval = 0
+    var canAcceptTab: ((UUID) -> Bool)?
+    /// The destination is an existing tab's UUID, or nil for the end of this strip.
+    var onReorderTab: ((UUID, UUID?) -> Bool)?
+    var onDragOver: (() -> Void)?
     private let scroll = Scroll()
     private let document = Document()
     private let addButton = MenuButton()
@@ -143,6 +155,7 @@ final class TabStripView: InterfaceSurfaceView {
     var onDragEnd: (() -> Void)?
     override init(frame: NSRect) {
         super.init(frame: frame)
+        registerForDraggedTypes([TabDropHost.pasteboardType])
         // No reserved scroller track, including macOS's “Always” preference.
         // Wheel/trackpad, keyboard navigation and the all-tabs menu remain available.
         scroll.drawsBackground = false; scroll.hasHorizontalScroller = false
@@ -258,6 +271,55 @@ final class TabStripView: InterfaceSurfaceView {
             x += item.preferredWidth + 3
         }
     }
+    func clearDragPreview() {
+        insertionMarker.removeFromSuperview(); lastDragScroll = 0
+    }
+    private func draggedTab(_ sender: NSDraggingInfo) -> UUID? {
+        guard allowsTabDragging, onReorderTab != nil, sender.draggingSourceOperationMask.contains(.move),
+              let source = sender.draggingSource as? Item, source.dragEnabled, let window, source.window === window,
+              let raw = sender.draggingPasteboard.string(forType: TabDropHost.pasteboardType),
+              let id = UUID(uuidString: raw), source.id == id, canAcceptTab?(id) == true,
+              bounds.contains(convert(sender.draggingLocation, from: nil)) else { return nil }
+        return id
+    }
+    /// Convert through the clip view so a scrolled strip uses document coordinates.
+    func insertionBefore(at point: NSPoint) -> UUID? {
+        layoutSubtreeIfNeeded()
+        let location = document.convert(point, from: self)
+        return items.first { location.x < $0.frame.midX }?.id
+    }
+    private func scrollDuringDrag(at point: NSPoint) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let elapsed = lastDragScroll == 0 ? 0.03 : min(0.08, max(0, now-lastDragScroll)); lastDragScroll = now
+        let direction: CGFloat = point.x < scroll.frame.minX + 24 ? -1 : point.x > scroll.frame.maxX - 24 ? 1 : 0
+        let limit = max(0, document.bounds.width-scroll.contentView.bounds.width)
+        let offset = min(limit,max(0,scroll.contentView.bounds.minX+direction*CGFloat(elapsed)*360))
+        if offset != scroll.contentView.bounds.minX {
+            scroll.contentView.scroll(to:NSPoint(x:offset,y:0)); scroll.reflectScrolledClipView(scroll.contentView)
+        }
+    }
+    override func wantsPeriodicDraggingUpdates() -> Bool { true }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { draggingUpdated(sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard draggedTab(sender) != nil else { clearDragPreview(); return [] }
+        onDragOver?()
+        let point = convert(sender.draggingLocation,from:nil)
+        layoutSubtreeIfNeeded(); scrollDuringDrag(at:point)
+        let before = insertionBefore(at:point)
+        let edge = before.flatMap { id in items.first { $0.id == id }?.frame.minX } ?? items.last?.frame.maxX ?? 4
+        let x = convert(NSPoint(x:edge,y:0),from:document).x
+        insertionMarker.frame = NSRect(x:min(max(scroll.frame.minX,x-2),max(scroll.frame.minX,scroll.frame.maxX-3)),y:4,width:3,height:max(0,bounds.height-8))
+        addSubview(insertionMarker,positioned:.above,relativeTo:nil); insertionMarker.needsDisplay = true
+        return .move
+    }
+    override func draggingExited(_ sender: NSDraggingInfo?) { clearDragPreview() }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { draggedTab(sender) != nil }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        defer { clearDragPreview() }
+        guard let id = draggedTab(sender) else { return false }
+        return onReorderTab?(id,insertionBefore(at:convert(sender.draggingLocation,from:nil))) ?? false
+    }
+    override func concludeDragOperation(_ sender: NSDraggingInfo?) { clearDragPreview() }
     func revealSelection() {
         layoutSubtreeIfNeeded()
         if let item = items.first(where: { $0.id == selectedID }) { document.scrollToVisible(item.frame.insetBy(dx: -4, dy: 0)) }

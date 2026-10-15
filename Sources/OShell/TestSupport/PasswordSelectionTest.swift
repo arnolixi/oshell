@@ -19,8 +19,10 @@ enum PasswordSelectionTest {
         later {
             guard let window = NSApp.modalWindow, let root = window.contentView,
                   let field = descendants(root).compactMap({ $0 as? NSSecureTextField }).first else { checks["passwordPromptOpened"] = false; NSApp.abortModal(); return }
-            field.stringValue = original; window.makeFirstResponder(field)
+            field.stringValue = original; window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); window.makeFirstResponder(field)
             guard let editor = field.currentEditor() as? NSTextView else { checks["secureFieldEditorExists"] = false; NSApp.abortModal(); return }
+            checks["secureEditorRecognized"] = PopupKeyboard.selectAllPassword(with: key(window, flags: .control), in: window)
+            print("Password selection focus", NSApp.isActive, window === NSApp.keyWindow, checks["secureEditorRecognized"] == true)
             editor.setSelectedRange(NSRange(location: (original as NSString).length, length: 0))
             NSApp.postEvent(key(window, flags: .control), atStart: false)
             later {

@@ -8,6 +8,9 @@ private final class TabTestBackend: RemoteFileBackend {
     let description: String
     private let lock = NSLock(), gate = DispatchSemaphore(value: 0)
     private var cancelled = false, uploading = false
+    private var rate = 0
+    var currentRate: Int { lock.lock(); defer { lock.unlock() }; return rate }
+    func setTransferRateLimit(_ bytesPerSecond: Int) { lock.lock(); rate = bytesPerSecond; lock.unlock() }
     var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
     var uploadStarted: Bool { lock.lock(); defer { lock.unlock() }; return uploading }
     init(_ name: String) { description = name }
@@ -122,6 +125,11 @@ enum FileTabsTest {
             checks["metadataHorizontalScroll"] = table.enclosingScrollView?.hasHorizontalScroller == true && table.columnAutoresizingStyle == .noColumnAutoresizing
             first.filterText = "SFTP"; second.filterText = "FTP"
             manager.select(first)
+            checks["fileTabsReorder"] = manager.reorderSession(first.id, before: nil) && manager.sessions.map(\.id) == [second.id, first.id]
+            checks["fileTabsReorderBack"] = manager.reorderSession(first.id, before: second.id) && manager.sessions.map(\.id) == [first.id, second.id]
+            checks["fileReorderKeepsBackends"] = !backends[0].isCancelled && !backends[1].isCancelled && first.connected && second.connected
+            first.setTransferRateLimit(131072); second.setTransferRateLimit(1048576)
+            checks["limitsArePerFileTab"] = backends[0].currentRate == 131072 && backends[1].currentRate == 1048576
             checks["tabRestoresState"] = first.directory == "/one" && second.directory == "/two" && first.filterText == "SFTP" && second.filterText == "FTP"
             checks["tabDoesNotCancelOtherConnection"] = !backends[0].isCancelled && !backends[1].isCancelled
             checks["onlySelectedViewAttached"] = first.view.window === manager.window && second.view.window == nil
@@ -135,6 +143,8 @@ enum FileTabsTest {
                 wait("backgroundUploadStarted", { backends[0].uploadStarted }) {
                     manager.select(second); second.navigate("/independent")
                     wait("otherTabWorksDuringTransfer", { second.directory == "/independent" }) {
+                        first.setTransferRateLimit(524288)
+                        checks["busyTransferLimitChangesImmediately"] = backends[0].currentRate == 524288 && first.hasActiveOperation && !backends[0].isCancelled
                         checks["transferContinuesWhenHidden"] = first.hasActiveOperation && !backends[0].isCancelled && manager.hasActiveOperation
                         accept("关闭标签")
                         stage("close-busy-tab")

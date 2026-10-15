@@ -153,7 +153,7 @@ final class AuthBroker {
             completion(AuthResponse(success: true, answer: alert.runModal() == .alertFirstButtonReturn ? "yes" : "no")); return
         }
         alert.addButton(withTitle: "确定"); alert.addButton(withTitle: "取消")
-        let field = NSSecureTextField(); field.identifier = .init("ssh.auth.password")
+        let field = PasswordEntryView(identifier: "ssh.auth.password")
         let save = NSButton(checkboxWithTitle: "连接成功后保存密码到会话配置", target: nil, action: nil)
         save.identifier = .init("ssh.auth.savePassword"); save.state = .off
         save.isEnabled = saveIdentity != nil
@@ -167,9 +167,9 @@ final class AuthBroker {
         let content = NSStackView(views: controls); content.orientation = .vertical; content.alignment = .leading; content.spacing = 10
         content.frame = NSRect(x: 0, y: 0, width: 440, height: CGFloat(controls.count) * 30)
         field.widthAnchor.constraint(equalToConstant: 440).isActive = true
-        alert.accessoryView = content; alert.window.initialFirstResponder = field
+        alert.accessoryView = content; alert.window.initialFirstResponder = field.secureField
         let accepted = alert.runModal() == .alertFirstButtonReturn && !stopped
-        let answer = accepted ? field.stringValue : ""; field.stringValue = ""
+        let answer = accepted ? field.stringValue : ""; field.clear()
         if accepted, save.state == .on, let identity = saveIdentity, !answer.isEmpty { pendingPassword = (answer, identity) }
         else if !accepted { pendingPassword = nil }
         completion(AuthResponse(success: accepted, answer: answer))

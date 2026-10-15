@@ -17,7 +17,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     private let tabStrip = TabStripView()
     let sessionLinkBar = SessionLinkBar()
     var sessionLinkHeight: NSLayoutConstraint!
-    let currentPropertiesButton = NSButton(), defaultPropertiesButton = NSButton()
+    let currentPropertiesButton = NSButton(), defaultPropertiesButton = NSButton(), updateButton = NSButton()
     let splitButton = NSPopUpButton(frame: .zero, pullsDown: true)
     let tabGroupButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let arrangementButton = NSPopUpButton(frame: .zero, pullsDown: true)
@@ -62,6 +62,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     var quickSendHeight: NSLayoutConstraint!
     private var quickSendVisibilityObserver: NSObjectProtocol?
     private var activationObserver: NSObjectProtocol?
+    private var updateStateObserver: NSObjectProtocol?
     private var quickSendRefreshPending = false
     let syncIndicator = NSTextField(labelWithString: "")
     let stopSyncButton = NSButton()
@@ -124,11 +125,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
             self.quickSendRefreshPending = true
             DispatchQueue.main.async { [weak self] in self?.quickSendRefreshPending = false; self?.refreshQuickSendBar() }
         }
+        updateStateObserver = NotificationCenter.default.addObserver(forName: AppUpdater.stateDidChange, object: nil, queue: .main) { [weak self] _ in self?.refreshUpdateButton() }
         activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main) { [weak self] _ in self?.markSelectedOutputRead() }
     }
     deinit {
         if let quickSendVisibilityObserver { NotificationCenter.default.removeObserver(quickSendVisibilityObserver) }
         if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
+        if let updateStateObserver { NotificationCenter.default.removeObserver(updateStateObserver) }
     }
     func windowDidBecomeMain(_ notification: Notification) { windowCoordinator?.activate(self) }
     func windowDidBecomeKey(_ notification: Notification) { markSelectedOutputRead() }
@@ -189,10 +192,14 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         recordButton.imagePosition = .imageLeading; recordButton.bezelStyle = .texturedRounded
         let settings = iconButton("", "gearshape", #selector(showPreferences)); settings.toolTip = "设置"
         configurePropertyButtons()
-        let toolbar = WorkspaceToolbar(views: [connect, quickButton, new, local, files, currentPropertiesButton, defaultPropertiesButton, tools, tabGroupButton, splitButton, arrangementButton, syncIndicator, stopSyncButton, NSView(), find, recordButton, settings])
+        updateButton.identifier = .init("toolbar.checkUpdates")
+        updateButton.target = self; updateButton.action = #selector(checkForUpdates)
+        updateButton.image = NSImage(named: NSImage.refreshTemplateName)
+        updateButton.imagePosition = .imageLeading; updateButton.bezelStyle = .texturedRounded
+        let toolbar = WorkspaceToolbar(views: [connect, quickButton, new, local, files, currentPropertiesButton, defaultPropertiesButton, tools, tabGroupButton, splitButton, arrangementButton, syncIndicator, stopSyncButton, NSView(), updateButton, find, recordButton, settings])
         topToolbar = toolbar
         toolbar.identifier = .init("workspace.toolbar")
-        toolbar.compactButtons = [new, local, files, find, recordButton]
+        toolbar.compactButtons = [new, local, files, updateButton, find, recordButton]
         for (button, label) in [(new, "新建会话"), (local, "本地终端"), (find, "搜索终端"), (recordButton, "记录终端日志")] {
             button.toolTip = label; button.setAccessibilityLabel(label)
         }
@@ -228,7 +235,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     }
     func configureTerminalTabStrip(_ strip: TabStripView) {
         strip.allowsTabDragging = true
-        strip.onDragEnd = { [weak self] in self?.terminalHost.clearPreview() }
+        strip.canAcceptTab = { [weak self] id in self?.isSecurityUnlocked == true && self?.tabs.contains(where: { $0.id == id }) == true }
+        strip.onReorderTab = { [weak self] id, before in self?.reorderTab(id, before: before) ?? false }
+        strip.onDragOver = { [weak self] in self?.terminalHost.clearPreview() }
+        strip.onDragEnd = { [weak self] in
+            self?.terminalHost.clearPreview(); self?.tabStrip.clearDragPreview()
+            self?.groupStrips.forEach { $0.1.clearDragPreview() }
+        }
         strip.onSelect = { [weak self] id in
             guard let self, let tab = self.tabs.first(where: { $0.id == id }) else { return }
             self.select(tab)
@@ -273,15 +286,21 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
             composerHost.leadingAnchor.constraint(equalTo: workspace.leadingAnchor), composerHost.trailingAnchor.constraint(equalTo: workspace.trailingAnchor), composerHost.bottomAnchor.constraint(equalTo: quickSendBar.topAnchor), composerHeight,
             quickSendBar.leadingAnchor.constraint(equalTo: workspace.leadingAnchor), quickSendBar.trailingAnchor.constraint(equalTo: workspace.trailingAnchor), quickSendBar.bottomAnchor.constraint(equalTo: workspace.bottomAnchor), quickSendHeight
         ])
-        let icon = NSImageView(image: NSImage(oshellSymbolName: "terminal", accessibilityDescription: "OShell") ?? NSImage())
-        icon.oshellContentTintColor = .systemTeal; icon.widthAnchor.constraint(equalToConstant: 62).isActive = true; icon.heightAnchor.constraint(equalToConstant: 62).isActive = true
-        let title = NSTextField(labelWithString: "OShell"); title.font = .systemFont(ofSize: 30, weight: .semibold)
+        let icon = NSImageView()
+        icon.image = NSApp.applicationIconImage
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.identifier = .init("welcome.brandIcon")
+        icon.setAccessibilityLabel("OShell 应用图标")
+        icon.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 80).isActive = true
+        let title = NSTextField(labelWithString: "OShell"); title.font = .systemFont(ofSize: 28, weight: .semibold)
         let subtitle = NSTextField(labelWithString: "连接你的服务器，专注每一条命令。")
         subtitle.textColor = .secondaryLabelColor; subtitle.font = .systemFont(ofSize: 14)
         let buttons = NSStackView(views: [iconButton("新建 SSH 会话", "plus", #selector(newSession)), iconButton("打开本地终端", "terminal", #selector(newLocal))]); buttons.spacing = 12
         let shortcuts = NSTextField(labelWithString: "工具栏可新建终端、排列多个会话和搜索；快捷键可在设置中自定义。")
         shortcuts.font = .systemFont(ofSize: 11); shortcuts.textColor = .tertiaryLabelColor
         let center = NSStackView(views: [icon, title, subtitle, buttons, shortcuts]); center.orientation = .vertical; center.spacing = 18; center.alignment = .centerX
+        center.setCustomSpacing(6, after: icon); center.setCustomSpacing(10, after: title)
         center.translatesAutoresizingMaskIntoConstraints = false; welcome.addSubview(center)
         NSLayoutConstraint.activate([center.centerXAnchor.constraint(equalTo: welcome.centerXAnchor), center.centerYAnchor.constraint(equalTo: welcome.centerYAnchor, constant: -12)])
         showWelcome()
@@ -568,6 +587,32 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
             presentConnection(makePane(profile, oneTimePassword: request.password, terminalType: request.terminalType, connectionGroup: group))
             show(); NSApp.activate(ignoringOtherApps: true)
         } catch { Dialogs.message("无法打开外部启动会话，请检查连接参数。") }
+    }
+    /// Reorder the existing tab objects; sessions, pane splits and credentials stay attached.
+    @discardableResult func reorderTab(_ id: UUID, before: UUID?, inGroup groupID: UUID? = nil) -> Bool {
+        guard isSecurityUnlocked, let tab = tabs.first(where: { $0.id == id }) else { return false }
+        if let root = customTabLayout {
+            guard let groupID, let group = root.groups.first(where: { $0.id == groupID }), !group.isHidden,
+                  before == nil || group.tabs.contains(before!) else { return false }
+            if before == id { return true }
+            if root.group(containing:id) !== group { guard moveTab(id,toGroup:groupID) else { return false } }
+            var order = group.tabs.filter { $0 != id }
+            order.insert(id,at:before.flatMap { order.firstIndex(of:$0) } ?? order.count)
+            group.tabs = order
+            // Keep the merged/global strip consistent without reordering other groups.
+            let members = Set(order), objects = Dictionary(uniqueKeysWithValues:tabs.map { ($0.id,$0) })
+            let slots = tabs.indices.filter { members.contains(tabs[$0].id) }
+            for (slot,member) in zip(slots,order) { if let object = objects[member] { tabs[slot] = object } }
+            select(tab); refreshSelection()
+        } else {
+            guard groupID == nil, before == nil || tabs.contains(where: { $0.id == before }) else { return false }
+            if before == id { return true }
+            tabs.removeAll { $0.id == id }
+            tabs.insert(tab,at:before.flatMap { target in tabs.firstIndex { $0.id == target } } ?? tabs.count)
+            if arrangement != .tabs { rebuildWorkspace() }
+            select(tab)
+        }
+        return true
     }
     /// Each visible strip is an independent numbering scope. The underlying
     /// UUID remains the identity when closing/moving tabs changes ordinals.

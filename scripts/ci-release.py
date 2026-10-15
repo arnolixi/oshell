@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 from release_targets import TARGETS, RELEASE_FLAVORS
+import code_signing
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -150,13 +151,20 @@ def collect(meta, artifacts, source, output, updates_artifacts=None, repository=
         raise ValueError('Expected the audited source archive for this version')
     updates = collect_updates(meta, updates_artifacts, repository, records) if updates_artifacts else []
     changes = release_changes(meta['version'])
+    signatures = {(r['verification'].get('signing', 'ad-hoc'), r['verification'].get('codeSigningCertificateSHA256')) for r in records}
+    if len(signatures) != 1: raise ValueError('Installers use different signing identities')
+    signing, certificate = signatures.pop()
+    signing_label = '固定自签名证书' if signing == 'self-signed' else 'ad-hoc 签名'
+    if signing not in ('self-signed', 'ad-hoc'): raise ValueError('Unknown signing scheme')
+    if signing == 'self-signed' and certificate != code_signing.profile()['sha256']: raise ValueError('Release certificate does not match the pinned identity')
+    if os.environ.get('OSHELL_REQUIRE_FIXED_SIGNING') == '1' and signing != 'self-signed': raise ValueError('Official release requires fixed signing')
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise ValueError('Release output must be empty')
     for record in records:
         shutil.copy2(artifacts/('dmg-' + record['flavor'])/record['file'], output/record['file'])
     shutil.copy2(source, output/source.name)
-    release_manifest = dict(meta, signing='ad-hoc', notarized=False, installers=records,
+    release_manifest = dict(meta, signing=signing, codeSigningCertificateSHA256=certificate, notarized=False, installers=records,
                             source=dict(file=source.name, sha256=sha256(source)))
     if updates: release_manifest['updateMetadata'] = 'embedded-in-release-notes-v1'
     (output/'release-manifest.json').write_text(json.dumps(release_manifest, indent=2) + '\n')
@@ -179,7 +187,7 @@ OShell {meta['version']}（build {meta['build']}）
 现代版以 macOS 13 为最低目标，也适用于更新系统；Universal 同时包含 Intel 与 Apple Silicon。
 下载适合本机的一种 DMG，将 OShell.app 拖入 Applications。包内附带 SHA256SUMS.txt（包内文件校验）和 release-manifest.json（构建信息）；对应源码包单独提供。
 
-这些安装包使用 ad-hoc 签名，未进行 Developer ID 签名或 Apple 公证。流水线校验架构、部署目标、载荷和签名完整性，并运行构建机原生架构的核心测试；不代表已在 macOS 10.13/11 的真实系统上完成验证。
+这些安装包使用{signing_label}，未进行 Developer ID 签名或 Apple 公证。流水线校验架构、部署目标、载荷和签名完整性，并运行构建机原生架构的核心测试；不代表已在 macOS 10.13/11 的真实系统上完成验证。
 {'内置更新直接使用上述 DMG，签名更新信息包含在本页中，无需额外 XML 或更新 ZIP。旧客户端请手动安装本版本一次。' if updates else '本次仅发布手动安装包，不包含内置更新信息。'}
 
 对应提交：`{meta['commit']}`

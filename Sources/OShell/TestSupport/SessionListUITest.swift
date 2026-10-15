@@ -31,6 +31,14 @@ enum SessionListUITest {
                 var nameOrigin: CGFloat?
                 for row in 0..<min(table.numberOfRows, 9) {
                     for column in 0..<table.numberOfColumns {
+                        if table.tableColumns[column].identifier.rawValue == "edit" {
+                            if let cell = table.view(atColumn: column, row: row, makeIfNecessary: true), let button = cell.subviews.first as? NSButton {
+                                cell.layoutSubtreeIfNeeded()
+                                centered = centered && abs(button.frame.midY-cell.bounds.midY) <= 1
+                                bounded = bounded && cell.bounds.contains(button.frame)
+                            } else { bounded = false }
+                            continue
+                        }
                         guard let cell = table.view(atColumn: column, row: row, makeIfNecessary: true) as? NSTableCellView, let label = cell.textField else { centered = false; continue }
                         cell.layoutSubtreeIfNeeded()
                         centered = centered && abs(label.frame.midY - cell.bounds.midY) <= 1
@@ -64,7 +72,7 @@ enum SessionListUITest {
         manager.reveal(profiles[0])
         checks["revealSelectionPreserved"] = manager.selectedProfile?.id == profiles[0].id
         let selected = table.view(atColumn: 0, row: table.selectedRow, makeIfNecessary: true) as? NSTableCellView
-        checks["fullNameTooltip"] = selected?.toolTip == profiles[0].name
+        checks["fullNameTooltip"] = selected?.toolTip?.contains(profiles[0].name) == true
         checks["rowContextTargetsSession"] = manager.contextMenu(for: table.selectedRow).items.contains { $0.title == "属性…" }
         checks["blankContextClearsSelection"] = !manager.contextMenu(for: -1).items.contains { $0.title == "删除…" } && manager.selectedProfile == nil
         let report: [String: Any] = ["passed": checks.values.allSatisfy { $0 }, "checks": checks]

@@ -5,6 +5,7 @@
 import importlib.util
 import base64
 import json
+import os
 import plistlib
 from pathlib import Path
 import subprocess
@@ -154,6 +155,29 @@ class ReleaseTests(unittest.TestCase):
         for line in (self.output/'SHA256SUMS.txt').read_text().splitlines():
             expected, name = line.split('  ', 1); self.assertEqual(CI.sha256(self.output/name), expected)
         self.assertIn('ad-hoc', (self.output/'RELEASE_NOTES.md').read_text())
+
+    def test_fixed_signing_release_metadata(self):
+        import code_signing
+        pin = code_signing.profile()['sha256']
+        for flavor in RELEASE_FLAVORS:
+            self.mutate(flavor, lambda r: r['verification'].update(signing='self-signed', codeSigningCertificateSHA256=pin))
+        record = self.collect()
+        self.assertEqual(record['signing'], 'self-signed')
+        self.assertEqual(record['codeSigningCertificateSHA256'], pin)
+        self.assertIn('固定自签名证书', (self.output/'RELEASE_NOTES.md').read_text())
+
+    def test_mixed_signing_identities_rejected(self):
+        self.mutate('arm64', lambda r: r['verification'].update(signing='self-signed', codeSigningCertificateSHA256='a'*64))
+        with self.assertRaisesRegex(ValueError, 'different signing'): self.collect()
+
+    def test_wrong_pinned_certificate_rejected(self):
+        for flavor in RELEASE_FLAVORS:
+            self.mutate(flavor, lambda r: r['verification'].update(signing='self-signed', codeSigningCertificateSHA256='a'*64))
+        with self.assertRaisesRegex(ValueError, 'pinned identity'): self.collect()
+
+    def test_official_release_cannot_fall_back_to_adhoc(self):
+        with patch.dict(os.environ, {'OSHELL_REQUIRE_FIXED_SIGNING':'1'}):
+            with self.assertRaisesRegex(ValueError, 'requires fixed signing'): self.collect()
 
     def test_release_notes_include_only_matching_version_changes(self):
         self.collect()
@@ -350,6 +374,21 @@ class ReleaseTests(unittest.TestCase):
         options = dict(version='1.2.3',build='45',flavor='arm64',minimum='13.0',architectures=['arm64'])
         installer_metadata.write(root, **options, source_root=self.root)
         return root, options
+
+    def test_installer_metadata_records_fixed_certificate(self):
+        import code_signing
+        root, options = self.installer_fixture()
+        path = root/'OShell.app/Contents/Info.plist'; info = plistlib.loads(path.read_bytes())
+        info[code_signing.MARKER] = code_signing.profile()['sha256']; path.write_bytes(plistlib.dumps(info))
+        installer_metadata.write(root, **options, source_root=self.root)
+        record = installer_metadata.verify(root, **options)
+        self.assertEqual(record['signing'], 'self-signed')
+        self.assertEqual(record['codeSigningCertificateSHA256'], info[code_signing.MARKER])
+
+    def test_installer_metadata_rejects_false_signing_claim(self):
+        root, options = self.installer_fixture(); path = root/'release-manifest.json'
+        record = json.loads(path.read_text()); record['signing'] = 'self-signed'; path.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, 'signing metadata'): installer_metadata.verify(root, **options)
 
     def test_installer_metadata_covers_payload_without_changing_it(self):
         root, options = self.installer_fixture()

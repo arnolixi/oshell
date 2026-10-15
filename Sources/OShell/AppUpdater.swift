@@ -7,12 +7,15 @@ import OShellCore
 
 /// Sparkle owns verification/download/replacement. OShell owns source selection and session shutdown.
 final class AppUpdater: NSObject, SPUUpdaterDelegate {
+    static let stateDidChange = Notification.Name("OShell.updaterStateDidChange")
+    private var availabilityObservation: NSKeyValueObservation?
+    private func notifyStateChanged() { NotificationCenter.default.post(name: Self.stateDidChange, object: self) }
     private weak var workspace: WorkspaceController?
     private var standard: SPUStandardUpdaterController?
     private var source: UpdateSource?
     private var releaseBridge: ReleaseUpdateBridge?
-    private var pendingInstall: (() -> Void)?
-    private var preflighting = false
+    private var pendingInstall: (() -> Void)? { didSet { notifyStateChanged() } }
+    private var preflighting = false { didSet { notifyStateChanged() } }
     private(set) var started = false
     var hasPendingInstallation: Bool { pendingInstall != nil }
     var canCheck: Bool { pendingInstall != nil || (!preflighting && standard?.updater.sessionInProgress != true) }
@@ -35,7 +38,10 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
         source = next
         guard source != nil else { standard?.updater.automaticallyChecksForUpdates = false; return }
         guard let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String, Data(base64Encoded: publicKey)?.count == 32 else { throw ModelError.invalid("应用缺少更新校验公钥，请使用完整的 OShell 发布版本。") }
-        if standard == nil { standard = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: self, userDriverDelegate: nil) }
+        if standard == nil {
+            standard = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: self, userDriverDelegate: nil)
+            availabilityObservation = standard?.updater.observe(\.canCheckForUpdates, options: [.new]) { [weak self] _, _ in self?.notifyStateChanged() }
+        }
         guard let updater = standard?.updater else { return }
         if !started { _ = updater.clearFeedURLFromUserDefaults(); try updater.start(); started = true }
         if updater.automaticallyChecksForUpdates != workspace.configuration.preferences.automaticUpdateChecks { updater.automaticallyChecksForUpdates = workspace.configuration.preferences.automaticUpdateChecks }
@@ -89,6 +95,9 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
 }
 
 extension WorkspaceController {
-    @objc func checkForUpdates() { appUpdater.check() }
+    @objc func checkForUpdates() {
+        guard isSecurityUnlocked, NSApp.modalWindow == nil, appUpdater.canCheck else { return }
+        appUpdater.useWorkspace(self); appUpdater.check(); refreshUpdateButton()
+    }
     @objc func showUpdatePreferences() { editPreferences(appearanceSelected: false, updatesSelected: true) }
 }

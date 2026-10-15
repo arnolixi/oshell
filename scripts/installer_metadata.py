@@ -7,6 +7,7 @@ from pathlib import Path
 import plistlib
 import re
 import subprocess
+import code_signing
 
 AUDIT_FILES = {'release-manifest.json', 'SHA256SUMS.txt'}
 
@@ -35,7 +36,7 @@ def write(root, *, version, build, flavor, minimum, architectures, source_root):
     status = subprocess.run(['git', '-C', str(source_root), 'status', '--porcelain', '--untracked-files=normal'], capture_output=True, text=True)
     files, links = inventory(root)
     manifest = dict(format='OShell.installer-payload.v1', version=version, build=str(build), flavor=flavor,
-                    minimumOS=minimum, architectures=sorted(architectures), signing='ad-hoc', notarized=False,
+                    minimumOS=minimum, architectures=sorted(architectures), **code_signing.metadata(info), notarized=False,
                     commit=revision if re.fullmatch('[a-f0-9]{40,64}', revision) else None,
                     sourceDirty=bool(status.stdout) if status.returncode == 0 else None,
                     checksumScope='Files inside this DMG, including this manifest; excludes SHA256SUMS.txt itself and the outer DMG. Symlink targets are recorded separately.',
@@ -50,6 +51,8 @@ def verify(root, *, version, build, flavor, minimum, architectures):
     manifest = json.loads((root/'release-manifest.json').read_text())
     expected = dict(format='OShell.installer-payload.v1', version=version, build=str(build), flavor=flavor, minimumOS=minimum, architectures=sorted(architectures))
     if any(manifest.get(key) != value for key, value in expected.items()): raise ValueError('Installer manifest does not match target')
+    info = plistlib.loads((root/'OShell.app/Contents/Info.plist').read_bytes())
+    if any(manifest.get(key) != value for key,value in code_signing.metadata(info).items()): raise ValueError('Installer signing metadata mismatch')
     files, links = inventory(root)
     if manifest.get('files') != files or manifest.get('symlinks') != links: raise ValueError('Installer file inventory changed')
     allowed = set(files) | {'release-manifest.json'}; checked = set()

@@ -19,6 +19,8 @@ enum ToolbarActionsTest {
         func press(_ root: NSView, _ title: String) { descendants(root).compactMap { $0 as? NSButton }.first { $0.title == title }?.performClick(nil) }
         checks["disabledCurrentWithoutSession"] = !workspace.currentPropertiesButton.isEnabled
         checks["disabledSplitWithoutSession"] = !workspace.splitButton.isEnabled
+        checks["updateButtonWired"] = workspace.updateButton.action == #selector(WorkspaceController.checkForUpdates) && workspace.updateButton.target === workspace && workspace.updateButton.image != nil
+        checks["updateEnabledWithoutSession"] = workspace.updateButton.isEnabled
         checks["defaultsAvailableWithoutSession"] = workspace.defaultPropertiesButton.isEnabled
         checks["propertyButtonsAreDistinctTemplateIcons"] = workspace.currentPropertiesButton.title.isEmpty && workspace.defaultPropertiesButton.title.isEmpty && workspace.currentPropertiesButton.image?.isTemplate == true && workspace.defaultPropertiesButton.image?.isTemplate == true && workspace.currentPropertiesButton.image?.tiffRepresentation != workspace.defaultPropertiesButton.image?.tiffRepresentation
         modal { root in
@@ -43,15 +45,15 @@ enum ToolbarActionsTest {
             checks[title + "CorrectAxis"] = descendants(tab.layout.view).compactMap { $0 as? NSSplitView }.contains { $0.isVertical == vertical }
         }
         let root = workspace.window!.contentView!, toolbar = descendants(root).compactMap { $0 as? WorkspaceToolbar }.first!
-        for width in [760, 980, 1180] {
+        for width in [760, 980, 1080, 1180] {
             workspace.window?.setContentSize(NSSize(width: width, height: 620)); root.layoutSubtreeIfNeeded(); toolbar.layoutSubtreeIfNeeded(); root.layoutSubtreeIfNeeded()
-            for (index, button) in [workspace.currentPropertiesButton, workspace.defaultPropertiesButton, workspace.splitButton].enumerated() {
+            for (index, button) in [workspace.currentPropertiesButton, workspace.defaultPropertiesButton, workspace.splitButton, workspace.updateButton].enumerated() {
                 let frame = button.convert(button.bounds, to: toolbar)
                 checks["buttonVisible-\(width)-\(index)"] = !button.isHiddenOrHasHiddenAncestor && frame.width >= 24 && frame.height >= 18 && toolbar.bounds.contains(frame)
             }
             let frames = toolbar.arrangedSubviews.filter { !$0.isHiddenOrHasHiddenAncestor && $0 is NSControl }.map { $0.convert($0.bounds, to: toolbar) }
             checks["toolbarNoOverlap-\(width)"] = frames.enumerated().allSatisfy { index, frame in frames.dropFirst(index + 1).allSatisfy { !frame.intersects($0) } }
-            checks["compactIconsAtNarrowWidth-\(width)"] = toolbar.compactButtons.allSatisfy { $0.imagePosition == (width < 980 ? .imageOnly : .imageLeading) }
+            checks["compactIconsAtNarrowWidth-\(width)"] = toolbar.compactButtons.allSatisfy { $0.imagePosition == (CGFloat(width) < WorkspaceToolbar.compactThreshold ? .imageOnly : .imageLeading) }
         }
         // Bind a disposable SSH profile without starting any network connection.
         let source = SessionProfile(name: "当前连接", host: "192.0.2.15", port: 2222, username: "ops")

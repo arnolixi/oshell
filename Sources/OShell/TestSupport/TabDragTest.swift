@@ -4,7 +4,7 @@
 import AppKit
 import OShellCore
 
-private final class TabDragInfoFixture: NSObject, NSDraggingInfo {
+final class TabDragInfoFixture: NSObject, NSDraggingInfo {
     var draggingDestinationWindow: NSWindow?
     var draggingSourceOperationMask: NSDragOperation { .move }
     var draggingLocation: NSPoint = .zero

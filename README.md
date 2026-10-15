@@ -32,7 +32,7 @@ macOS 10.13 / 11 是兼容构建目标，仍需真实旧系统上的进一步验
 需要现代 macOS、Swift 6 工具链和 Xcode Command Line Tools。终端组件、更新框架和传输辅助程序的固定版本依赖位于 `Vendor/`。
 
 ```sh
-bash scripts/build.sh
+OSHELL_ALLOW_ADHOC=1 bash scripts/build.sh
 open dist/OShell.app
 ```
 

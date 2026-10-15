@@ -6,6 +6,8 @@ import Darwin
 import OShellCore
 
 final class FTPBackend: RemoteFileBackend {
+    private let rateLimiter = FileTransferRateLimiter()
+    func setTransferRateLimit(_ bytesPerSecond: Int) { rateLimiter.setLimit(bytesPerSecond) }
     let description: String
     private let profile: FTPProfile
     private let password: String
@@ -20,7 +22,7 @@ final class FTPBackend: RemoteFileBackend {
         for part in path.split(separator: "/") { if part == ".." { if !parts.isEmpty { parts.removeLast() } } else if part != "." { parts.append(String(part)) } }
         return "/" + parts.joined(separator: "/")
     }
-    private func curl(_ path: String, directory: Bool, arguments: [String] = [], sink: FileHandle? = nil, progress: ((UInt64) -> Void)? = nil) throws -> Data {
+    private func curl(_ path: String, directory: Bool, arguments: [String] = [], sink: FileHandle? = nil, progress: ((UInt64) -> Void)? = nil, upload: FTPStreamingUpload? = nil) throws -> Data {
         try RemotePath.validate(path)
         guard password.utf8.count <= 4096, !password.contains("\0"), !password.contains("\r"), !password.contains("\n") else { throw ModelError.invalid("FTP 密码过长或含有协议不支持的控制字符。"); }
         var components = URLComponents(); components.scheme = "ftp"; components.host = profile.host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")); components.port = profile.port
@@ -33,7 +35,13 @@ final class FTPBackend: RemoteFileBackend {
         lock.lock(); if cancelled { lock.unlock(); throw ModelError.invalid("操作已取消，请重新连接。"); }; active = task; lock.unlock()
         defer { lock.lock(); active = nil; lock.unlock() }
         try task.start(); try task.write(Data(config.utf8)); task.closeInput()
-        return try task.outputToEnd(sink: sink, progress: progress)
+        upload?.start(task)
+        do {
+            let data = try task.outputToEnd(sink:sink, progress:progress, limiter:sink == nil ? nil : rateLimiter)
+            try upload?.finish(); return data
+        } catch {
+            task.cancel(); try? upload?.finish(); throw error
+        }
     }
     func list(_ path: String) throws -> [RemoteFileEntry] {
         do {
@@ -103,7 +111,13 @@ final class FTPBackend: RemoteFileBackend {
             try mkdir(remote)
             for child in try FileManager.default.contentsOfDirectory(at: local, includingPropertiesForKeys: nil) { try upload(child, to: RemotePath.join(remote, child.lastPathComponent), depth: depth + 1, progress: progress) }
         } else {
-            _ = try curl(remote, directory: false, arguments: ["--upload-file", local.path]); progress(UInt64(info.fileSize ?? 0), UInt64(info.fileSize ?? 0))
+            let total = UInt64(info.fileSize ?? 0)
+            let stream = try FTPStreamingUpload(source:local, limiter:rateLimiter) { sent in
+                // EOF on the pipe is not yet the FTP server's success response.
+                progress(min(sent,total > 0 ? total-1 : 0),total)
+            }
+            _ = try curl(remote,directory:false,arguments:["--upload-file",stream.path.path],upload:stream)
+            progress(total,total)
         }
     }
     func download(_ remote: String, to local: URL, progress: @escaping (UInt64, UInt64) -> Void) throws { try download(remote, to: local, depth: 0, progress: progress) }
@@ -123,7 +137,7 @@ final class FTPBackend: RemoteFileBackend {
         defer { try? handle.oshellClose(); if !complete { try? FileManager.default.removeItem(at: local) } }
         _ = try curl(remote, directory: false, sink: handle) { bytes in progress(bytes, info?.size ?? 0) }; try handle.oshellClose(); complete = true
     }
-    func cancel() { lock.lock(); cancelled = true; let task = active; lock.unlock(); task?.cancel() }
+    func cancel() { rateLimiter.cancel(); lock.lock(); cancelled = true; let task = active; lock.unlock(); task?.cancel() }
 }
 
 final class SCPTransfer {
@@ -132,10 +146,12 @@ final class SCPTransfer {
     private let oneTimePassword: String?
     private let lease: SSHConnectionLease?
     private let knownHosts: URL
+    private let rateLimit: Int
     private let lock = NSLock()
     private var process: FileProcess?
     private var cancelled = false
-    init(profile: SessionProfile, knownHosts: URL, oneTimePassword: String? = nil, connectionGroup: SSHConnectionGroup? = nil) throws {
+    init(profile: SessionProfile, knownHosts: URL, oneTimePassword: String? = nil, connectionGroup: SSHConnectionGroup? = nil, rateLimit: Int = 0) throws {
+        self.rateLimit = rateLimit
         lease = try connectionGroup.map { try SSHConnectionLease(group: $0, profile: profile) }
         self.oneTimePassword = connectionGroup == nil ? oneTimePassword : nil; self.profile = profile; self.knownHosts = knownHosts
     }
@@ -157,6 +173,7 @@ final class SCPTransfer {
             else if ["-o", "-i", "-J"].contains(option) { args += [option, sourceArgs.removeFirst()] }
             else { args.append(option) }
         }
+        args += FileTransferRateLimiter.scpArguments(rateLimit)
         // SCP's legacy protocol executes a remote scp command; quote the remote
         // path for that shell rather than interpolating arbitrary filenames.
         let endpoint = ConnectionValidation.bracket(profile.host) + ":" + ConnectionValidation.quote(remote)

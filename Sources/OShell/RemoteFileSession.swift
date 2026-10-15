@@ -23,6 +23,9 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
     private let status = NSTextField(labelWithString: "选择连接以浏览远程文件。"), progress = NSProgressIndicator()
     private let cancelButton = NSButton(title: "取消传输", target: nil, action: nil)
     private let transferMode = NSPopUpButton()
+    private let rateControl = NSPopUpButton()
+    private(set) var transferRateLimit = 0
+    private let ratePresets = [0, 128*1024, 512*1024, 1024*1024, 5*1024*1024, 10*1024*1024]
     private var backend: RemoteFileBackend?
     private var scp: SCPTransfer?
     private var sshProfile: SessionProfile?
@@ -80,7 +83,13 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         status.font = .systemFont(ofSize: 11); status.lineBreakMode = .byTruncatingMiddle; status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         progress.style = .bar; progress.isIndeterminate = true; progress.isDisplayedWhenStopped = false; progress.widthAnchor.constraint(equalToConstant: 160).isActive = true
         cancelButton.bezelStyle = .rounded; cancelButton.target = self; cancelButton.action = #selector(cancelFileOperation); cancelButton.isEnabled = false
-        let bottom = NSStackView(views: [status, NSView(), progress, cancelButton]); bottom.spacing = 8
+        rateControl.identifier = .init("files.rateLimit")
+        rateControl.setAccessibilityLabel("传输限速")
+        rateControl.toolTip = "当前文件标签的上传 / 下载速率上限。SFTP、FTP 可在传输中实时调整；SCP 兼容模式在下次传输生效。0 表示不限速，速率按文件内容计算，缓冲可能造成短时波动。"
+        rateControl.target = self; rateControl.action = #selector(changeTransferRate)
+        rateControl.widthAnchor.constraint(equalToConstant: 174).isActive = true
+        refreshRateControl()
+        let bottom = NSStackView(views: [status, NSView(), rateControl, progress, cancelButton]); bottom.spacing = 8
         [top, tools, scroll, hint, bottom].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; content.addSubview($0) }
         NSLayoutConstraint.activate([top.topAnchor.constraint(equalTo: content.topAnchor, constant: 12), top.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12), top.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12), tools.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10), tools.leadingAnchor.constraint(equalTo: top.leadingAnchor), tools.trailingAnchor.constraint(equalTo: top.trailingAnchor), scroll.topAnchor.constraint(equalTo: tools.bottomAnchor, constant: 10), scroll.leadingAnchor.constraint(equalTo: top.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: top.trailingAnchor), scroll.bottomAnchor.constraint(equalTo: hint.topAnchor, constant: -8), hint.leadingAnchor.constraint(equalTo: top.leadingAnchor), hint.trailingAnchor.constraint(lessThanOrEqualTo: top.trailingAnchor), hint.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -8), bottom.leadingAnchor.constraint(equalTo: top.leadingAnchor), bottom.trailingAnchor.constraint(equalTo: top.trailingAnchor), bottom.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12)])
     }
@@ -135,9 +144,10 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
                 } else {
                     let alert = PopupAlert(); alert.messageText = "FTP 身份验证"; alert.informativeText = "\(profile.username)@\(profile.host):\(profile.port)"
                     alert.addButton(withTitle: "连接"); alert.addButton(withTitle: "取消")
-                    let password = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 350, height: 26)); alert.accessoryView = password; alert.window.initialFirstResponder = password
+                    let password = PasswordEntryView(identifier: "ftp.auth.password"); password.frame = NSRect(x: 0, y: 0, width: 350, height: 26)
+                    alert.accessoryView = password; alert.window.initialFirstResponder = password.secureField
                     let accepted = alert.runModal() == .alertFirstButtonReturn
-                    finish(accepted ? password.stringValue : nil); password.stringValue = ""
+                    finish(accepted ? password.stringValue : nil); password.clear()
                 }
             }
         } catch { reportError(error) }
@@ -150,6 +160,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
     var transientPassword: String? { launchPassword }
     private func connectBackend(_ destination: String) {
         connected = false; guard backend != nil else { return }
+        backend?.setTransferRateLimit(transferRateLimit)
         onStateChanged?()
         perform("正在连接…") { backend in
             try backend.connect(); let path = try backend.canonicalPath(destination); return (path, try backend.list(path))
@@ -174,14 +185,60 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
             }
         }
     }
+    private func rateTitle(_ rate: Int) -> String {
+        if rate == 0 { return "不限速" }
+        let unit = rate >= 1024*1024 ? 1048576 : 1024
+        let value = rate % unit == 0 ? String(rate/unit) : String(format:"%.2f",Double(rate)/Double(unit))
+        return value + (unit == 1048576 ? " MiB/s" : " KiB/s")
+    }
+    private func refreshRateControl() {
+        rateControl.removeAllItems()
+        for rate in ratePresets { rateControl.addItem(withTitle:"限速："+rateTitle(rate)); rateControl.lastItem?.tag = rate }
+        rateControl.addItem(withTitle:ratePresets.contains(transferRateLimit) ? "自定义…" : "自定义："+rateTitle(transferRateLimit)); rateControl.lastItem?.tag = -1
+        rateControl.selectItem(withTag:ratePresets.contains(transferRateLimit) ? transferRateLimit : -1)
+    }
+    func setTransferRateLimit(_ bytesPerSecond: Int) {
+        transferRateLimit = min(FileTransferRateLimiter.maximum, max(0,bytesPerSecond))
+        backend?.setTransferRateLimit(transferRateLimit); refreshRateControl()
+        if busy && scp != nil { status.stringValue = "限速已修改，当前 SCP 仍使用启动时的上限；下次传输生效。" }
+    }
+    static func parseTransferRate(_ text: String, unit: Int) -> Int? {
+        guard unit == 1024 || unit == 1048576, let value = Double(text.trimmingCharacters(in:.whitespacesAndNewlines)), value.isFinite, value >= 0 else { return nil }
+        let bytes = value*Double(unit)
+        guard bytes == 0 || (bytes >= 1024 && bytes <= Double(FileTransferRateLimiter.maximum)) else { return nil }
+        return Int(bytes.rounded())
+    }
+    @objc private func changeTransferRate() {
+        guard let selected = rateControl.selectedItem else { return }
+        if selected.tag >= 0 { setTransferRateLimit(selected.tag); return }
+        let alert = PopupAlert(); alert.messageText = "传输速率上限"
+        alert.informativeText = "仅作用于当前文件标签。0 表示不限速；范围为 1 KiB/s–1024 MiB/s。SFTP / FTP 实时生效；SCP 下次传输生效。"
+        alert.addButton(withTitle:"应用"); alert.addButton(withTitle:"取消")
+        let value = NSTextField(string:String(format:"%g",Double(transferRateLimit)/1024)), unit = NSPopUpButton()
+        unit.addItems(withTitles:["KiB/s","MiB/s"])
+        value.identifier = .init("files.rateLimit.custom"); unit.identifier = .init("files.rateLimit.unit")
+        value.widthAnchor.constraint(equalToConstant:180).isActive = true
+        let row = NSStackView(views:[value,unit]); row.spacing = 8; row.frame = NSRect(x:0,y:0,width:300,height:28)
+        alert.accessoryView = row; alert.window.initialFirstResponder = value
+        while alert.runModal() == .alertFirstButtonReturn {
+            if let rate = Self.parseTransferRate(value.stringValue,unit:unit.indexOfSelectedItem == 0 ? 1024 : 1048576) { setTransferRateLimit(rate); return }
+            alert.informativeText = "请输入有效速率：0 为不限速，非零范围为 1 KiB/s–1024 MiB/s。"
+        }
+        refreshRateControl()
+    }
     private func progressCallback(_ name: String, token: UUID) -> (UInt64, UInt64) -> Void {
-        var last: UInt64 = 0
+        var last = DispatchTime.now().uptimeNanoseconds, previousBytes: UInt64 = 0
         return { [weak self] bytes, total in
             let now = DispatchTime.now().uptimeNanoseconds
-            guard now - last > 100_000_000 || bytes == total else { return }; last = now
+            guard now - last > 100_000_000 || bytes == total else { return }
+            let delta = bytes >= previousBytes ? bytes-previousBytes : bytes
+            let speed = Double(delta) / max(0.001,Double(now-last)/1_000_000_000)
+            last = now; previousBytes = bytes
             DispatchQueue.main.async {
                 guard let self, !self.closed, self.operationID == token else { return }
-                self.status.stringValue = "\(name) · \(ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file))"
+                let done = ByteCountFormatter.string(fromByteCount:Int64(clamping:bytes),countStyle:.binary)
+                let amount = total > 0 ? " / " + ByteCountFormatter.string(fromByteCount:Int64(clamping:total),countStyle:.binary) : ""
+                self.status.stringValue = "\(name) · \(done)\(amount) · " + ByteCountFormatter.string(fromByteCount:Int64(min(speed,Double(Int64.max-1024))),countStyle:.binary) + "/s"
                 if total > 0 { self.progress.isIndeterminate = false; self.progress.doubleValue = Double(bytes) / Double(total) * 100 }
             }
         }
@@ -244,7 +301,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         let input = NSTextField(string: destination); input.frame = NSRect(x: 0, y: 0, width: 500, height: 26); alert.accessoryView = input; alert.addButton(withTitle: "上传"); alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let target = input.stringValue, useSCP = sshProfile != nil && transferMode.indexOfSelectedItem == 1
-        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup) } } catch { Dialogs.message(error.localizedDescription); return }
+        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup, rateLimit: transferRateLimit) } } catch { Dialogs.message(error.localizedDescription); return }
         let scp = self.scp, token = UUID()
         perform("正在上传…", id: token) { [weak self] backend in
             var names = Set(try backend.list(target).map(\.name))
@@ -263,7 +320,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         let panel = NSOpenPanel(); panel.title = "从 \(profile?.name ?? "") 下载保存到…"; panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
         guard panel.runPopupModal() == .OK, let destination = panel.url else { return }
         let useSCP = sshProfile != nil && transferMode.indexOfSelectedItem == 1
-        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup) } } catch { Dialogs.message(error.localizedDescription); return }
+        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup, rateLimit: transferRateLimit) } } catch { Dialogs.message(error.localizedDescription); return }
         let scp = self.scp, token = UUID()
         perform("正在下载…", id: token) { [weak self] backend in
             var names = Set(try FileManager.default.contentsOfDirectory(atPath: destination.path))
@@ -320,7 +377,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         guard panel.runPopupModal() == .OK, let url = panel.url else { return }
         do {
             try RemotePath.validate(remote.stringValue)
-            let task = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup); scp = task
+            let task = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup, rateLimit: transferRateLimit); scp = task
             let remotePath = remote.stringValue, token = UUID(); operationID = token; busy = true; cancelButton.isEnabled = true; progress.isIndeterminate = true; progress.startAnimation(nil); status.stringValue = "SCP 传输中…"; onStateChanged?()
             worker.async { [weak self] in
                 let result = Result {

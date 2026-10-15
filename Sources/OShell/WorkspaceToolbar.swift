@@ -6,9 +6,10 @@ import OShellCore
 
 /// Keep every toolbar action reachable in the minimum-width window.
 final class WorkspaceToolbar: NSStackView {
+    static let compactThreshold: CGFloat = 1180
     var compactButtons = [NSButton]()
     override func layout() {
-        let position: NSControl.ImagePosition = bounds.width < 1080 ? .imageOnly : .imageLeading
+        let position: NSControl.ImagePosition = bounds.width < Self.compactThreshold ? .imageOnly : .imageLeading
         for button in compactButtons where button.imagePosition != position { button.imagePosition = position }
         super.layout()
     }
@@ -77,7 +78,16 @@ extension WorkspaceController {
         guard isSecurityUnlocked, let pane = selectedTab?.activePane else { return false }
         return !pane.isBlank && !pane.isShutdown && pane.profile.kind == .ssh
     }
+    func refreshUpdateButton() {
+        let updater = appUpdater
+        updateButton.title = updater.hasPendingInstallation ? "安装更新" : "更新"
+        updateButton.setAccessibilityLabel(updater.hasPendingInstallation ? "安装已下载的更新" : "检查更新")
+        updateButton.isEnabled = isSecurityUnlocked && updater.canCheck
+        updateButton.toolTip = updater.hasPendingInstallation ? "更新已下载，点击确认安装并重启 OShell" : (updater.canCheck ? "检查更新：发现新版本后弹出升级确认窗口" : "正在检查或处理更新，请稍候")
+        topToolbar?.needsLayout = true
+    }
     func refreshToolbarActions() {
+        refreshUpdateButton()
         currentPropertiesButton.isEnabled = canEditCurrentSessionProfile
         currentPropertiesButton.toolTip = canEditCurrentSessionProfile ? "当前会话属性：" + (selectedTab?.activePane.profile.name ?? "") + "（保存后新建连接生效）" : "当前会话属性：请先选择 SSH 会话"
         defaultPropertiesButton.isEnabled = isSecurityUnlocked

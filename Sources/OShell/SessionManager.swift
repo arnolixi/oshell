@@ -34,6 +34,29 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     }
+    private final class EditButton: NSButton {
+        var rowKey: String?, pressedKey: String?
+        override func mouseDown(with event: NSEvent) {
+            pressedKey = rowKey; defer { pressedKey = nil }; super.mouseDown(with:event)
+        }
+    }
+    private final class EditCell: NSTableCellView {
+        let button = EditButton()
+        override init(frame: NSRect) {
+            super.init(frame:frame); identifier = .init("edit")
+            button.isBordered = false; button.imagePosition = .imageOnly
+            button.image = NSImage(size:NSSize(width:18,height:18),flipped:false) { _ in
+                NSColor.black.setStroke()
+                let path = NSBezierPath(); path.lineWidth = 1.3; path.lineJoinStyle = .round
+                path.move(to:NSPoint(x:3,y:3)); path.line(to:NSPoint(x:5,y:8)); path.line(to:NSPoint(x:12,y:15))
+                path.line(to:NSPoint(x:15,y:12)); path.line(to:NSPoint(x:8,y:5)); path.close()
+                path.move(to:NSPoint(x:10,y:13)); path.line(to:NSPoint(x:13,y:10)); path.stroke(); return true
+            }
+            button.image?.isTemplate = true; button.translatesAutoresizingMaskIntoConstraints = false; addSubview(button)
+            NSLayoutConstraint.activate([button.centerXAnchor.constraint(equalTo:centerXAnchor),button.centerYAnchor.constraint(equalTo:centerYAnchor),button.widthAnchor.constraint(equalToConstant:26),button.heightAnchor.constraint(equalToConstant:26)])
+        }
+        required init?(coder:NSCoder) { fatalError("init(coder:) has not been implemented") }
+    }
     private final class EmptyLabel: NSTextField {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
@@ -41,7 +64,9 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         var makeContextMenu: ((Int) -> NSMenu?)?
         var navigateParent: ((Int) -> Bool)?
         var activateSelection: (() -> Void)?
+        var renameSelection: (() -> Void)?
         override func keyDown(with event: NSEvent) {
+            if event.keyCode == 120, event.modifierFlags.intersection([.command,.option,.control,.shift]).isEmpty { renameSelection?(); return }
             if [36, 76].contains(event.keyCode), event.modifierFlags.intersection([.command, .option, .control]).isEmpty { activateSelection?(); return }
             super.keyDown(with: event)
         }
@@ -72,6 +97,8 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
     private weak var workspace: WorkspaceController?
     private let table = ContextTable(), search = NSSearchField(), path = NSTextField(labelWithString: "所有会话")
     private var rows = [Row]()
+    private var renameState: (row: Row, text: String, styled: NSAttributedString, status: String, color: NSColor?, tooltip: String?)?
+    private weak var renameField: NSTextField?
     private let searchScope = NSPopUpButton()
     private let resultStatus = NSTextField(labelWithString: "")
     private let emptyLabel = EmptyLabel(labelWithString: "没有匹配的会话或目录\n可调整关键词、协议或搜索范围")
@@ -125,7 +152,8 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
     }
     func showPreservingMode() { reload(); present() }
     private func clearFileSelection() { fileSelection = nil; filesOnly = false; table.allowsMultipleSelection = true; window?.title = "会话管理" }
-    func windowWillClose(_ notification: Notification) { clearFileSelection() }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { cancelInlineRename(); return true }
+    func windowWillClose(_ notification: Notification) { cancelInlineRename(); clearFileSelection() }
     var visibleProfiles: [SessionProfile] { rows.compactMap(connectionProfile) }
     @objc private func changeKindFilter() { reload() }
     private func button(_ title: String, _ action: Selector) -> NSButton { let button = NSButton(title: title, target: self, action: action); button.bezelStyle = .rounded; return button }
@@ -154,6 +182,9 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
             column.headerCell.font = .systemFont(ofSize: 12, weight: .medium)
             table.addTableColumn(column)
         }
+        let editColumn = NSTableColumn(identifier:.init("edit")); editColumn.title = ""
+        editColumn.width = 32; editColumn.minWidth = 32; editColumn.maxWidth = 32; editColumn.resizingMask = []
+        table.addTableColumn(editColumn)
         // Use explicit table metrics: automatic style adds OS-dependent insets,
         // and a bare NSTextField is stretched to row height instead of centered.
         if #available(macOS 11, *) { table.style = .plain }; table.rowSizeStyle = .custom; table.rowHeight = 32
@@ -166,6 +197,7 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         table.usesAlternatingRowBackgroundColors = true; table.delegate = self; table.dataSource = self
         table.target = self; table.doubleAction = #selector(openSelection)
         table.activateSelection = { [weak self] in self?.activateSelection() }
+        table.renameSelection = { [weak self] in self?.beginInlineRename() }
         table.makeContextMenu = { [weak self] row in self?.contextMenu(for: row) }
         table.navigateParent = { [weak self] row in
             guard let self, self.rows.indices.contains(row), case .parent = self.rows[row] else { return false }
@@ -175,7 +207,7 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         resultStatus.font = .systemFont(ofSize: 11); resultStatus.textColor = .secondaryLabelColor
         resultStatus.lineBreakMode = .byTruncatingTail; resultStatus.setAccessibilityLabel("会话搜索结果")
         resultStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        resultStatus.toolTip = "⌘ 单击多选，⇧ 单击连续选择，点击连接批量打开；单击 ../ 返回上级；拖到目录或 ../ 迁移；右键管理；Esc 关闭。"
+        resultStatus.toolTip = "⌘ 单击多选，⇧ 单击连续选择，点击连接批量打开；单击 ../ 返回上级；拖到目录或 ../ 迁移；选中后按 F2 或右键重命名；会话行末尾铅笔打开属性；Esc 关闭。"
         connectButton.title = "连接"; connectButton.target = self; connectButton.action = #selector(activateSelection); connectButton.bezelStyle = .rounded
         let bottom = NSStackView(views: [resultStatus, NSView(), connectButton, button("关闭", #selector(hide))]); bottom.spacing = 10
         emptyLabel.alignment = .center; emptyLabel.maximumNumberOfLines = 2; emptyLabel.textColor = .secondaryLabelColor; emptyLabel.font = .systemFont(ofSize: 13)
@@ -213,11 +245,12 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
                 add("上一级", #selector(up))
             case .directory(let path):
                 add("打开目录", #selector(openDirectory))
-                add("重命名…", #selector(edit), enabled: path != SessionLinks.rootDirectory)
+                add("重命名", #selector(beginInlineRename), enabled: path != SessionLinks.rootDirectory && workspace?.isSecurityUnlocked == true)
             case .session(let profile):
                 add("连接", #selector(connect), enabled: !filesOnly || profile.kind != .local)
                 if profile.kind.usesSSH { add("打开 SFTP 文件", #selector(openFiles)) }
                 if profile.kind == .sftp { add("打开 SSH 终端", #selector(openTerminal)) }
+                add("重命名", #selector(beginInlineRename), enabled: workspace?.isSecurityUnlocked == true)
                 add("属性…", #selector(edit), enabled: profile.kind != .local)
                 add("复制会话", #selector(duplicateSession), enabled: profile.kind != .local)
                 add("添加到快捷链接…", #selector(addSavedLink))
@@ -226,6 +259,7 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
                 add("连接", #selector(connect), enabled: !filesOnly || profile.kind != .local)
                 if profile.kind.usesSSH { add("打开 SFTP 文件", #selector(openFiles)) }
                 if profile.kind == .sftp { add("打开 SSH 终端", #selector(openTerminal)) }
+                add("重命名", #selector(beginInlineRename), enabled: workspace?.isSecurityUnlocked == true)
                 add("链接属性…", #selector(edit))
                 add("源会话属性…", #selector(editLinkSource), enabled: profile.kind != .local)
             }
@@ -280,6 +314,7 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         SessionTransfer.importSessions(workspace: workspace, directory: currentDirectory); reload()
     }
     func reload(select id: UUID? = nil) {
+        cancelInlineRename()
         guard let configuration = workspace?.configuration else { return }
         let oldKeys = id.map { Set([$0.uuidString]) } ?? Set(table.selectedRowIndexes.compactMap { rows.indices.contains($0) ? key(rows[$0]) : nil })
         if sourceProfiles != configuration.profiles || sourceDirectories != configuration.directories || sourceLinks != configuration.sessionLinks.entries || sourceLinkFolders != configuration.sessionLinks.allFolders || metadata.count != configuration.profiles.count || allDirectories.isEmpty {
@@ -353,6 +388,12 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
     }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         guard !textView.hasMarkedText() else { return false }
+        if control === renameField {
+            if selector == #selector(NSResponder.insertNewline(_:)) { _ = commitInlineRename(); return true }
+            if selector == #selector(NSResponder.cancelOperation(_:)) { cancelInlineRename(); return true }
+            return false
+        }
+        guard control === search else { return false }
         if selector == #selector(NSResponder.insertNewline(_:)) { reload(); activateSelection(); return true }
         if selector == #selector(NSResponder.moveDown(_:)) {
             if table.selectedRow < 0, let index = rows.firstIndex(where: { if case .parent = $0 { return false }; return true }) { table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
@@ -370,6 +411,19 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard rows.indices.contains(row), let identifier = tableColumn?.identifier else { return nil }
+        if identifier.rawValue == "edit" {
+            let cell = tableView.makeView(withIdentifier:identifier,owner:self) as? EditCell ?? EditCell(frame:.zero)
+            cell.button.rowKey = nil; cell.button.isHidden = true; cell.button.isEnabled = false
+            if let profile = connectionProfile(rows[row]) {
+                cell.button.rowKey = key(rows[row]); cell.button.isHidden = false; cell.button.isEnabled = workspace?.isSecurityUnlocked == true
+                cell.button.target = self; cell.button.action = #selector(editRowButton(_:))
+                let title: String
+                if case .link = rows[row] { title = "编辑快捷引用" } else { title = profile.kind == .local ? "修改本地会话名称" : "编辑会话属性" }
+                cell.button.toolTip = title + "：" + (displayProfile(rows[row])?.name ?? profile.name)
+                cell.button.setAccessibilityLabel(cell.button.toolTip)
+            }
+            return cell
+        }
         let text: String
         var symbol: String? = nil
         switch rows[row] {
@@ -461,6 +515,7 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
     }
 
     func controlTextDidChange(_ obj: Notification) {
+        guard obj.object as? NSSearchField === search else { return }
         if let editor = search.currentEditor() as? NSTextView, editor.hasMarkedText() { return }
         reload()
     }
@@ -501,7 +556,7 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         guard var profile = selectedProfile, profile.kind.usesSSH else { return }
         profile.kind = .ssh; clearFileSelection(); window?.orderOut(nil); workspace?.open(profile); workspace?.show()
     }
-    @objc private func hide() { clearFileSelection(); window?.orderOut(nil) }
+    @objc private func hide() { cancelInlineRename(); clearFileSelection(); window?.orderOut(nil) }
     @objc private func newSession() { workspace?.createSession(kind: .ssh) }
     @objc private func newSFTP() { workspace?.createSession(kind: .sftp) }
     @objc private func newFTP() { workspace?.createSession(kind: .ftp) }
@@ -540,22 +595,99 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         case .parent: return
         case .session: workspace?.editSession()
         case .link(let link, _): workspace?.editSavedSessionLink(link.id)
-        case .directory(let old):
-            guard old != SessionLinks.rootDirectory else { return }
-            guard let next = askChildName("重命名目录", name: String(old.split(separator: "/").last!), parent: SessionDirectory.parent(old)) else { return }; renameDirectory(old, to: next)
+        case .directory: beginInlineRename()
         }
     }
-    private func renameDirectory(_ old: String, to next: String) {
-        guard let workspace, !next.isEmpty, old != next else { return }
-        var config = workspace.configuration
-        guard !SessionDirectory.contains(next, in: old), !SessionDirectory.all(config).contains(next) else { Dialogs.message("目标目录已存在，或位于当前目录内部。"); return }
-        func remap(_ path: String) -> String { SessionDirectory.contains(path, in: old) ? next + String(path.dropFirst(old.count)) : path }
-        if let from = SessionLinks.folder(for: old), let destination = SessionLinks.folder(for: next) {
-            do { try config.sessionLinks.renameFolder(from, to: destination) } catch { Dialogs.message(error.localizedDescription); return }
+    @objc private func editRowButton(_ sender: EditButton) {
+        guard let target = sender.pressedKey ?? sender.rowKey else { return }
+        cancelInlineRename()
+        guard let index = rows.firstIndex(where:{ key($0) == target }) else { return }
+        table.selectRowIndexes(IndexSet(integer:index),byExtendingSelection:false)
+        if case .session(let profile) = rows[index], profile.kind == .local { beginInlineRename() }
+        else { edit() }
+    }
+    func tableView(_ tableView: NSTableView, shouldReorderColumn columnIndex: Int, toColumn newColumnIndex: Int) -> Bool {
+        let end = tableView.numberOfColumns-1
+        return columnIndex != end && newColumnIndex != end
+    }
+    @objc func beginInlineRename() {
+        guard workspace?.isSecurityUnlocked == true, table.selectedRowIndexes.count == 1, rows.indices.contains(table.selectedRow) else { return }
+        let row = rows[table.selectedRow]
+        switch row {
+        case .parent: return
+        case .directory(let path) where path == SessionLinks.rootDirectory: return
+        default: break
         }
-        config.directories = config.directories.map(remap)
-        for index in config.profiles.indices { config.profiles[index].group = remap(config.profiles[index].group) }
-        if workspace.saveConfiguration(config) { reload() }
+        cancelInlineRename()
+        table.scrollRowToVisible(table.selectedRow)
+        table.layoutSubtreeIfNeeded()
+        guard let column = table.tableColumns.firstIndex(where:{ $0.identifier.rawValue == "name" }),
+              let cell = table.view(atColumn:column,row:table.selectedRow,makeIfNecessary:true) as? ListCell else { return }
+        let field = cell.label
+        renameState = (row,field.stringValue,NSAttributedString(attributedString:field.attributedStringValue),resultStatus.stringValue,resultStatus.textColor,resultStatus.toolTip)
+        renameField = field; field.identifier = .init("session.inlineName")
+        field.isEditable = true; field.isSelectable = true; field.isBezeled = true; field.drawsBackground = true; field.delegate = self
+        resultStatus.stringValue = "重命名：回车保存；Esc 或离开输入框取消"; resultStatus.textColor = .secondaryLabelColor
+        // selectText starts the field editor itself. Focusing first and then
+        // selecting starts a second edit cycle, whose end notification cancels it.
+        field.selectText(nil)
+    }
+    func cancelInlineRename() {
+        guard let state = renameState else { return }
+        let field = renameField; renameState = nil; renameField = nil
+        let wasEditing = field?.currentEditor() != nil
+        field?.delegate = nil; _ = field?.abortEditing()
+        field?.isEditable = false; field?.isSelectable = false; field?.isBezeled = false; field?.drawsBackground = false; field?.identifier = nil
+        field?.attributedStringValue = state.styled; field?.nextKeyView = nil
+        resultStatus.stringValue = state.status; resultStatus.textColor = state.color; resultStatus.toolTip = state.tooltip
+        if wasEditing { window?.makeFirstResponder(table) }
+    }
+    func inlineRenameEscape() -> Bool? {
+        guard renameState != nil else { return nil }
+        if (renameField?.currentEditor() as? NSTextView)?.hasMarkedText() == true { return false }
+        cancelInlineRename(); return true
+    }
+    func controlTextDidEndEditing(_ notification: Notification) {
+        if notification.object as? NSTextField === renameField { cancelInlineRename() }
+    }
+    @discardableResult func commitInlineRename() -> Bool {
+        guard let workspace, workspace.isSecurityUnlocked, let state = renameState, let field = renameField else { return false }
+        let input = (field.currentEditor() as? NSTextView)?.string ?? field.stringValue
+        do {
+            let name = input.trimmingCharacters(in:.whitespacesAndNewlines)
+            guard !name.isEmpty, name.utf8.count <= 1024, !input.unicodeScalars.contains(where:CharacterSet.controlCharacters.contains) else { throw ModelError.invalid("名称不能为空，不能包含控制字符，且不得超过 1024 字节。") }
+            if name == state.text { cancelInlineRename(); return true }
+            var config = workspace.configuration, nextKey = key(state.row), nextDirectory = currentDirectory
+            switch state.row {
+            case .parent: return false
+            case .session(let original):
+                guard let index = config.profiles.firstIndex(where:{ $0.id == original.id }), config.profiles[index].name == original.name else { throw ModelError.invalid("会话已被其他操作修改，请刷新后重试。") }
+                config.profiles[index].name = name
+            case .link(let original, _):
+                guard let index = config.sessionLinks.entries.firstIndex(where:{ $0.id == original.id }), config.sessionLinks.entries[index].name == original.name else { throw ModelError.invalid("快捷引用已被修改，请刷新后重试。") }
+                config.sessionLinks.entries[index].name = name
+            case .directory(let old):
+                guard old != SessionLinks.rootDirectory, SessionDirectory.all(config).contains(old) else { throw ModelError.invalid("此目录不能重命名，或已经不存在。") }
+                let next = try SessionDirectory.childPath(named:name,in:SessionDirectory.parent(old))
+                guard !SessionDirectory.all(config).contains(next) else { throw ModelError.invalid("同级目录已存在，请使用其他名称。") }
+                func remap(_ path:String)->String { SessionDirectory.contains(path,in:old) ? next+String(path.dropFirst(old.count)) : path }
+                if let from = SessionLinks.folder(for:old), let to = SessionLinks.folder(for:next) { try config.sessionLinks.renameFolder(from,to:to) }
+                config.directories = config.directories.map(remap)
+                for index in config.profiles.indices { config.profiles[index].group = remap(config.profiles[index].group) }
+                nextDirectory = remap(currentDirectory); nextKey = "directory:"+next
+            }
+            // End the shared field editor before saving can reload/reuse table cells.
+            let previousDirectory = currentDirectory
+            cancelInlineRename(); currentDirectory = nextDirectory
+            guard workspace.saveConfiguration(config) else { currentDirectory = previousDirectory; reload(); return false }
+            reload(); table.deselectAll(nil)
+            if let index = rows.firstIndex(where:{ key($0) == nextKey }) { table.selectRowIndexes(IndexSet(integer:index),byExtendingSelection:false); table.scrollRowToVisible(index) }
+            return true
+        } catch {
+            resultStatus.stringValue = error.localizedDescription; resultStatus.textColor = .systemRed
+            resultStatus.toolTip = error.localizedDescription
+            return false
+        }
     }
     @objc private func move() { moveSelection(createReferences: true) }
     @objc private func moveActual() {

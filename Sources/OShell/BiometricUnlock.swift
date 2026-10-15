@@ -21,7 +21,8 @@ private struct BiometricFailure: LocalizedError {
 
 /// File-based Keychain holds only an encrypted envelope, never an unprotected
 /// master. The Secure Enclave enforces biometryCurrentSet during key agreement.
-/// This also works with the app's ad-hoc signature, without DP-keychain entitlements.
+/// Official builds keep a pinned certificate identity across upgrades, without
+/// requiring DP-keychain entitlements. Ad-hoc development builds have separate identities.
 final class BiometricKeychainStore: BiometricRecordStore {
     let service: String
     init(service: String = (Bundle.main.bundleIdentifier ?? "app.oshell") + ".touch-id") { self.service = service }

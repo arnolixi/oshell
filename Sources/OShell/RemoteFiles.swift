@@ -32,6 +32,10 @@ protocol RemoteFileBackend: AnyObject {
     func rename(_ source: String, to destination: String) throws
     func remove(_ path: String, directory: Bool) throws
     func cancel()
+    func setTransferRateLimit(_ bytesPerSecond: Int)
+}
+extension RemoteFileBackend {
+    func setTransferRateLimit(_ bytesPerSecond: Int) {}
 }
 
 /// A child process with bounded stderr and cancellable, timeout-aware pipe I/O.
@@ -61,7 +65,7 @@ final class FileProcess {
         _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETFL, O_NONBLOCK)
     }
     var errorText: String { lock.lock(); defer { lock.unlock() }; return String(decoding: errorData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
-    private func checkCancelled() throws { lock.lock(); let stopped = cancelled; lock.unlock(); if stopped { throw ModelError.invalid("操作已取消。") } }
+    func checkCancelled() throws { lock.lock(); let stopped = cancelled; lock.unlock(); if stopped { throw ModelError.invalid("操作已取消。") } }
     func write(_ data: Data, timeout: TimeInterval = 30) throws {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout, fd = input.fileHandleForWriting.fileDescriptor
         try data.withUnsafeBytes { raw in
@@ -93,20 +97,28 @@ final class FileProcess {
         }
         return result
     }
-    func outputToEnd(limit: Int = 4 * 1024 * 1024, sink: FileHandle? = nil, progress: ((UInt64) -> Void)? = nil) throws -> Data {
+    func outputToEnd(limit: Int = 4 * 1024 * 1024, sink: FileHandle? = nil, progress: ((UInt64) -> Void)? = nil, limiter: FileTransferRateLimiter? = nil) throws -> Data {
         let fd = output.fileHandleForReading.fileDescriptor
         var result = Data(), total: UInt64 = 0
         while true {
             try checkCancelled()
             var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             if poll(&descriptor, 1, 100) <= 0 { continue }
-            var bytes = [UInt8](repeating: 0, count: 32768)
+            var bytes = [UInt8](repeating: 0, count: limiter?.readChunkSize ?? 32768)
             let size = Darwin.read(fd, &bytes, bytes.count)
             if size < 0 && (errno == EAGAIN || errno == EINTR) { continue }
             if size == 0 { break }
             guard size > 0, sink != nil || result.count + size <= limit else { cancel(); throw ModelError.invalid("目录输出过大或连接读取失败。") }
-            if let sink { try sink.oshellWrite(contentsOf: Data(bytes.prefix(size))) } else { result.append(contentsOf: bytes.prefix(size)) }
-            total += UInt64(size); progress?(total)
+            let data = Data(bytes.prefix(size))
+            if let sink, let limiter {
+                try limiter.paced(data, checkCancellation: self.checkCancelled) { chunk in
+                    try self.checkCancelled(); try sink.oshellWrite(contentsOf:chunk)
+                    total += UInt64(chunk.count); progress?(total)
+                }
+            } else {
+                if let sink { try sink.oshellWrite(contentsOf:data) } else { result.append(data) }
+                total += UInt64(size); progress?(total)
+            }
         }
         task.waitUntilExit()
         guard task.terminationStatus == 0 else { throw ModelError.invalid(errorText.isEmpty ? "文件操作失败（\(task.terminationStatus)）。" : errorText) }
@@ -114,7 +126,8 @@ final class FileProcess {
     }
     func closeInput() { try? input.fileHandleForWriting.oshellClose() }
     func cancel() {
-        lock.lock(); cancelled = true; lock.unlock()
+        lock.lock(); let wasCancelled = cancelled; cancelled = true; lock.unlock()
+        guard !wasCancelled else { return }
         if task.isRunning {
             task.terminate()
             DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [task] in if task.isRunning { kill(task.processIdentifier, SIGKILL) } }
@@ -176,6 +189,8 @@ struct SFTPPacket {
     }
 }
 final class SFTPBackend: RemoteFileBackend {
+    private let rateLimiter = FileTransferRateLimiter()
+    func setTransferRateLimit(_ bytesPerSecond: Int) { rateLimiter.setLimit(bytesPerSecond) }
     let description: String
     private let process: FileProcess
     private let broker: AuthBroker?
@@ -276,8 +291,10 @@ final class SFTPBackend: RemoteFileBackend {
         let file = try FileHandle(forReadingFrom: local); defer { try? file.oshellClose() }
         var offset: UInt64 = 0
         while let bytes = try file.oshellRead(upToCount: 32768), !bytes.isEmpty {
-            try status(6) { $0.bytes(handle); $0.u64(offset); $0.bytes(bytes) }
-            offset += UInt64(bytes.count); progress(offset, UInt64(attributes.fileSize ?? 0))
+            try rateLimiter.paced(bytes) { chunk in
+                try status(6) { $0.bytes(handle); $0.u64(offset); $0.bytes(chunk) }
+                offset += UInt64(chunk.count); progress(offset, UInt64(attributes.fileSize ?? 0))
+            }
         }
         try close(handle); closed = true
     }
@@ -299,15 +316,16 @@ final class SFTPBackend: RemoteFileBackend {
         var offset: UInt64 = 0
         while true {
             do {
-                var response = try request(5) { $0.bytes(handle); $0.u64(offset); $0.u32(32768) }
+                let chunkSize = rateLimiter.readChunkSize
+                var response = try request(5) { $0.bytes(handle); $0.u64(offset); $0.u32(UInt32(chunkSize)) }
                 guard response.0 == 103 else { throw ModelError.invalid("SFTP 文件数据无效。") }
                 let bytes = try response.1.readBytes(); guard !bytes.isEmpty else { throw ModelError.invalid("SFTP 返回空数据块。") }
-                try file.oshellWrite(contentsOf: bytes); offset += UInt64(bytes.count); progress(offset, info.size)
+                try rateLimiter.paced(bytes) { chunk in try file.oshellWrite(contentsOf:chunk); offset += UInt64(chunk.count); progress(offset,info.size) }
             } catch let error as SFTPStatus where error.code == 1 { break }
         }
         try close(handle); closed = true
         try file.oshellClose(); complete = true
     }
-    func cancel() { process.cancel(); lease?.release(); DispatchQueue.main.async { [broker] in broker?.stop() } }
+    func cancel() { rateLimiter.cancel(); process.cancel(); lease?.release(); DispatchQueue.main.async { [broker] in broker?.stop() } }
     deinit { process.cancel(); lease?.release(); let broker = broker; DispatchQueue.main.async { broker?.stop() } }
 }

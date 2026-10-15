@@ -102,7 +102,6 @@ final class TerminalSearchPanel: NSView, NSSearchFieldDelegate {
         }
         updateOptionsMenu(); run(next: true, restart: true)
     }
-    func setOptions(_ value: SearchOptions) { options = value; updateOptionsMenu(); run(next: true, restart: true) }
     private func updateOptionsMenu() {
         for item in optionsButton.menu?.items.dropFirst() ?? [] {
             item.state = [options.caseSensitive, options.regex, options.wholeWord][item.tag] ? .on : .off

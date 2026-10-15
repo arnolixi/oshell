@@ -13,6 +13,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from release_targets import TARGETS, RELEASE_FLAVORS
 import installer_metadata
+import code_signing
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -55,6 +56,8 @@ def verify_app(candidate, staged, target, expected, legacy):
         assert deployment, (str(item), 'missing deployment target')
         assert all(version_parts(value) <= version_parts(target.minimum) for value in deployment), (str(item), deployment, target.minimum)
     run(['codesign', '--verify', '--deep', '--strict', candidate])
+    if info.get(code_signing.MARKER): code_signing.verify(candidate)
+    elif __import__('os').environ.get('OSHELL_REQUIRE_FIXED_SIGNING') == '1': raise ValueError('Official installer is not signed with the pinned certificate')
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -94,6 +97,7 @@ def main():
                     if attached:
                         run(['hdiutil', 'detach', mount])
         result = dict(flavor=flavor, passed=True, version=version, build=expected['CFBundleVersion'], minimumOS=target.minimum,
+                      **code_signing.metadata(plistlib.loads((staged/'Contents/Info.plist').read_bytes())),
                       architectures=sorted(target.architectures), signaturesVerified=True, allMachOMinimumsVerified=True)
         if not args.app_only:
             result.update(dmg=dmg.name, dmgSHA256=digest(dmg), payloadMatchesStagedApp=True)

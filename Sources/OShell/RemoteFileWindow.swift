@@ -30,6 +30,10 @@ final class RemoteFileWindow: NSWindowController, NSWindowDelegate {
             host.topAnchor.constraint(equalTo: strip.bottomAnchor), host.leadingAnchor.constraint(equalTo: root.leadingAnchor), host.trailingAnchor.constraint(equalTo: root.trailingAnchor), host.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
         strip.setAddDescription("从会话管理新建文件标签")
+        strip.allowsTabDragging = true
+        strip.canAcceptTab = { [weak self] id in self?.sessions.contains(where: { $0.id == id }) == true }
+        strip.onReorderTab = { [weak self] id, before in self?.reorderSession(id, before: before) ?? false }
+        strip.onDragEnd = { [weak self] in self?.strip.clearDragPreview() }
         strip.onAdd = { [weak self] in self?.chooseSession() }
         strip.onSelect = { [weak self] id in if let session = self?.sessions.first(where: { $0.id == id }) { self?.select(session) } }
         strip.onClose = { [weak self] id in self?.closeTab(id) }
@@ -56,6 +60,14 @@ final class RemoteFileWindow: NSWindowController, NSWindowDelegate {
         let session = selectedSession?.profile == nil ? selectedSession : addBlank()
         guard let session else { return }
         select(session); session.connect(profile, directory: directory, uploading: uploading, password: password, connectionGroup: connectionGroup); updateTabs()
+    }
+    @discardableResult func reorderSession(_ id: UUID, before: UUID?) -> Bool {
+        guard !closed, let session = sessions.first(where: { $0.id == id }),
+              before == nil || sessions.contains(where: { $0.id == before }) else { return false }
+        if before == id { return true }
+        sessions.removeAll { $0.id == id }
+        sessions.insert(session, at: before.flatMap { target in sessions.firstIndex { $0.id == target } } ?? sessions.count)
+        select(session); return true
     }
     func select(_ session: RemoteFileSession) {
         guard !closed, sessions.contains(where: { $0 === session }) else { return }
