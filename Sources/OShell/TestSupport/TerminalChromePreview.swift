@@ -22,7 +22,7 @@ enum TerminalChromePreview {
         window.appearance = NSAppearance(named: .aqua)
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor(srgbRed: 0.94, green: 0.94, blue: 0.94, alpha: 1).cgColor
-        window.setContentSize(NSSize(width: 1100, height: 620))
+        window.setContentSize(NSSize(width: 1100, height: 500))
         func allViews(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(allViews) }
         func fixture(_ pane: TerminalPane, operations: Bool) {
             let text = operations
@@ -51,6 +51,27 @@ enum TerminalChromePreview {
                 space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
             context.scaleBy(x: scale, y: scale)
             root.layer?.render(in: context)
+            // AppKit's cached text layer can carry a translated text origin into
+            // an offscreen capture. Render each terminal with its native drawing
+            // code in a fresh graphics context, then place it at its actual view
+            // bounds. This only affects documentation/test captures.
+            for terminal in allViews(root).compactMap({ $0 as? OShellTerminal }) where !terminal.isHiddenOrHasHiddenAncestor {
+                let bounds = terminal.bounds
+                guard bounds.width > 0, bounds.height > 0,
+                      let textContext = CGContext(data:nil,width:Int(ceil(bounds.width*scale)),height:Int(ceil(bounds.height*scale)),bitsPerComponent:8,bytesPerRow:0,space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else { continue }
+                textContext.scaleBy(x:scale,y:scale)
+                textContext.textMatrix = .identity; textContext.textPosition = .zero
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(cgContext:textContext,flipped:terminal.isFlipped)
+                terminal.draw(bounds)
+                NSGraphicsContext.restoreGraphicsState()
+                if let textImage = textContext.makeImage() {
+                    let rect = terminal.convert(bounds,to:root)
+                    context.saveGState(); context.clip(to:rect)
+                    context.setFillColor(terminal.nativeBackgroundColor.cgColor); context.fill(rect)
+                    context.draw(textImage,in:rect); context.restoreGState()
+                }
+            }
             // SwiftTerm clears default-background pixels in draw(_:); the
             // compositor normally reveals the terminal layer underneath them.
             // Flatten those transparent pixels over that exact terminal color.

@@ -14,6 +14,8 @@ enum AppTestHarness {
         if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.install() }
     }
     static func run(_ controller: WorkspaceController) {
+        if CommandLine.arguments.contains("--readme-settings-test") { ReadmeScreenshots.runSettings(controller) }
+        if CommandLine.arguments.contains("--readme-screenshots-test") { ReadmeScreenshots.run(controller) }
         if CommandLine.arguments.contains("--session-inline-rename-test") { SessionInlineRenameTest.run(controller) }
         if CommandLine.arguments.contains("--file-rate-test") { FileTransferRateTest.run(controller) }
         if CommandLine.arguments.contains("--tab-reorder-test") { TabReorderTest.run(controller) }

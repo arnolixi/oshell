@@ -48,6 +48,12 @@ work/test-tools/bin/python scripts/run-webdav-tests.py
 
 确实需要单独调试 Intel 兼容 UI 时，可使用 `package-release.py --flavor legacy --apps-only --tests`，输出 `work/test-release/legacy/OShell.app`；测试应用禁止打包或发布。常规开发无需执行此步骤。
 
+## 更新 README 截图
+
+使用隔离测试应用生成真实界面的示例图片，不连接服务器、不使用个人会话。执行 `python3 scripts/run-ui-tests.py readme-screenshots terminal-chrome` 后，从 `validation/` 中选取 `readme-sessions.png`、`readme-files.png`、`terminal-chrome-split-review.png` 及 `terminal-chrome-empty-0-dark-review.png`，检查内容和布局后更新 `docs/images/` 对应图片。终端输出和文件列表均为固定演示数据；不要用个人工作窗口的截图替换。
+
+设置六宫格使用 `python3 scripts/run-ui-tests.py readme-settings` 生成，输出为 `validation/readme-settings-grid.png`，核对后更新 `docs/images/settings-overview.png`。只采集设置页内容，示例配置不保存；终端预览使用独立绘图上下文，避免截图中文字发生偏移。
+
 ## 清理构建历史
 
 ```sh
