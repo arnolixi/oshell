@@ -108,7 +108,7 @@ jobs:
           xcodebuild -version
           swift --version
           uname -m
-      - name: Require fixed code signing identity
+      - name: Validate fixed code signing identity
         env:
           OSHELL_CODESIGN_P12: ${{ secrets.OSHELL_CODESIGN_P12 }}
           OSHELL_CODESIGN_PASSWORD: ${{ secrets.OSHELL_CODESIGN_PASSWORD }}
@@ -117,6 +117,7 @@ jobs:
             echo '::error::Configure OSHELL_CODESIGN_P12 and OSHELL_CODESIGN_PASSWORD with the pinned signing identity. Never generate a replacement certificate in CI.'
             exit 1
           fi
+          python3 scripts/sign-app.py --preflight
       - name: Build application, run core checks and create DMG
         env:
           OSHELL_CODESIGN_P12: ${{ secrets.OSHELL_CODESIGN_P12 }}

@@ -29,10 +29,10 @@ def validate_tag(tag, version):
     if not re.fullmatch(r'v\d+\.\d+\.\d+', tag) or tag != 'v' + version:
         raise ValueError(f'Release tag {tag!r} must match scripts/Info.plist: v{version}. For a manual run, leave tag empty to use this version.')
 
-def metadata(tag, commit=None, allow_missing_tag=False):
+def metadata(tag, commit=None, allow_missing_tag=False, build_only=False):
     info = plistlib.loads((ROOT/'scripts/Info.plist').read_bytes())
     version, build = info['CFBundleShortVersionString'], str(info['CFBundleVersion'])
-    if allow_missing_tag and not tag: tag = 'v' + version
+    if (allow_missing_tag or build_only) and not tag: tag = 'v' + version
     validate_tag(tag, version)
     if not build.isdigit() or int(build) < 1:
         raise ValueError('CFBundleVersion must be a positive, increasing integer')
@@ -40,9 +40,9 @@ def metadata(tag, commit=None, allow_missing_tag=False):
         return subprocess.check_output(['git', '-C', str(ROOT), *args], text=True).strip()
     head = git('rev-parse', 'HEAD')
     ref = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--verify', '--quiet', 'refs/tags/' + tag + '^{commit}'], capture_output=True, text=True)
-    if ref.returncode and not allow_missing_tag:
+    if ref.returncode and not (allow_missing_tag or build_only):
         raise ValueError(f'Release tag {tag} does not exist. Run the workflow manually from the source branch to create it.')
-    if (not ref.returncode and ref.stdout.strip() != head) or (commit and commit != head):
+    if (not build_only and not ref.returncode and ref.stdout.strip() != head) or (commit and commit != head):
         raise ValueError('Release tag, selected branch/tag and requested commit must match; existing tags are never moved. Select the original tag to retry, or increment the version for a new release.')
     return dict(tag=tag, version=version, build=build, commit=head)
 
@@ -255,7 +255,7 @@ def main():
     parser.add_argument('command', choices=['prepare', 'metadata', 'stage', 'collect', 'publish'])
     parser.add_argument('--tag', required=True)
     parser.add_argument('--commit')
-    parser.add_argument('--build-only', action='store_true', help='Validate untagged source for metadata/stage without creating a release')
+    parser.add_argument('--build-only', action='store_true', help='Validate the selected source for metadata/stage without changing tags or publishing')
     parser.add_argument('--github-output', type=Path)
     parser.add_argument('--flavor', choices=RELEASE_FLAVORS)
     parser.add_argument('--output', type=Path)
@@ -265,7 +265,7 @@ def main():
     parser.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY', ''))
     args = parser.parse_args()
     if args.build_only and args.command not in ['metadata', 'stage']: parser.error('--build-only is only valid for metadata/stage')
-    meta = prepare(args.tag, args.repository) if args.command == 'prepare' else metadata(args.tag, args.commit, allow_missing_tag=args.build_only)
+    meta = prepare(args.tag, args.repository) if args.command == 'prepare' else metadata(args.tag, args.commit, build_only=args.build_only)
     if args.command in ['prepare', 'metadata']:
         if args.github_output:
             with args.github_output.open('a') as stream:

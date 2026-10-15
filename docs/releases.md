@@ -66,6 +66,10 @@ Apple Silicon 的 macOS 13+ 使用 arm64 包，macOS 11/12 使用 Universal 包�
 
 CI 使用 `OSHELL_UPDATE_SIGNING_KEY` Secret。维护者本地的 `.release-private/` 不属于构建缓存，清理脚本不会删除其中的私钥。现有发行线不能随意替换公钥或生成新密钥；独立 fork 应使用自己的更新密钥。
 
+关闭手动运行中的“发布 GitHub Release”选项，可以对当前分支进行仅构建验证，即使同版本标签指向较早提交；已有标签与 Release 均不会修改。正式发布仍要求标签与源码提交一致。
+
+流水线会在编译前调用 `python3 scripts/sign-app.py --preflight`，用临时可执行文件验证固定证书能够实际签名。临时钥匙串在签名期间加入搜索列表，成功或失败后均恢复原列表并删除；不修改系统证书信任或默认钥匙串。
+
 签名工具依赖见 `scripts/requirements-release.txt`。`publish-updates.py` 只生成内部签名元数据，不上传或发布；正常发布应交给 Actions 完成校验和发布流程。
 
 ## 对应源代码与许可

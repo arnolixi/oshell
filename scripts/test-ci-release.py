@@ -72,11 +72,23 @@ class ReleaseTests(unittest.TestCase):
     def test_build_only_accepts_untagged_source_without_mutation(self):
         repo, git = self.source_repository(); before = git('rev-parse', 'HEAD')
         with patch.object(CI, 'ROOT', repo), patch.object(CI, 'gh') as network:
-            result = CI.metadata('', commit=before, allow_missing_tag=True)
+            result = CI.metadata('', commit=before, build_only=True)
             network.assert_not_called()
         self.assertEqual(result['tag'], 'v1.2.3')
         self.assertEqual(result['commit'], before)
         self.assertEqual(git('tag'), '')
+
+    def test_build_only_can_validate_fix_without_moving_existing_tag(self):
+        repo, git = self.source_repository(); original = git('rev-parse','HEAD')
+        git('tag','v1.2.3'); git('commit','--allow-empty','-m','Fix build tooling'); head = git('rev-parse','HEAD')
+        with patch.object(CI,'ROOT',repo), patch.object(CI,'gh') as network:
+            result = CI.metadata('',commit=head,build_only=True)
+            self.assertEqual(result['commit'],head)
+            self.assertEqual(git('rev-parse','refs/tags/v1.2.3'),original)
+            with self.assertRaises(ValueError): CI.metadata('v1.2.3')
+            with self.assertRaises(ValueError): CI.metadata('',allow_missing_tag=True)
+            with self.assertRaises(ValueError): CI.metadata('',commit=original,build_only=True)
+            network.assert_not_called()
 
     def test_manual_first_release_infers_version_and_creates_tag(self):
         repo, git = self.source_repository(); head = git('rev-parse', 'HEAD'); calls = []

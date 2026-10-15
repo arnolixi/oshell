@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (c) 2026 OShell contributors
 """Pinned, stable macOS signing identity. Private material never enters build logs."""
-import base64, contextlib, hashlib, json, os, pathlib, plistlib, re, secrets, subprocess, tempfile
+import base64, contextlib, hashlib, json, os, pathlib, plistlib, re, secrets, shlex, subprocess, tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROFILE = ROOT/'scripts/code-signing.json'
 PRIVATE = ROOT/'.release-private/code-signing'
@@ -49,15 +49,27 @@ def identity():
         if hashlib.sha256(certificate).hexdigest() != pin['sha256'] or hashlib.sha1(certificate).hexdigest() != pin['sha1']:
             raise ValueError('Signing certificate does not match the pinned public identity')
         keychain = folder/'signing.keychain-db'; key_password = secrets.token_urlsafe(32)
+        # codesign's explicit --keychain does not replace the user search list
+        # used while resolving the identity/certificate chain on older runners.
+        previous_search = shlex.split(run(['security','list-keychains','-d','user']).decode())
         try:
             run(['security','create-keychain','-p',key_password,keychain])
             run(['security','set-keychain-settings','-lut','21600',keychain])
             run(['security','unlock-keychain','-p',key_password,keychain])
             run(['security','import',bundle,'-k',keychain,'-P',password,'-T','/usr/bin/codesign'])
             run(['security','set-key-partition-list','-S','apple-tool:,apple:','-s','-k',key_password,keychain])
+            run(['security','list-keychains','-d','user','-s',keychain,*previous_search])
+            matching = run(['security','find-identity','-p','codesigning',keychain]).decode(errors='replace').strip()
+            # A deliberately self-signed certificate is not an Apple-trusted
+            # identity. Match the imported certificate/private-key pair without
+            # -v, then let the actual signing probe validate its usability.
+            if pin['sha1'].upper() not in matching.upper():
+                raise RuntimeError('Pinned certificate/private-key pair missing after import: '+matching)
             yield keychain, pin
         finally:
-            if keychain.exists(): run(['security','delete-keychain',keychain])
+            try: run(['security','list-keychains','-d','user','-s',*previous_search])
+            finally:
+                if keychain.exists(): run(['security','delete-keychain',keychain])
 
 def sign_path(path, keychain, pin, identifier):
     run(['codesign','--force','--sign',pin['sha1'],'--keychain',keychain,'--timestamp=none','--identifier',identifier,
@@ -99,3 +111,15 @@ def sign_app(app):
             bundle_info = plistlib.loads(plist.read_bytes())
             sign_path(bundle,keychain,pin,bundle_info['CFBundleIdentifier'])
         return verify(app)
+
+
+def preflight():
+    """Exercise the actual identity before spending minutes compiling an app."""
+    with identity() as (keychain, pin), tempfile.TemporaryDirectory(prefix='oshell-sign-probe-') as raw:
+        folder = pathlib.Path(raw); source = folder/'probe.c'; binary = folder/'probe'
+        source.write_text('int main(void) { return 0; }\n')
+        run(['xcrun','clang',source,'-o',binary])
+        identifier = 'app.oshell.signing-preflight'
+        sign_path(binary,keychain,pin,identifier)
+        run(['codesign','--verify','--strict','-R','='+requirement(identifier,pin['sha1']),binary])
+        return {'preflight':'passed','signing':'self-signed','codeSigningCertificateSHA256':pin['sha256']}

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (c) 2026 OShell contributors
 """Portable signing policy checks; never imports a real private key."""
-import base64, json, os, pathlib, tempfile, unittest
+import base64, hashlib, json, os, pathlib, shlex, tempfile, unittest
 from unittest.mock import patch
 import code_signing as signing
 
@@ -26,6 +26,44 @@ class SigningTests(unittest.TestCase):
         with patch.dict(os.environ,{'OSHELL_CODESIGN_P12':base64.b64encode(b'fixture').decode(),'OSHELL_CODESIGN_PASSWORD':'fixture-password'},clear=True), patch.object(signing,'run',side_effect=[b'public cert',b'wrong cert']) as run:
             with self.assertRaisesRegex(ValueError,'does not match'), signing.identity(): pass
             self.assertFalse(any(call.args[0][0]=='security' for call in run.call_args_list))
+    def identity_lifecycle(self, failure=None):
+        certificate=b'public-fixture-certificate'
+        pin={'sha1':hashlib.sha1(certificate).hexdigest(),'sha256':hashlib.sha256(certificate).hexdigest()}
+        previous=['/tmp/Existing Keychain.keychain-db','/tmp/another.keychain-db']
+        calls=[]; caught=None
+        def fake(args, **kwargs):
+            args=list(map(str,args)); calls.append(args)
+            if args[:2]==['openssl','pkcs12']: return b'public cert'
+            if args[:2]==['openssl','x509']: return certificate
+            if args==['security','list-keychains','-d','user']: return shlex.join(previous).encode()
+            if args[:2]==['security','create-keychain']: pathlib.Path(args[-1]).touch()
+            if args[:2]==['security','import'] and failure=='import': raise RuntimeError('fixture import failure')
+            if args[:2]==['security','find-identity']:
+                return b'0 identities found' if failure=='missing' else (pin['sha1'].upper()+' "fixture" (CSSMERR_TP_NOT_TRUSTED)').encode()
+            if args[:2]==['security','delete-keychain']: pathlib.Path(args[-1]).unlink()
+            return b''
+        with patch.object(signing,'profile',return_value=pin), patch.object(signing,'run',side_effect=fake), patch.dict(os.environ,{'OSHELL_CODESIGN_P12':base64.b64encode(b'fixture').decode(),'OSHELL_CODESIGN_PASSWORD':'fixture-password'},clear=True):
+            try:
+                with signing.identity() as (keychain, actual):
+                    self.assertEqual(actual,pin)
+                    active=[c for c in calls if c[:5]==['security','list-keychains','-d','user','-s']][-1]
+                    self.assertEqual(active[5:],[str(keychain),*previous])
+                    if failure=='body': raise RuntimeError('fixture signing failure')
+            except RuntimeError as error: caught=str(error)
+        changes=[c for c in calls if c[:5]==['security','list-keychains','-d','user','-s']]
+        self.assertEqual(changes[-1][5:],previous)
+        self.assertEqual(calls[-1][:2],['security','delete-keychain'])
+        self.assertFalse(pathlib.Path(calls[-1][-1]).exists())
+        self.assertFalse(any(c[1] in ['add-trusted-cert','default-keychain'] for c in calls))
+        return caught
+    def test_search_list_preserved_including_spaces(self):
+        self.assertIsNone(self.identity_lifecycle())
+    def test_search_list_restored_after_signing_failure(self):
+        self.assertEqual(self.identity_lifecycle('body'),'fixture signing failure')
+    def test_search_list_restored_after_import_failure(self):
+        self.assertEqual(self.identity_lifecycle('import'),'fixture import failure')
+    def test_missing_pair_fails_and_cleans_up(self):
+        self.assertIn('certificate/private-key pair missing',self.identity_lifecycle('missing'))
     def test_metadata_labels_are_truthful(self):
         self.assertEqual(signing.metadata({})['signing'],'ad-hoc')
         self.assertEqual(signing.metadata({signing.MARKER:'a'*64})['signing'],'self-signed')
