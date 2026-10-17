@@ -15,6 +15,7 @@ public struct TerminalColorScheme: Codable, Equatable, Identifiable {
     public var foreground: String
     public var cursor: String
     public var cursorText: String
+    public var autoCursor = false
     public var selection: String
     public var selectionText: String
     public var ansi: [String]
@@ -22,6 +23,15 @@ public struct TerminalColorScheme: Codable, Equatable, Identifiable {
         self.id = id; self.name = name; self.background = background; self.foreground = foreground
         self.cursor = cursor ?? foreground; cursorText = background
         self.selection = selection; self.selectionText = selectionText ?? foreground; self.ansi = ansi
+    }
+    private enum CodingKeys: String, CodingKey {case id,name,background,foreground,cursor,cursorText,autoCursor,selection,selectionText,ansi}
+    public init(from decoder:Decoder)throws {
+        let c=try decoder.container(keyedBy:CodingKeys.self)
+        id=try c.decode(String.self,forKey:.id);name=try c.decode(String.self,forKey:.name)
+        background=try c.decode(String.self,forKey:.background);foreground=try c.decode(String.self,forKey:.foreground)
+        cursor=try c.decode(String.self,forKey:.cursor);cursorText=try c.decode(String.self,forKey:.cursorText)
+        selection=try c.decode(String.self,forKey:.selection);selectionText=try c.decode(String.self,forKey:.selectionText)
+        ansi=try c.decode([String].self,forKey:.ansi);autoCursor=try c.decodeIfPresent(Bool.self,forKey:.autoCursor) ?? false
     }
     public static func isHex(_ value: String) -> Bool { value.count == 7 && value.first == "#" && UInt32(value.dropFirst(), radix: 16) != nil }
     public var isDark: Bool {

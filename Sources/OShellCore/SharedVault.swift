@@ -26,7 +26,7 @@ public enum SharedVault {
         let ciphertext: Data
     }
     public static let maximumSize = 48 * 1024 * 1024
-    private static let aad = Data("OShell.shared-vault.v1".utf8)
+    private static func aad(_ version:Int)->Data {Data("OShell.shared-vault.v\(version)".utf8)}
     public static func isEncrypted(_ data: Data) -> Bool {
         (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["format"] as? String == "OShell.shared-vault"
     }
@@ -45,7 +45,8 @@ public enum SharedVault {
         guard status == kCCSuccess else { throw ModelError.invalid("无法派生共享数据密钥。") }
         return result
     }
-    public static func seal(_ data: Data, password: String) throws -> Data {
+    public static func seal(_ data: Data, password: String, version:Int = 1) throws -> Data {
+        guard version==1 || version==2 else {throw ModelError.invalid("共享协议版本不支持。")}
         guard data.count <= 32 * 1024 * 1024 else { throw ModelError.invalid("共享数据超过大小限制。") }
         let salt = try random(16), rounds = 600_000
         var derived = try key(password, salt: salt, rounds: rounds)
@@ -53,25 +54,25 @@ public enum SharedVault {
         let combined: Data
         #if OSHELL_LEGACY
         let nonce = try random(12)
-        let mode = GCM(iv: Array(nonce), additionalAuthenticatedData: Array(aad), tagLength: 16, mode: .combined)
+        let mode = GCM(iv: Array(nonce), additionalAuthenticatedData: Array(aad(version)), tagLength: 16, mode: .combined)
         combined = nonce + Data(try AES(key: derived, blockMode: mode, padding: .noPadding).encrypt(Array(data)))
         #else
-        combined = try AES.GCM.seal(data, using: SymmetricKey(data: derived), authenticating: aad).combined!
+        combined = try AES.GCM.seal(data, using: SymmetricKey(data: derived), authenticating: aad(version)).combined!
         #endif
-        return try JSONEncoder().encode(Envelope(format: "OShell.shared-vault", version: 1, iterations: rounds, salt: salt, ciphertext: combined))
+        return try JSONEncoder().encode(Envelope(format: "OShell.shared-vault", version: version, iterations: rounds, salt: salt, ciphertext: combined))
     }
     public static func open(_ data: Data, password: String) throws -> Data {
         guard data.count <= maximumSize else { throw ModelError.invalid("共享数据超过大小限制。") }
         do {
             let envelope = try JSONDecoder().decode(Envelope.self, from: data)
-            guard envelope.format == "OShell.shared-vault", envelope.version == 1, envelope.ciphertext.count >= 28 else { throw ModelError.invalid("共享数据格式无效。") }
+            guard envelope.format == "OShell.shared-vault", (envelope.version == 1 || envelope.version == 2), envelope.ciphertext.count >= 28, envelope.ciphertext.count <= 32 * 1024 * 1024 + 28 else { throw ModelError.invalid("共享数据格式无效。") }
             var derived = try key(password, salt: envelope.salt, rounds: envelope.iterations)
             defer { derived.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) } }
             #if OSHELL_LEGACY
-            let mode = GCM(iv: Array(envelope.ciphertext.prefix(12)), additionalAuthenticatedData: Array(aad), tagLength: 16, mode: .combined)
+            let mode = GCM(iv: Array(envelope.ciphertext.prefix(12)), additionalAuthenticatedData: Array(aad(envelope.version)), tagLength: 16, mode: .combined)
             return Data(try AES(key: derived, blockMode: mode, padding: .noPadding).decrypt(Array(envelope.ciphertext.dropFirst(12))))
             #else
-            return try AES.GCM.open(AES.GCM.SealedBox(combined: envelope.ciphertext), using: SymmetricKey(data: derived), authenticating: aad)
+            return try AES.GCM.open(AES.GCM.SealedBox(combined: envelope.ciphertext), using: SymmetricKey(data: derived), authenticating: aad(envelope.version))
             #endif
         } catch { throw ModelError.invalid("主密码不正确，或共享数据已损坏。") }
     }
@@ -79,13 +80,22 @@ public enum SharedVault {
         try SharingProtection.require(configuration)
         try MasterPasswordProtection.verifyStartup(configuration, password: password)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        return try seal(encoder.encode(configuration), password: password)
+        return try seal(SharedConfigurationProtocol.canonicalData(encoder.encode(configuration)), password: password, version:2)
     }
     public static func decode(_ data: Data, password: String) throws -> Configuration {
-        var value = try JSONDecoder().decode(Configuration.self, from: open(data, password: password))
+        var value = try JSONDecoder().decode(Configuration.self, from: SharedConfigurationProtocol.canonicalData(open(data, password: password)))
         try value.migrateFileSessions(); try value.migrateProxyCatalog(); try SharingProtection.require(value)
         try MasterPasswordProtection.verifyStartup(value, password: password)
-        for profile in value.profiles { try profile.validate() }
+        try SessionArchive(profiles:value.profiles,directories:value.directories,includePasswords:true,links:value.sessionLinks.entries,proxies:value.proxies).validate()
+        try value.sessionDefaults.validate()
+        guard value.quickCommands.count<=1000,Set(value.quickCommands.map(\.id)).count==value.quickCommands.count,
+              value.highlightSets.count<=128,Set(value.highlightSets.map(\.id)).count==value.highlightSets.count else {throw ModelError.invalid("共享配置项目重复或超过限制。")}
+        for command in value.quickCommands {try command.validate()}
+        for set in value.highlightSets {
+            guard set.rules.count<=32,Set(set.rules.map(\.id)).count==set.rules.count else {throw ModelError.invalid("突出显示规则重复或超过限制。")}
+            for rule in set.rules {try rule.validate()}
+        }
+        if let selected=value.preferences.highlightSetID, !value.highlightSets.contains(where:{$0.id==selected}) {throw ModelError.invalid("选中的突出显示集不存在。")}
         return value
     }
 }

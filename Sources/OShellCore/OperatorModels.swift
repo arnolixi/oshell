@@ -17,6 +17,10 @@ public struct QuickCommand: Codable, Equatable, Identifiable {
     }
 }
 public struct HighlightRule: Codable, Equatable, Identifiable {
+    public var name = ""
+    public var bold = false
+    public var foreground = ""
+    public var background = ""
     public var id = UUID()
     public var pattern: String
     public var regex: Bool
@@ -26,8 +30,17 @@ public struct HighlightRule: Codable, Equatable, Identifiable {
     public init(pattern: String = "", regex: Bool = false, caseSensitive: Bool = false, color: String = "#FF5F56") {
         self.pattern = pattern; self.regex = regex; self.caseSensitive = caseSensitive; self.color = color
     }
+    private enum CodingKeys:String,CodingKey {case id,name,bold,foreground,background,pattern,regex,caseSensitive,color,enabled}
+    public init(from decoder:Decoder)throws {
+        let c=try decoder.container(keyedBy:CodingKeys.self)
+        id=try c.decode(UUID.self,forKey:.id);pattern=try c.decode(String.self,forKey:.pattern)
+        regex=try c.decode(Bool.self,forKey:.regex);caseSensitive=try c.decode(Bool.self,forKey:.caseSensitive)
+        color=try c.decode(String.self,forKey:.color);enabled=try c.decodeIfPresent(Bool.self,forKey:.enabled) ?? true
+        name=try c.decodeIfPresent(String.self,forKey:.name) ?? "";bold=try c.decodeIfPresent(Bool.self,forKey:.bold) ?? false
+        foreground=try c.decodeIfPresent(String.self,forKey:.foreground) ?? "";background=try c.decodeIfPresent(String.self,forKey:.background) ?? ""
+    }
     public func validate() throws {
-        guard !pattern.isEmpty, pattern.utf8.count <= 512, color.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil else { throw ModelError.invalid("请填写关键字或正则表达式（最多 512 字节）及有效颜色。") }
+        guard !pattern.isEmpty, pattern.utf8.count <= 512, color.range(of: "^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$", options: .regularExpression) != nil else { throw ModelError.invalid("请填写关键字或正则表达式（最多 512 字节）及有效颜色。") }
         if regex { _ = try NSRegularExpression(pattern: pattern.replacingOccurrences(of: "${hostname}", with: "example")) }
     }
 }
@@ -42,7 +55,10 @@ public struct HighlightSet: Codable, Equatable, Identifiable {
             HighlightRule(pattern: "\\b(error|fatal|failed|panic)\\b", regex: true, color: "#FF5F56"),
             HighlightRule(pattern: "\\b(warn|warning)\\b", regex: true, color: "#FFAA33"),
             HighlightRule(pattern: "${hostname}", color: "#F5D547")])
-        set.id = standardID; return set
+        set.id = standardID
+        let ruleIDs=["F6C9AE44-0C05-450B-AB54-28F8AC88B315","F6C9AE44-0C05-450B-AB54-28F8AC88B316","F6C9AE44-0C05-450B-AB54-28F8AC88B317"]
+        for i in set.rules.indices {set.rules[i].id=UUID(uuidString:ruleIDs[i])!}
+        return set
     }
 }
 public struct HighlightMatch { public let range: NSRange; public let color: String }
@@ -54,7 +70,7 @@ public final class HighlightMatcher {
         expressions = set.rules.prefix(32).filter(\.enabled).compactMap { rule in
             let source = rule.pattern.replacingOccurrences(of: "${hostname}", with: rule.regex ? NSRegularExpression.escapedPattern(for: hostname) : hostname)
             guard !source.isEmpty, let expression = try? NSRegularExpression(pattern: rule.regex ? source : NSRegularExpression.escapedPattern(for: source), options: rule.caseSensitive ? [] : [.caseInsensitive]) else { return nil }
-            return (expression, rule.color)
+            return (expression, rule.foreground.isEmpty ? rule.color : rule.foreground)
         }
     }
     public func matches(in text: String) -> [HighlightMatch] {

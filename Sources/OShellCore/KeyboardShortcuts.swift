@@ -143,7 +143,7 @@ public struct KeyboardShortcuts: Codable, Equatable {
     public var overrides: [String: ShortcutOverride] = [:]
     public init() {}
     public func bindings(for action: ShortcutAction) -> [KeyboardShortcut] {
-        if let override = overrides[action.rawValue] { return override.shortcut.map { [$0] } ?? [] }
+        if let override = overrides[action.rawValue] { return override.shortcut.flatMap { $0.isValid ? [$0] : nil } ?? [] }
         // Newly introduced defaults must not invalidate existing customized
         // configurations when upgrading or silently take over their keys.
         if [.zoomPane, .nextPane, .previousPane, .quickSwitch, .focusFullscreen].contains(action) {
@@ -159,6 +159,9 @@ public struct KeyboardShortcuts: Codable, Equatable {
         ShortcutAction.allCases.first { $0 != action && bindings(for: $0).contains(shortcut) }
     }
     public func validate() throws {
+        for (action,override) in overrides where ShortcutAction(rawValue:action) != nil {
+            if let key=override.shortcut, !key.isValid {throw ModelError.invalid("快捷键无效，请重新指定。")}
+        }
         for action in ShortcutAction.allCases {
             for shortcut in bindings(for: action) {
                 guard shortcut.isValid else { throw ModelError.invalid("“\(action.title)”的快捷键无效，请重新指定。") }

@@ -356,7 +356,7 @@ public final class ConfigurationStore {
         if SharedVault.isEncrypted(data) {
             encryptedStorage = true
             guard let masterPassword else { throw ModelError.invalid("请先输入主密码解锁共享数据。") }
-            plaintext = try SharedVault.open(data, password: masterPassword)
+            plaintext = try SharedConfigurationProtocol.canonicalData(SharedVault.open(data, password: masterPassword))
         } else { plaintext = data }
         var config = try JSONDecoder().decode(Configuration.self, from: plaintext)
         if requiresMasterProtection { try SharingProtection.require(config) }

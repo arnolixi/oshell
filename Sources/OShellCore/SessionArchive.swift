@@ -54,12 +54,12 @@ public struct SessionArchive: Codable {
             throw ModelError.invalid("本机加密密码需先转换为导出密码保护，不能直接导出本机密钥引用。")
         }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(self)
+        let data = try SharedConfigurationProtocol.canonicalArchiveData(encoder.encode(self))
         guard data.count <= Self.maximumBytes else { throw ModelError.invalid("会话文件不能超过 16 MiB。") }; return data
     }
     public static func decode(_ data: Data) throws -> SessionArchive {
         guard data.count <= maximumBytes else { throw ModelError.invalid("会话文件不能超过 16 MiB。") }
-        let archive = try JSONDecoder().decode(Self.self, from: data); try archive.validate(); return archive
+        let archive = try JSONDecoder().decode(Self.self, from: SharedConfigurationProtocol.canonicalArchiveData(data)); try archive.validate(); return archive
     }
     public static func read(_ url: URL) throws -> SessionArchive {
         guard try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else { throw ModelError.invalid("请选择普通会话文件。") }
