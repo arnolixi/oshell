@@ -50,9 +50,9 @@ GitHub Actions 使用仓库 Secret `OSHELL_CODESIGN_P12`（加密 PKCS#12 的 Ba
 
 公开指纹仅用于验证，其他开发者没有维护者的私钥时，可用 `OSHELL_ALLOW_ADHOC=1 bash scripts/build.sh` 构建个人开发版；`bash scripts/build.sh --tests` 也使用 ad-hoc 签名，避免让测试版本继承正式 App 的签名身份。官方流水线设置 `OSHELL_REQUIRE_FIXED_SIGNING=1`，拒绝这些开发构建。独立 fork 应建立自己的签名身份，不能冒用上游身份。
 
-从旧 ad-hoc 版本首次切换到固定证书版本，可能仍需授权或重新启用 Touch ID 一次。之后使用相同证书和应用标识的正常升级可以延续钥匙串身份；正常指纹验证继续保留。证书过期、更换证书或用户修改钥匙串访问策略时需要单独处理。自签名不等于 Apple 信任，不能替代 Developer ID / 公证或保证消除 Gatekeeper 提醒。
+固定证书保持指定签名要求稳定，但旧式钥匙串还有独立的分区列表，可能按二进制 cdhash 授权；因此不能保证点击“始终允许”后跨版本不再提示。Touch ID 加密记录现改用本机私有文件，解密仍由 Secure Enclave 指纹验证控制；旧钥匙串仅尝试无提示迁移，拒绝访问时需手动解锁后重新启用一次。证书过期、更换证书或用户修改钥匙串访问策略时需要单独处理。自签名不等于 Apple 信任，不能替代 Developer ID / 公证或保证消除 Gatekeeper 提醒。
 
-验证固定身份：`python3 scripts/sign-app.py --verify dist/OShell.app`。签名政策回归使用 `python3 scripts/test-code-signing.py`；跨版本钥匙串回归使用 `python3 scripts/test-signing-upgrade.py`，只操作可自动清理的临时测试钥匙串，交互授权处于禁用状态。
+验证固定身份：`python3 scripts/sign-app.py --verify dist/OShell.app`。签名政策回归使用 `python3 scripts/test-code-signing.py`；跨版本钥匙串回归使用 `python3 scripts/test-signing-upgrade.py`，只操作可自动清理的临时测试钥匙串，交互授权处于禁用状态。该回归验证指定签名要求，不代表所有已有登录钥匙串条目的分区授权都能跨版本继承。
 
 ## 内置更新
 

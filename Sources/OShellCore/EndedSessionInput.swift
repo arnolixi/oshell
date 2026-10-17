@@ -11,6 +11,7 @@ public struct EndedSessionInput {
     private var line = [UInt8]()
     private var afterReturn = false
     private let allowsLocalTools: Bool
+    private var localEditor = LocalPromptInput()
     private var overflow = false
     public init(allowsLocalTools: Bool = false) { self.allowsLocalTools = allowsLocalTools }
     public struct Result {
@@ -19,7 +20,8 @@ public struct EndedSessionInput {
         public var command: LocalToolCommand? = nil
         public var remaining: [UInt8] = []
     }
-    public mutating func consume(_ bytes: ArraySlice<UInt8>) -> Result {
+    public mutating func consume(_ bytes: ArraySlice<UInt8>, columns: Int = 80) -> Result {
+        if allowsLocalTools { return localEditor.consume(bytes, columns: max(16, columns)) }
         var echo = [UInt8]()
         for index in bytes.indices {
             let byte = bytes[index]

@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (c) 2026 OShell contributors
+import AppKit
+import OShellCore
+
+enum SessionSidebarTest {
+    static func run(_ workspace: WorkspaceController) {
+        RunLoop.main.add(Timer(timeInterval: 0.1, repeats: false) { _ in exercise(workspace) }, forMode: .common)
+    }
+    private static func exercise(_ workspace: WorkspaceController) {
+        var checks = [String: Bool]()
+        SessionSidebarPreferences.saveShortcut(nil)
+        let a = SessionProfile(name: "Production API", group: "prod/apps", host: "192.0.2.10", username: "ops")
+        let b = SessionProfile(name: "数据库", group: "prod/db", host: "db.example.test", username: "admin")
+        let c = SessionProfile(name: "Local fixture", group: "Links", kind: .local)
+        var config = workspace.configuration; config.profiles = [a,b,c]; config.directories = ["empty/sub"]
+        config.sessionLinks.entries = [SessionLink(profileID: a.id, name: "API shortcut", folder: "ops")]
+        workspace.receiveConfiguration(config)
+        workspace.sessionSidebarVisible = true; workspace.refreshSessionSidebar()
+        workspace.window?.setContentSize(NSSize(width: 1000, height: 700)); workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        let sidebar = workspace.sessionSidebar, outline = sidebar.outline
+        func items() -> [SessionSidebar.Node] { (0..<outline.numberOfRows).compactMap { outline.item(atRow: $0) as? SessionSidebar.Node } }
+        func filter(_ value: String) { sidebar.search.stringValue = value; sidebar.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification)) }
+        checks["sidebarVisibleBesideTerminal"] = workspace.sidebarContainer?.isHidden == false && workspace.sidebarWidth?.constant == 250 && workspace.terminalHost.convert(.zero, to: workspace.window?.contentView).x >= 250
+        outline.expandItem(nil, expandChildren: true)
+        checks["treeIncludesNestedAndEmptyDirectories"] = Set(items().compactMap(\.directory)).isSuperset(of: ["prod", "prod/apps", "prod/db", "empty/sub", "Links/ops"])
+        checks["linksAndActualSessionsCoexist"] = items().contains { $0.isLink && $0.profileID == a.id } && items().contains { $0.profileID == c.id }
+        let collapse = items().first { $0.directory == "prod" }!
+        outline.collapseItem(collapse)
+        filter("192.0.2.10 ops")
+        checks["searchRetainsAncestorTree"] = items().contains { $0.directory == "prod/apps" } && items().contains { $0.profileID == a.id }
+        checks["searchFiltersUnrelatedSessions"] = !items().contains { $0.profileID == b.id || $0.profileID == c.id }
+        filter(""); checks["clearingSearchRestoresExpansion"] = !outline.isItemExpanded(items().first { $0.directory == "prod" })
+        filter("数据库"); checks["unicodeSearch"] = items().filter { $0.profileID != nil }.map(\.profileID) == [b.id]
+        filter("PRODUCTION"); checks["caseInsensitiveSearch"] = items().contains { $0.profileID == a.id }
+        filter("no-such-session"); checks["noResults"] = items().isEmpty
+        filter(String(repeating: "x", count: 4200)); checks["overlongSearchRejected"] = items().isEmpty
+        filter("Links/ops"); checks["linkDirectorySearch"] = items().contains { $0.isLink }
+        var opened: UUID?; let originalOpen = sidebar.onOpen; sidebar.onOpen = { opened = $0 }
+        if let row = (0..<outline.numberOfRows).first(where: { (outline.item(atRow: $0) as? SessionSidebar.Node)?.isLink == true }) {
+            outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false); sidebar.activateSelected()
+        }
+        checks["linkOpensSourceProfile"] = opened == a.id
+        filter("数据库"); opened = nil
+        _ = sidebar.control(sidebar.search, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:)))
+        checks["searchReturnOpensFirstResult"] = opened == b.id
+        sidebar.onOpen = originalOpen
+        filter(""); workspace.newBlankTab(); let pane = workspace.selectedTab!.activePane
+        let before = workspace.tabs.map(\.id)
+        workspace.window?.makeFirstResponder(sidebar.search)
+        workspace.toggleSessionSidebar(); workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        checks["hideRestoresTerminalSpace"] = workspace.sidebarWidth?.constant == 0 && workspace.sidebarContainer?.isHidden == true
+        checks["hideRestoresInputFocus"] = workspace.window?.firstResponder === pane.terminal
+        checks["toggleDoesNotReconnect"] = workspace.tabs.map(\.id) == before && workspace.selectedTab?.activePane === pane
+        checks["visibilityRemembered"] = !SessionSidebarPreferences.visible
+        workspace.toggleSessionSidebar(); checks["showFocusesSearch"] = sidebar.search.currentEditor() === workspace.window?.firstResponder
+        workspace.setFocusFullscreenChrome(true); checks["focusModeHidesSidebar"] = workspace.sidebarContainer?.isHidden == true && workspace.sessionSidebarVisible
+        workspace.setFocusFullscreenChrome(false); checks["focusModeRestoresSidebar"] = workspace.sidebarContainer?.isHidden == false
+        let defaultKey = KeyboardShortcut(11, KeyboardShortcut.command | KeyboardShortcut.shift)
+        checks["defaultShortcut"] = SessionSidebarPreferences.shortcuts(KeyboardShortcuts()).action(for: defaultKey) == .sessionSidebar
+        let custom = KeyboardShortcut(11, KeyboardShortcut.command | KeyboardShortcut.option)
+        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+        func edit(apply: Bool) {
+            let timer = Timer(timeInterval: 0.15, repeats: false) { _ in
+                guard let root = NSApp.modalWindow?.contentView,
+                      let tabs = views(root).compactMap({ $0 as? NSTabView }).first,
+                      let shortcuts = tabs.tabViewItems.compactMap({ $0.view as? ShortcutSettingsView }).first else { checks["shortcutEditorExists"] = false; NSApp.abortModal(); return }
+                tabs.selectTabViewItem(withIdentifier: "shortcuts")
+                shortcuts.selectAction(.sessionSidebar); shortcuts.setCandidate(custom); shortcuts.assign()
+                checks["shortcutEditorAssigns"] = shortcuts.settings.bindings(for: .sessionSidebar) == [custom]
+                views(root).compactMap { $0 as? NSButton }.first { $0.title == (apply ? "应用" : "取消") }?.performClick(nil)
+            }
+            RunLoop.main.add(timer, forMode: .common); RunLoop.main.add(timer, forMode: .modalPanel); workspace.showPreferences()
+        }
+        edit(apply: false); checks["cancelKeepsShortcut"] = SessionSidebarPreferences.shortcuts(KeyboardShortcuts()).action(for: defaultKey) == .sessionSidebar
+        edit(apply: true)
+        checks["customShortcutSavedLocally"] = SessionSidebarPreferences.shortcuts(KeyboardShortcuts()).action(for: custom) == .sessionSidebar
+        checks["shortcutNotInSharedConfiguration"] = workspace.configuration.preferences.keyboardShortcuts.overrides[ShortcutAction.sessionSidebar.rawValue] == nil && (try? workspace.store.load().preferences.keyboardShortcuts.overrides[ShortcutAction.sessionSidebar.rawValue]) == nil
+        workspace.window?.makeKeyAndOrderFront(nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command,.option], timestamp: 0, windowNumber: workspace.window!.windowNumber, context: nil, characters: "b", charactersIgnoringModifiers: "b", isARepeat: false, keyCode: 11) {
+            let visible = workspace.sessionSidebarVisible
+            checks["shortcutWindowIsKey"] = workspace.window!.isKeyWindow
+            checks["shortcutModalDismissed"] = NSApp.modalWindow == nil
+            checks["shortcutEffectiveBinding"] = SessionSidebarPreferences.shortcuts(workspace.configuration.preferences.keyboardShortcuts).action(for: KeyboardShortcut(event: event)) == .sessionSidebar
+            checks["shortcutActionAvailable"] = workspace.validateMenuItem(NSMenuItem(title: "", action: ShortcutAction.sessionSidebar.selector, keyEquivalent: ""))
+            checks["windowShortcutHandled"] = workspace.window!.performKeyEquivalent(with: event)
+            checks["windowShortcutTogglesSidebar"] = workspace.sessionSidebarVisible != visible
+        }
+        var conflicts = KeyboardShortcuts(); conflicts.overrides[ShortcutAction.newBlank.rawValue] = .init(defaultKey)
+        SessionSidebarPreferences.saveShortcut(nil)
+        checks["existingCustomKeyTakesPriority"] = SessionSidebarPreferences.shortcuts(conflicts).action(for: defaultKey) == .newBlank
+        var renamed = workspace.configuration; renamed.profiles[0].name = "Renamed fixture"; workspace.receiveConfiguration(renamed)
+        filter("Renamed"); checks["configurationRefreshIsLive"] = items().contains { $0.title == "Renamed fixture" }
+        renamed.profiles.removeAll { $0.id == a.id }; workspace.receiveConfiguration(renamed)
+        checks["deletedTargetsDisappear"] = !items().contains { $0.profileID == a.id }
+        let report: [String: Any] = ["passed": checks.values.allSatisfy { $0 }, "checks": checks]
+        if let path = ProcessInfo.processInfo.environment["OSHELL_SIDEBAR_OUTPUT"] { try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted,.sortedKeys]).write(to: URL(fileURLWithPath: path)) }
+        workspace.shutdown(); NSApp.terminate(nil)
+    }
+}

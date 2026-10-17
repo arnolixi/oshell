@@ -34,6 +34,9 @@ independent terminals. Other platforms retain their existing allocation path.
 The host can clear optional shared CoreText/font/color drawing caches when idle.
 Bounded live-cursor line text access supports prompt inspection independently
 of the scrolled viewport, resolving wide cells and grapheme storage correctly.
+The host can supply literal word-selection delimiters. Word selection and drag
+extension follow those boundaries across soft wraps, including wide-character
+continuations and the padding before a wrapped wide character.
 
 lrzsz 0.12.20
 https://www.ohse.de/uwe/software/lrzsz.html

@@ -35,7 +35,7 @@ public enum ShortcutAction: String, Codable, CaseIterable {
     case zoomPane, nextPane, previousPane, quickSwitch, focusFullscreen
     case tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tabNumber
     case newGroup, showGroups, arrangeTabs, arrangeHorizontal, arrangeVertical, arrangeTiled
-    case links, quickSend, focusQuickSend, composer, syncInput, stopSync, files, quickCommands, highlights, appearance, hide, quit, minimize
+    case sessionSidebar, links, quickSend, focusQuickSend, composer, syncInput, stopSync, files, quickCommands, highlights, appearance, hide, quit, minimize
     public var title: String {
         if let number { return "跳到当前分组标签 \(number)" }
         switch self {
@@ -78,6 +78,7 @@ public enum ShortcutAction: String, Codable, CaseIterable {
         case .arrangeHorizontal: return "水平排列"
         case .arrangeVertical: return "垂直排列"
         case .arrangeTiled: return "瓷砖排列"
+        case .sessionSidebar: return "显示 / 隐藏会话列表（本机）"
         case .links: return "显示 / 隐藏链接栏"
         case .quickSend: return "显示 / 隐藏快速发送栏"
         case .focusQuickSend: return "定位快速发送栏"
@@ -101,6 +102,7 @@ public enum ShortcutAction: String, Codable, CaseIterable {
         switch self {
         case .newWindow: return [.init(45,cmd|shift)]
         case .settings: return [.init(43,cmd)]
+        case .sessionSidebar: return [.init(11,cmd|shift)]
         case .sessionManager: return [.init(31,cmd|shift)]
         case .connectSelected: return [.init(36,cmd)]
         case .newSession: return [.init(45,cmd)]
@@ -146,7 +148,7 @@ public struct KeyboardShortcuts: Codable, Equatable {
         if let override = overrides[action.rawValue] { return override.shortcut.flatMap { $0.isValid ? [$0] : nil } ?? [] }
         // Newly introduced defaults must not invalidate existing customized
         // configurations when upgrading or silently take over their keys.
-        if [.zoomPane, .nextPane, .previousPane, .quickSwitch, .focusFullscreen].contains(action) {
+        if [.zoomPane, .nextPane, .previousPane, .quickSwitch, .focusFullscreen, .sessionSidebar].contains(action) {
             return action.defaults.filter { binding in !overrides.values.contains(where: { $0.shortcut == binding }) }
         }
         return action.defaults

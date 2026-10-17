@@ -25,6 +25,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     private var arrangingView: TabArrangementView?
     let idleMemoryReclaimer = IdleMemoryReclaimer()
     let terminalHost = TabDropHost()
+    let sessionSidebar = SessionSidebar(), sessionSidebarButton = NSButton()
+    var sessionSidebarVisible = SessionSidebarPreferences.visible
+    weak var sidebarContainer: NSView?
+    var sidebarWidth: NSLayoutConstraint?
     var isFocusFullscreen = false
     var focusFullscreenRequested = false
     var fullscreenTransitionInProgress = false
@@ -94,6 +98,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         guard startupDecision == nil else { return }
         if allowed && !loadFailed { BiometricUnlock.shared.invalidateIfChanged(configuration) }
         startupDecision = allowed; isSecurityUnlocked = allowed
+        // Protected startup builds the toolbar while locked. Refresh as soon as
+        // unlock completes, even when there are no tabs or updater notifications.
+        // Unprotected startup may reach here before buildInterface().
+        if topToolbar != nil { refreshToolbarActions(); refreshSessionSidebar() }
         let callbacks = startupWaiters; startupWaiters.removeAll()
         callbacks.forEach { $0(allowed) }
     }
@@ -118,7 +126,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         window.delegate = self; window.center(); window.setFrameAutosaveName(CommandLine.arguments.contains("--memory-profile") ? "OShell.memory-profile" : "OShell.main")
         quickSendScope = configuration.preferences.quickSendScope
         ApplicationAppearance.apply(configuration.preferences.interfaceTheme)
-        ShortcutRuntime.current = configuration.preferences.keyboardShortcuts
+        ShortcutRuntime.current = SessionSidebarPreferences.shortcuts(configuration.preferences.keyboardShortcuts)
         buildInterface(); rebuildQuickLinks(); refreshSelection()
         quickSendVisibilityObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, self.quickSendScope == .visible, let clip = note.object as? NSClipView, clip.window === self.window, !self.quickSendRefreshPending else { return }
@@ -182,7 +190,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         tabGroupButton.toolTip = "新建、命名和显示/隐藏标签组；隐藏不会断开连接"
         let tools = NSPopUpButton(frame: .zero, pullsDown: true); tools.bezelStyle = .texturedRounded
         let toolsMenu = NSMenu(); toolsMenu.addItem(withTitle: "工具", action: nil, keyEquivalent: "")
-        for (title, action) in [("专注全屏", #selector(toggleFocusFullscreen)), ("快捷链接栏", #selector(toggleSessionLinkBar)), ("快速发送栏", #selector(toggleQuickSendBar)), ("撰写窗", #selector(toggleComposer)), ("同步输入…", #selector(configureSyncInput)), ("停止同步输入", #selector(stopSyncInput)), ("快速命令管理器…", #selector(showQuickCommands)), ("文件管理…", #selector(showFiles)), ("突出显示集…", #selector(showHighlights))] {
+        for (title, action) in [("会话列表", #selector(toggleSessionSidebar)), ("专注全屏", #selector(toggleFocusFullscreen)), ("快捷链接栏", #selector(toggleSessionLinkBar)), ("快速发送栏", #selector(toggleQuickSendBar)), ("撰写窗", #selector(toggleComposer)), ("同步输入…", #selector(configureSyncInput)), ("停止同步输入", #selector(stopSyncInput)), ("快速命令管理器…", #selector(showQuickCommands)), ("文件管理…", #selector(showFiles)), ("突出显示集…", #selector(showHighlights))] {
             toolsMenu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
         }
         tools.menu = toolsMenu
@@ -196,7 +204,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         updateButton.target = self; updateButton.action = #selector(checkForUpdates)
         updateButton.image = NSImage(named: NSImage.refreshTemplateName)
         updateButton.imagePosition = .imageLeading; updateButton.bezelStyle = .texturedRounded
-        let toolbar = WorkspaceToolbar(views: [connect, quickButton, new, local, files, currentPropertiesButton, defaultPropertiesButton, tools, tabGroupButton, splitButton, arrangementButton, syncIndicator, stopSyncButton, NSView(), updateButton, find, recordButton, settings])
+        sessionSidebarButton.image = NSImage(oshellSymbolName: "sidebar.left", accessibilityDescription: "会话列表")
+        sessionSidebarButton.bezelStyle = .texturedRounded; sessionSidebarButton.setButtonType(.toggle)
+        sessionSidebarButton.target = self; sessionSidebarButton.action = #selector(toggleSessionSidebar)
+        sessionSidebarButton.identifier = .init("toolbar.sessionSidebar"); sessionSidebarButton.setAccessibilityLabel("显示 / 隐藏会话列表")
+        sessionSidebarButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        let toolbar = WorkspaceToolbar(views: [sessionSidebarButton, connect, quickButton, new, local, files, currentPropertiesButton, defaultPropertiesButton, tools, tabGroupButton, splitButton, arrangementButton, syncIndicator, stopSyncButton, NSView(), updateButton, find, recordButton, settings])
         topToolbar = toolbar
         toolbar.identifier = .init("workspace.toolbar")
         toolbar.compactButtons = [new, local, files, updateButton, find, recordButton]
@@ -206,7 +219,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         toolbar.orientation = .horizontal; toolbar.spacing = 6
         toolbar.detachesHiddenViews = true
         toolbar.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
-        let workspace = makeWorkspace()
+        let workspace = wrapWithSessionSidebar(makeWorkspace())
         syncIndicator.textColor = .systemOrange; syncIndicator.font = .systemFont(ofSize: 11, weight: .semibold)
         stopSyncButton.image = NSImage(oshellSymbolName: "stop.circle.fill", accessibilityDescription: "停止同步输入"); stopSyncButton.isBordered = false; stopSyncButton.oshellContentTintColor = .systemOrange; stopSyncButton.toolTip = "停止同步输入"; stopSyncButton.setAccessibilityLabel("停止同步输入"); stopSyncButton.target = self; stopSyncButton.action = #selector(stopSyncInput)
         syncIndicator.isHidden = true; stopSyncButton.isHidden = true
@@ -820,10 +833,17 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
     func editPreferences(appearanceSelected: Bool, updatesSelected: Bool = false) {
         let storageView = StorageSettingsView(workspace: self)
         let securityView = SecuritySettingsView(workspace: self)
-        guard let preferences = Dialogs.preferences(configuration.preferences, appearanceSelected: appearanceSelected, updatesSelected: updatesSelected, storageView: storageView, securityView: securityView) else { return }
+        var selectionView: TerminalSelectionSettingsView?
+        var localShortcut: ShortcutOverride?
+        guard let preferences = Dialogs.preferences(configuration.preferences, appearanceSelected: appearanceSelected, updatesSelected: updatesSelected, storageView: storageView, securityView: securityView, selectionView: { autoCopy, trim in
+            let view = TerminalSelectionSettingsView(autoCopy: autoCopy, trimOptions: trim); selectionView = view; return view
+        }, localShortcutSelection: { localShortcut = $0 }) else { return }
         if appUpdater.isBusy && preferences.updateRepository != configuration.preferences.updateRepository { Dialogs.message("更新正在进行，请完成或取消后再修改更新仓库。"); return }
         var value = configuration; value.preferences = preferences
         guard saveConfiguration(value) else { return }
+        if let selection = try? selectionView?.values() { selection.save() }
+        SessionSidebarPreferences.saveShortcut(localShortcut)
+        ShortcutRuntime.install(preferences.keyboardShortcuts); refreshSessionSidebar()
         do { try appUpdater.configure() } catch { Dialogs.message(error.localizedDescription) }
         let applied = configuration.preferences
         ApplicationAppearance.apply(applied.interfaceTheme)
@@ -905,6 +925,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         if menuItem.action == #selector(editCurrentSessionProfile) { return canEditCurrentSessionProfile }
         if [#selector(splitVertical), #selector(splitHorizontal)].contains(menuItem.action) { return isSecurityUnlocked && selectedTab != nil }
         if menuItem.action == #selector(showCurrentSessionProperties) { return selectedTab?.activePane.canEditLiveKeepAlive == true }
+        if menuItem.action == #selector(toggleSessionSidebar) { menuItem.state = sessionSidebarVisible ? .on : .off; return isSecurityUnlocked && !isFocusFullscreen && NSApp.modalWindow == nil }
         if menuItem.action == #selector(toggleSessionLinkBar) { menuItem.state = configuration.sessionLinks.visible ? .on : .off; return true }
         if menuItem.action == #selector(toggleQuickSendBar) { menuItem.state = quickSendBar.isHidden ? .off : .on; return true }
         if menuItem.action == #selector(changeArrangement(_:)) {
@@ -953,7 +974,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         configuration = value; configurationRevision += 1
         refreshTerminalChrome()
         refreshMasterWarning(); rebuildQuickLinks(); rebuildCommandMenu(); applyHighlightConfiguration()
-        sessionManager?.reload(); commandManager?.reload(); highlightManager?.reload()
+        sessionManager?.reload(); commandManager?.reload(); highlightManager?.reload(); refreshSessionSidebar()
         if preferencesChanged {
             tabs.flatMap { $0.layout.panes }.forEach { $0.apply(value.preferences) }
             quickSendBar.isHidden = !value.preferences.quickSendBarVisible
@@ -970,7 +991,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, NSMenuIte
         }
         shutdown(); return true
     }
-    func shutdown() { sessionManager?.close(); sessionManager = nil; commandManager?.close(); commandManager = nil; highlightManager?.close(); highlightManager = nil; customTabLayout = nil; groupStrips.removeAll(); terminalHost.clearPreview(); idleMemoryReclaimer.cancel(); fileWindows.forEach { $0.close() }; fileWindows = []; syncTargets = []; tabs.flatMap { $0.layout.panes }.forEach { $0.shutdown() }; tabs = []; selectedTab = nil }
+    func shutdown() { sessionSidebar.dispose(); sessionManager?.close(); sessionManager = nil; commandManager?.close(); commandManager = nil; highlightManager?.close(); highlightManager = nil; customTabLayout = nil; groupStrips.removeAll(); terminalHost.clearPreview(); idleMemoryReclaimer.cancel(); fileWindows.forEach { $0.close() }; fileWindows = []; syncTargets = []; tabs.flatMap { $0.layout.panes }.forEach { $0.shutdown() }; tabs = []; selectedTab = nil }
     #if OSHELL_TEST_HARNESS
     var diagnosticSnapshot: [String: Any] {
         let panes = tabs.flatMap { $0.layout.panes }

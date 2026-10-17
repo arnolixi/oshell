@@ -87,11 +87,11 @@ enum BiometricUnlockTest {
                 PasswordVault.shared.configureProtection(workspace.configuration, reconcileBiometrics: false)
                 defer { try? BiometricUnlock.shared.disable() }
                 let currentScope = BiometricUnlock.shared.scope!
-                let keychain = BiometricKeychainStore()
-                let data = try keychain.read(account: currentScope)
-                checks["keychainContainsNoPlainMaster"] = data.range(of: Data(password.utf8)) == nil
+                let local = BiometricLocalStore()
+                let data = try local.read(account: currentScope)
+                checks["localRecordContainsNoPlainMaster"] = data.range(of: Data(password.utf8)) == nil
                 _ = try BiometricEnvelope.decode(data, scope: currentScope)
-                checks["keychainRecordIsEnclaveEnvelope"] = true
+                checks["localRecordIsEnclaveEnvelope"] = true
                 let context = LAContext(); context.interactionNotAllowed = true
                 do { _ = try BiometricCipher.open(data, scope: currentScope, context: context); checks["hardwareRefusesWithoutFingerprint"] = false } catch { checks["hardwareRefusesWithoutFingerprint"] = true }
                 context.invalidate()
@@ -115,7 +115,7 @@ enum BiometricUnlockTest {
                 workspace.showPreferences()
                 checks["cancelDoesNotDisableTouchID"] = BiometricUnlock.shared.enabled
                 try BiometricUnlock.shared.disable()
-                checks["explicitDisableRemovesKeychain"] = (try? keychain.read(account: currentScope)) == nil && !BiometricUnlock.shared.enabled
+                checks["explicitDisableRemovesLocalRecord"] = (try? local.read(account: currentScope)) == nil && !BiometricUnlock.shared.enabled
             }
 #else
             checks["legacyHasManualFallback"] = BiometricUnlock.shared.unavailableReason != nil

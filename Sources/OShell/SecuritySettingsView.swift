@@ -20,7 +20,7 @@ final class SecuritySettingsView: NSView {
             ? (BiometricUnlock.shared.unavailableReason ?? (originallyEnabled ? "已在此 Mac 启用。打开解锁窗口会自动验证指纹，也可手动输入主密码。" : "此 Mac 支持 Touch ID。勾选后点击“应用”，输入当前主密码完成启用。"))
             : "请先通过顶部“工具 → 设置主密码”启用主密码保护，再设置 Touch ID。")
         status.font = .systemFont(ofSize: 12); status.textColor = .secondaryLabelColor
-        let help = NSTextField(wrappingLabelWithString: "主密码加密后保存在本机系统钥匙串，解密时由 Secure Enclave 验证当前指纹。不会将主密码写入会话文件，也不会随 iCloud / WebDAV 同步。\n\n更换 Mac、变更指纹或主密码后需要重新启用。应用更新后若钥匙串需要重新授权，可先手动解锁，再关闭并重新开启本选项。请继续妥善保管主密码，指纹解锁不能用于恢复遗忘的主密码。")
+        let help = NSTextField(wrappingLabelWithString: "主密码经 Secure Enclave 保护后，以加密记录保存在本机私有目录；解密必须验证当前指纹。不保存明文，不写入会话文件，也不随 iCloud / WebDAV 同步。\n\n更换 Mac、变更指纹或主密码后需要重新启用。从旧钥匙串记录迁移失败时，请先手动解锁，再关闭并重新开启本选项；新记录无需在每次升级后授权钥匙串。请继续妥善保管主密码，指纹解锁不能用于恢复遗忘的主密码。")
         help.font = .systemFont(ofSize: 12); help.textColor = .secondaryLabelColor
         let stack = NSStackView(views: [title, touchID, status, help]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false; addSubview(stack)

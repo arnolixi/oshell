@@ -8,7 +8,7 @@ enum Dialogs {
     static func session(_ existing: SessionProfile? = nil, profiles: [SessionProfile] = [], directories: [String] = [], initialDirectory: String = "服务器", kind: SessionKind = .ssh, defaults: SessionDefaults = SessionDefaults(), proxies: [ProxyProfile] = [], manageProxies: (() -> [ProxyProfile])? = nil) -> SessionProfile? {
         SessionEditor(existing, profiles: profiles, directories: directories, initialDirectory: initialDirectory, kind: kind, defaults: defaults, proxies: proxies, manageProxies: manageProxies).run()
     }
-    static func preferences(_ current: Preferences, appearanceSelected: Bool = false, updatesSelected: Bool = false, storageView: StorageSettingsView? = nil, securityView: SecuritySettingsView? = nil) -> Preferences? {
+    static func preferences(_ current: Preferences, appearanceSelected: Bool = false, updatesSelected: Bool = false, storageView: StorageSettingsView? = nil, securityView: SecuritySettingsView? = nil, selectionView: ((NSButton, NSView) -> TerminalSelectionSettingsView)? = nil, localShortcutSelection: ((ShortcutOverride?) -> Void)? = nil) -> Preferences? {
         let font = NSPopUpButton()
         TerminalFontCatalog.populate(font, selected: current.fontName)
         let size = NSPopUpButton(); [11, 12, 13, 14, 15, 16, 18, 20, 24, 26].forEach { size.addItem(withTitle: String($0)) }
@@ -28,15 +28,16 @@ enum Dialogs {
         trimLeading.state = current.copyTrimLeadingWhitespace ? .on : .off; trimLeading.identifier = .init("settings.copy.trimLeading")
         for control in [trimTrailing, trimLeading] { control.toolTip = "仅清理整段选中文本的边界空白（空格、制表符、换行），保留中间各行缩进；适用于手动复制和选中自动复制。" }
         let trimOptions = NSStackView(views: [trimTrailing, trimLeading]); trimOptions.spacing = 24; trimOptions.alignment = .centerY
+        let selection = selectionView?(autoCopy, trimOptions) ?? TerminalSelectionSettingsView(autoCopy: autoCopy, trimOptions: trimOptions)
         let rightPaste = NSButton(checkboxWithTitle: "鼠标右键粘贴（Shift+右键保留菜单）", target: nil, action: nil); rightPaste.state = current.rightClickPaste ? .on : .off
         let previewPaste = NSButton(checkboxWithTitle: "多行粘贴先预览确认；单行直接粘贴", target: nil, action: nil); previewPaste.state = current.confirmMultilinePaste ? .on : .off
         previewPaste.identifier = .init("settings.paste.preview")
-        let shortcutView = ShortcutSettingsView(settings: current.keyboardShortcuts)
+        let shortcutView = ShortcutSettingsView(settings: SessionSidebarPreferences.shortcuts(current.keyboardShortcuts))
         defer { shortcutView.dispose() }
         let appearanceView = AppearanceSettingsView(preferences: current)
         defer { appearanceView.dispose() }
         let tabs = NSTabView(frame: NSRect(x: 0, y: 0, width: 840, height: 550))
-        let basic = GeneralSettingsView(font: font, size: size, history: history, gpu: gpu, input: [zmodem, autoCopy, trimOptions, rightPaste, previewPaste])
+        let basic = GeneralSettingsView(font: font, size: size, history: history, gpu: gpu, input: [zmodem, rightPaste, previewPaste])
         let general = NSTabViewItem(identifier: "general"); general.label = "常规"; general.view = basic; tabs.addTabViewItem(general)
         let colors = NSTabViewItem(identifier: "appearance"); colors.label = "主题与配色"; colors.view = appearanceView; tabs.addTabViewItem(colors)
         let updatesView = UpdateSettingsView(preferences: current)
@@ -45,6 +46,7 @@ enum Dialogs {
         if let storageView {
             let storage = NSTabViewItem(identifier: "storage"); storage.label = "数据与同步"; storage.view = storageView; tabs.addTabViewItem(storage)
         }
+        let selectionTab = NSTabViewItem(identifier: "selection"); selectionTab.label = "选择"; selectionTab.view = selection; tabs.addTabViewItem(selectionTab)
         let textView = TerminalTextSettingsView(current)
         let textTab = NSTabViewItem(identifier: "text"); textTab.label = "文字"; textTab.view = textView; tabs.addTabViewItem(textTab)
         let clockTab = NSTabViewItem(identifier: "clock"); clockTab.label = "时钟"; clockTab.view = clock; tabs.addTabViewItem(clockTab)
@@ -57,7 +59,7 @@ enum Dialogs {
         var prefs = current
         while true {
             guard dialog.runModal() == .OK else { return nil }
-            do { prefs = try updatesView.values(updating: appearanceView.values(updating: current)); prefs.keyboardShortcuts = try shortcutView.values(); prefs.scrollback = try history.value(); try storageView?.validateSelection(); break }
+            do { prefs = try updatesView.values(updating: appearanceView.values(updating: current)); prefs.keyboardShortcuts = try shortcutView.values(); prefs.scrollback = try history.value(); try storageView?.validateSelection(); _ = try selection.values(); break }
             catch { Dialogs.message(error.localizedDescription) }
         }
         prefs.fontName = font.selectedItem?.representedObject as? String ?? ""
@@ -70,6 +72,7 @@ enum Dialogs {
         prefs.copyTrimLeadingWhitespace = trimLeading.state == .on; prefs.copyTrimTrailingWhitespace = trimTrailing.state == .on
         textView.apply(to: &prefs)
         clock.apply(to: &prefs)
+        localShortcutSelection?(prefs.keyboardShortcuts.overrides.removeValue(forKey: ShortcutAction.sessionSidebar.rawValue))
         prefs.clamp(); return prefs
     }
     static func message(_ text: String) {

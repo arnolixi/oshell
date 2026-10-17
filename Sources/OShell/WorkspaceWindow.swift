@@ -21,8 +21,8 @@ final class WorkspaceWindow: NSWindow {
         }
         let shortcut = KeyboardShortcut(event: event)
         guard workspace.isSecurityUnlocked, shortcut.isValid,
-              let action = workspace.configuration.preferences.keyboardShortcuts.action(for: shortcut) else { return false }
-        if action == .focusFullscreen && event.isARepeat { return true }
+              let action = SessionSidebarPreferences.shortcuts(workspace.configuration.preferences.keyboardShortcuts).action(for: shortcut) else { return false }
+        if [.focusFullscreen, .sessionSidebar].contains(action) && event.isARepeat { return true }
         return workspace.dispatchShortcut(action)
     }
     override func cancelOperation(_ sender: Any?) {

@@ -43,6 +43,7 @@ class SFTP(paramiko.SFTPServerInterface):
             handle = paramiko.SFTPHandle(flags)
             mode = 'r+b' if flags & os.O_RDWR else 'wb' if flags & os.O_WRONLY else 'rb'
             f = os.fdopen(fd, mode)
+            handle.stat = lambda: paramiko.SFTPAttributes.from_stat(os.fstat(f.fileno()))
             if flags & (os.O_RDWR | os.O_WRONLY): handle.writefile = f
             if flags & os.O_RDWR or not flags & os.O_WRONLY: handle.readfile = f
             return handle

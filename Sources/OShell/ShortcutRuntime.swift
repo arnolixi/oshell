@@ -57,6 +57,7 @@ extension ShortcutAction {
         case .newGroup: return #selector(WorkspaceController.newNamedTabGroup)
         case .showGroups: return #selector(WorkspaceController.showAllTabGroups)
         case .arrangeTabs, .arrangeHorizontal, .arrangeVertical, .arrangeTiled: return #selector(WorkspaceController.changeArrangement(_:))
+        case .sessionSidebar: return #selector(WorkspaceController.toggleSessionSidebar)
         case .links: return #selector(WorkspaceController.toggleSessionLinkBar)
         case .quickSend: return #selector(WorkspaceController.toggleQuickSendBar)
         case .focusQuickSend: return #selector(WorkspaceController.focusQuickSendBar)
@@ -83,6 +84,7 @@ extension ShortcutAction {
 enum ShortcutRuntime {
     static var current = KeyboardShortcuts()
     static func install(_ shortcuts: KeyboardShortcuts, menu: NSMenu? = NSApp.mainMenu) {
+        let shortcuts = SessionSidebarPreferences.shortcuts(shortcuts)
         current = shortcuts
         NSMenuItem.usesUserKeyEquivalents = false // App-local: the in-app configuration owns menu bindings.
         func update(_ menu: NSMenu) {

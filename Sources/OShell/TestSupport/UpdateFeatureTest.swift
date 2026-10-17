@@ -10,6 +10,45 @@ enum UpdateFeatureTest {
         func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
         func menuItems(_ menu: NSMenu) -> [NSMenuItem] { menu.items.flatMap { [$0] + ($0.submenu.map(menuItems) ?? []) } }
         do {
+            let master = "startup-update-fixture"
+            var protected = Configuration()
+            protected.masterPasswordVerifier = try MasterPasswordProtection.createVerifier(master)
+            protected.preferences.updateRepository = ""
+            let protectedStore = ConfigurationStore(directory: workspace.store.url.deletingLastPathComponent().appendingPathComponent("protected-update"))
+            let locked = WorkspaceController(store: protectedStore, configuration: protected)
+            checks["protectedStartupInitiallyDisablesUpdate"] = !locked.isSecurityUnlocked && !locked.updateButton.isEnabled && locked.tabs.isEmpty
+            var callbackReady = false
+            locked.whenStartupUnlocked { allowed in callbackReady = allowed && locked.updateButton.isEnabled }
+            let unlockTimer = Timer(timeInterval: 0.05, repeats: true) { _ in
+                guard let root = NSApp.modalWindow?.contentView,
+                      let field = views(root).compactMap({ $0 as? NSSecureTextField }).first else { return }
+                field.stringValue = master
+                views(root).compactMap { $0 as? NSButton }.first { $0.title == "解锁" }?.performClick(nil)
+            }
+            RunLoop.main.add(unlockTimer, forMode: .common); RunLoop.main.add(unlockTimer, forMode: .modalPanel)
+            checks["protectedStartupUnlockSucceeds"] = locked.unlockAtStartup(); unlockTimer.invalidate()
+            checks["unlockEnablesUpdateWithoutSession"] = locked.updateButton.isEnabled && locked.tabs.isEmpty && !locked.appUpdater.started
+            checks["unlockRefreshesBeforeCallbacks"] = callbackReady
+            checks["unlockKeepsSessionActionsDisabled"] = !locked.currentPropertiesButton.isEnabled && !locked.splitButton.isEnabled && locked.defaultPropertiesButton.isEnabled
+            var openedUpdateSettings = false
+            let settingsTimer = Timer(timeInterval: 0.05, repeats: true) { _ in
+                guard let window = NSApp.modalWindow, let root = window.contentView else { return }
+                let tabs = views(root).compactMap { $0 as? NSTabView }.first
+                openedUpdateSettings = tabs?.selectedTabViewItem?.identifier as? String == "updates"
+                _ = PopupKeyboard.dismiss(window: window)
+            }
+            RunLoop.main.add(settingsTimer, forMode: .common); RunLoop.main.add(settingsTimer, forMode: .modalPanel)
+            locked.updateButton.performClick(nil); settingsTimer.invalidate()
+            checks["freshUnlockedToolbarClickWorks"] = openedUpdateSettings && locked.tabs.isEmpty
+            locked.shutdown(); locked.window?.close()
+            let denied = WorkspaceController(store: protectedStore, configuration: protected)
+            denied.completeStartupUnlock(false)
+            checks["cancelledUnlockDoesNotEnableUpdate"] = !denied.updateButton.isEnabled && !denied.isSecurityUnlocked
+            denied.completeStartupUnlock(true)
+            checks["startupDecisionRemainsFinal"] = !denied.updateButton.isEnabled && !denied.isSecurityUnlocked
+            denied.shutdown(); denied.window?.close()
+            PasswordVault.shared.configureLocalStorage(directory: workspace.store.url.deletingLastPathComponent())
+            PasswordVault.shared.configureProtection(workspace.configuration, reconcileBiometrics: false)
             try workspace.appUpdater.configure()
             checks["emptyRepositoryDoesNotStartUpdater"] = !workspace.appUpdater.started
             let items = NSApp.mainMenu.map(menuItems) ?? []

@@ -5,7 +5,13 @@
 import argparse, json, os, plistlib, signal, subprocess, tempfile, uuid
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
-CASES = {'session-clipboard':'OSHELL_SESSION_CLIPBOARD_OUTPUT',
+CASES = {'file-resume':'OSHELL_FILE_RESUME_OUTPUT',
+ 'file-transfer-history':'OSHELL_FILE_HISTORY_OUTPUT',
+ 'session-sidebar':'OSHELL_SIDEBAR_OUTPUT',
+ 'terminal-selection':'OSHELL_SELECTION_OUTPUT',
+ 'local-prompt-editing':'OSHELL_LOCAL_PROMPT_OUTPUT',
+ 'biometric-local-store':'OSHELL_BIOMETRIC_LOCAL_OUTPUT',
+ 'session-clipboard':'OSHELL_SESSION_CLIPBOARD_OUTPUT',
  'file-window-keyboard':'OSHELL_FILE_WINDOW_KEYS_OUTPUT',
  'readme-settings': 'OSHELL_README_SETTINGS_OUTPUT',
  'readme-screenshots': 'OSHELL_README_OUTPUT',

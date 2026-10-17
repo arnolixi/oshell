@@ -100,12 +100,15 @@ enum CommandInputTest {
                 let preview = buttons.first { $0.identifier?.rawValue == "settings.paste.preview" }
                 checks["settingsReflectsOptOut"] = preview?.state == .off
                 preview?.state = .on
+                let tabs = views.compactMap { $0 as? NSTabView }.first
+                tabs?.selectTabViewItem(withIdentifier: "selection"); root.layoutSubtreeIfNeeded()
+                let selectionButtons = descendants(root).compactMap { $0 as? NSButton }
                 for id in ["settings.copy.trimLeading", "settings.copy.trimTrailing"] {
-                    let button = buttons.first { $0.identifier?.rawValue == id }
+                    let button = selectionButtons.first { $0.identifier?.rawValue == id }
                     checks[id + ".defaultOff"] = button?.state == .off
                     button?.state = .on
                 }
-                if let page = views.first(where: { $0 is GeneralSettingsView }) {
+                if let page = descendants(root).first(where: { $0 is TerminalSelectionSettingsView }) {
                     checks["copySettingsFitPage"] = descendants(page).filter { $0 is NSButton || $0 is NSTextField }.allSatisfy { page.bounds.contains($0.convert($0.bounds, to: page)) }
                 }
                 buttons.first { $0.title == "应用" }?.performClick(nil)

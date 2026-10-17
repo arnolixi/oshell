@@ -15,6 +15,11 @@ import Foundation
  */
 public class SelectionService: CustomDebugStringConvertible {
     var terminal: Terminal
+
+    /// Optional literal delimiters for the next word-selection gesture. An empty
+    /// set selects whitespace-separated tokens; nil retains SwiftTerm defaults.
+    /// The host updates this only on double-click so dragging keeps its rule.
+    public var wordDelimiters: Set<Character>?
     
     public init (terminal: Terminal)
     {
@@ -611,10 +616,65 @@ public class SelectionService: CustomDebugStringConvertible {
 
     let nullChar = Character(UnicodeScalar(0))
     
+    // OShell: scan displayed cells, not String offsets. Wide-character trailing
+    // cells belong to their leading cell. Only soft wraps join adjacent rows.
+    private func delimitedRange(at hit: Position, in buffer: Buffer, delimiters: Set<Character>) -> (Position, Position) {
+        let rows = buffer.lines.count, cols = terminal.cols
+        guard rows > 0, cols > 0 else { return (hit, hit) }
+        func leading(_ p: Position) -> Position {
+            var p = p
+            if p.col > 0 && buffer.getChar(atBufferRelative: p).width == 0 {
+                let previous = Position(col: p.col - 1, row: p.row)
+                if buffer.getChar(atBufferRelative: previous).width == 2 { p = previous }
+            }
+            return p
+        }
+        let position = leading(Position(col: min(cols - 1, max(0, hit.col)), row: min(rows - 1, max(0, hit.row))))
+        func isWideWrapPadding(_ p: Position) -> Bool {
+            p.col == cols - 1 && p.row + 1 < rows && buffer.lines[p.row + 1].isWrapped
+                && buffer.getChar(atBufferRelative: p).code == 0
+                && buffer.getChar(atBufferRelative: p).width == 1
+                && buffer.getChar(atBufferRelative: Position(col: 0, row: p.row + 1)).width == 2
+        }
+        func previous(_ p: Position) -> Position? {
+            if p.col > 0 { return leading(Position(col: p.col - 1, row: p.row)) }
+            if p.row > 0 && buffer.lines[p.row].isWrapped {
+                let edge = Position(col: cols - 1, row: p.row - 1)
+                return leading(isWideWrapPadding(edge) && cols > 1 ? Position(col: cols - 2, row: p.row - 1) : edge)
+            }
+            return nil
+        }
+        func after(_ p: Position) -> Position {
+            Position(col: min(cols, p.col + max(1, Int(buffer.getChar(atBufferRelative: p).width))), row: p.row)
+        }
+        func next(_ p: Position) -> Position? {
+            let end = after(p)
+            if end.col < cols && !isWideWrapPadding(end) { return end }
+            if p.row + 1 < rows && buffer.lines[p.row + 1].isWrapped { return Position(col: 0, row: p.row + 1) }
+            return nil
+        }
+        let selected = character(at: position, in: buffer)
+        // Select a delimiter itself rather than silently selecting nothing.
+        if selected == nullChar || delimiters.contains(selected) { return (position, after(position)) }
+        let whitespace = selected.isWhitespace
+        func included(_ p: Position) -> Bool {
+            let ch = character(at: p, in: buffer)
+            return ch != nullChar && (whitespace ? ch.isWhitespace : (!ch.isWhitespace && !delimiters.contains(ch)))
+        }
+        var first = position, last = position
+        while let p = previous(first), included(p) { first = p }
+        while let p = next(last), included(p) { last = p }
+        return (first, after(last))
+    }
+
     /**
      * Extends a position to the nearest word boundary based on the character at that position
      */
     func extendToWordBoundary(position: Position, in buffer: Buffer, direction: Int) -> Position {
+        if let delimiters = wordDelimiters {
+            let range = delimitedRange(at: position, in: buffer, delimiters: delimiters)
+            return direction < 0 ? range.0 : range.1
+        }
         let ch = character (at: position, in: buffer)
         var includeFunc: (Character) -> Bool
         
@@ -667,6 +727,10 @@ public class SelectionService: CustomDebugStringConvertible {
 //            row: max (min (uncheckedPosition.row, buffer.rows-1+buffer.yDisp), buffer.yDisp))
         let position = Position (col: (min (terminal.cols, max (uncheckedPosition.col, 0))),
                                  row: (max (uncheckedPosition.row, 0)))
+        if let delimiters = wordDelimiters {
+            let range = delimitedRange(at: position, in: buffer, delimiters: delimiters)
+            start = range.0; end = range.1
+        } else {
         switch character (at: position, in: buffer) {
         case Character(UnicodeScalar(0)):
             simpleScanSelection (from: position, in: buffer) { ch in ch == nullChar }
@@ -691,6 +755,7 @@ public class SelectionService: CustomDebugStringConvertible {
             // For other characters, we just stop there
             start = position
             end = position
+        }
         }
         selectionMode = .word
         wordSelectionAnchor = (start, end)

@@ -21,7 +21,7 @@ public struct LocalToolCommand: Equatable {
     public static var names: [String] { groups.flatMap(\.names) }
     public static var help: String {
         "本机网络工具：\r\n" + groups.map { $0.title + "：" + $0.names.joined(separator: "、") }.joined(separator: "\r\n") +
-        "\r\ntools 查看安装状态与路径。支持参数和引号，不解析管道、重定向或变量。Ctrl+C 中断当前操作；exit / quit 关闭标签，⇧⌘R 重连原会话。"
+        "\r\ntools 查看安装状态与路径。支持参数和引号，不解析管道、重定向或变量。Ctrl+C 中断当前操作；exit / quit 关闭标签，⇧⌘R 重连原会话。\r\n输入编辑：Ctrl+A/E 行首/行尾，↑/↓ 历史，Ctrl+R 搜索（Ctrl+G 取消，Esc 编辑，Enter 执行），Tab 命令补全；Ctrl+W 删词、Ctrl+Y 恢复删除、Ctrl+L 清屏。"
     }
     public static func availability() -> String {
         names.map { name in

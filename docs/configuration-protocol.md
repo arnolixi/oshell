@@ -19,3 +19,13 @@ python3 scripts/test-sync-interop.py --native-source /path/to/OShell
 - OShell Desktop：`89aa37cd88a0362b05b2329e28c72543984c1c3d`。
 - 规范修订：2.0（2026-10-17）。
 - 字段合同 SHA-256：`9a82a335e40d315f9a54455c874f87bcaea0fe3551a69770d67955f439261657`。
+
+## 0.2.76 发布验证基线
+
+- OShell：`v0.2.76`，共享协议与字段合同保持 v2 不变。
+- OShell Desktop：`28571b3a41d15777f79ae77f2658755d0abebaee`；验证时工作区干净，未修改或发布该项目。
+- 规范修订：2.0（2026-10-17）；验证日期：2026-10-18。
+- 字段合同 SHA-256：`9a82a335e40d315f9a54455c874f87bcaea0fe3551a69770d67955f439261657`。
+- Swift 核心源码摘要：`c5cadb3869a544e059e91a165806704a02a654e7fae6ef2881dbf87f7b1870a7`。
+- Go 原生兼容样本及 `test-sync-interop.py` 真实双向验证通过：Swift/Go 往返、多节点目录与 WebDAV 同步、首次读取无多余改写、完整共享字段与未知字段拒绝、会话归档使用同一字段定义。
+- 本次侧栏专用快捷键、显示状态和鼠标选词偏好留在 Mac 本机，不进入共享配置；Touch ID 记录、命令历史、文件传输记录及续传检查点不加入同步。

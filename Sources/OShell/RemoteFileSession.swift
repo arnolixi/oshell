@@ -23,6 +23,14 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
     private let status = NSTextField(labelWithString: "选择连接以浏览远程文件。"), progress = NSProgressIndicator()
     private let cancelButton = NSButton(title: "取消传输", target: nil, action: nil)
     private let transferMode = NSPopUpButton()
+    let transferHistory = FileTransferHistory()
+    private lazy var historyView = FileTransferHistoryView(history: transferHistory)
+    private let historyButton = NSButton(title: "传输记录（0）", target: nil, action: nil)
+    private let historyHost = NSView()
+    private var historyHeight: NSLayoutConstraint!
+    private var historyVisible = false
+    private var resumeJobs = [UUID: ResumableFileTransfer]()
+    private var pendingResume: UUID?
     private let rateControl = NSPopUpButton()
     private(set) var transferRateLimit = 0
     private let ratePresets = [0, 128*1024, 512*1024, 1024*1024, 5*1024*1024, 10*1024*1024]
@@ -89,10 +97,27 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         rateControl.target = self; rateControl.action = #selector(changeTransferRate)
         rateControl.widthAnchor.constraint(equalToConstant: 174).isActive = true
         refreshRateControl()
-        let bottom = NSStackView(views: [status, NSView(), rateControl, progress, cancelButton]); bottom.spacing = 8
-        [top, tools, scroll, hint, bottom].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; content.addSubview($0) }
-        NSLayoutConstraint.activate([top.topAnchor.constraint(equalTo: content.topAnchor, constant: 12), top.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12), top.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12), tools.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10), tools.leadingAnchor.constraint(equalTo: top.leadingAnchor), tools.trailingAnchor.constraint(equalTo: top.trailingAnchor), scroll.topAnchor.constraint(equalTo: tools.bottomAnchor, constant: 10), scroll.leadingAnchor.constraint(equalTo: top.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: top.trailingAnchor), scroll.bottomAnchor.constraint(equalTo: hint.topAnchor, constant: -8), hint.leadingAnchor.constraint(equalTo: top.leadingAnchor), hint.trailingAnchor.constraint(lessThanOrEqualTo: top.trailingAnchor), hint.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -8), bottom.leadingAnchor.constraint(equalTo: top.leadingAnchor), bottom.trailingAnchor.constraint(equalTo: top.trailingAnchor), bottom.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12)])
+        historyButton.bezelStyle = .rounded; historyButton.target = self; historyButton.action = #selector(toggleHistory)
+        historyButton.identifier = .init("files.transferHistory.toggle")
+        historyView.translatesAutoresizingMaskIntoConstraints = false; historyHost.addSubview(historyView)
+        NSLayoutConstraint.activate([historyView.topAnchor.constraint(equalTo: historyHost.topAnchor), historyView.leadingAnchor.constraint(equalTo: historyHost.leadingAnchor), historyView.trailingAnchor.constraint(equalTo: historyHost.trailingAnchor), historyView.heightAnchor.constraint(equalToConstant: 180)])
+        historyHeight = historyHost.heightAnchor.constraint(equalToConstant: 0); historyHost.isHidden = true
+        transferHistory.observe { [weak self] in
+            guard let self, !self.closed else { return }
+            let retained = Set(self.transferHistory.snapshot.map(\.id)); self.resumeJobs = self.resumeJobs.filter { retained.contains($0.key) }
+            self.historyButton.title = "传输记录（\(self.transferHistory.snapshot.count)）"; self.historyView.reload()
+        }
+        historyView.canPause = { [weak self] in self?.pausableRecord != nil }
+        historyView.canResume = { [weak self] in self?.canResumeTransfer($0) == true }
+        historyView.onPause = { [weak self] in self?.pauseTransfer() }
+        historyView.onResume = { [weak self] in self?.resumeTransfer($0) }
+        let bottom = NSStackView(views: [historyButton, status, NSView(), rateControl, progress, cancelButton]); bottom.spacing = 8
+        [top, tools, scroll, historyHost, hint, bottom].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; content.addSubview($0) }
+        NSLayoutConstraint.activate([top.topAnchor.constraint(equalTo: content.topAnchor, constant: 12), top.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12), top.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12), tools.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10), tools.leadingAnchor.constraint(equalTo: top.leadingAnchor), tools.trailingAnchor.constraint(equalTo: top.trailingAnchor), scroll.topAnchor.constraint(equalTo: tools.bottomAnchor, constant: 10), scroll.leadingAnchor.constraint(equalTo: top.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: top.trailingAnchor), scroll.bottomAnchor.constraint(equalTo: historyHost.topAnchor, constant: -8), historyHost.leadingAnchor.constraint(equalTo: top.leadingAnchor), historyHost.trailingAnchor.constraint(equalTo: top.trailingAnchor), historyHost.bottomAnchor.constraint(equalTo: hint.topAnchor, constant: -4), historyHeight, hint.leadingAnchor.constraint(equalTo: top.leadingAnchor), hint.trailingAnchor.constraint(lessThanOrEqualTo: top.trailingAnchor), hint.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -8), bottom.leadingAnchor.constraint(equalTo: top.leadingAnchor), bottom.trailingAnchor.constraint(equalTo: top.trailingAnchor), bottom.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12)])
     }
+    @objc func toggleHistory() { showHistory(!historyVisible) }
+    private func showHistory(_ visible: Bool) { historyVisible = visible; historyHost.isHidden = !visible; historyHeight.constant = visible ? 180 : 0; historyView.updateActions() }
+    private var historyTransport: String { profile?.kind == .ftp ? "FTP" : (transferMode.indexOfSelectedItem == 1 ? "SCP" : "SFTP") }
     func connect(_ profile: SessionProfile, directory: String? = nil, uploading: [URL] = [], password: String? = nil, connectionGroup: SSHConnectionGroup? = nil) {
         guard let workspace, !busy, !closed, profile.kind != .local else { return }
         var profile = profile
@@ -102,6 +127,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         let lease: SSHConnectionLease?
         do { lease = try connectionGroup.map { try SSHConnectionLease(group: $0, profile: profile) } }
         catch { reportError(error); return }
+        if let old = self.profile, old.id != profile.id || old.host != profile.host || old.port != profile.port || old.username != profile.username || old.kind != profile.kind { transferHistory.reset(); resumeJobs.removeAll(); pendingResume = nil }
         self.profile = profile; pendingUploads = uploading; launchPassword = connectionGroup == nil ? password : nil
         identityID = UUID(); let identity = identityID
         displayIP = FileSessionAddress.literal(profile.host)
@@ -153,6 +179,7 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         } catch { reportError(error) }
     }
     private func reportError(_ error: Error) {
+        pendingResume = nil
         status.stringValue = error.localizedDescription; onStateChanged?()
         if window != nil && !closed { Dialogs.message((profile?.name ?? "文件会话") + "：" + error.localizedDescription) }
     }
@@ -166,18 +193,23 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
             try backend.connect(); let path = try backend.canonicalPath(destination); return (path, try backend.list(path))
         } completion: { [weak self] value in
             guard let self else { return }; self.connected = true; self.display(value)
+            if let id = self.pendingResume { self.pendingResume = nil; self.runResume(id); return }
             let pending = self.pendingUploads; self.pendingUploads = []; if !pending.isEmpty { self.upload(pending, to: self.directory) }
         }
     }
-    private func perform<T>(_ label: String, id: UUID = UUID(), operation: @escaping (RemoteFileBackend) throws -> T, completion: @escaping (T) -> Void) {
+    private func perform<T>(_ label: String, id: UUID = UUID(), historyBatch: UUID? = nil, operation: @escaping (RemoteFileBackend) throws -> T, completion: @escaping (T) -> Void) {
         guard !busy, !closed, let backend else { return }
         busy = true; cancelButton.isEnabled = true; status.stringValue = label; progress.isIndeterminate = true; progress.startAnimation(nil)
-        let token = id; operationID = token; onStateChanged?()
+        let token = id; operationID = token; onStateChanged?(); historyView.updateActions()
+        let history = transferHistory
         worker.async { [weak self] in
             let result = Result { try operation(backend) }
+            if let historyBatch {
+                switch result { case .success: history.finishBatch(historyBatch, error: nil); case .failure(let error): history.finishBatch(historyBatch, error: error) }
+            }
             DispatchQueue.main.async {
                 guard let self, !self.closed, self.operationID == token else { return }
-                self.busy = false; self.cancelButton.isEnabled = false; self.progress.stopAnimation(nil); self.onStateChanged?()
+                self.busy = false; self.cancelButton.isEnabled = false; self.progress.stopAnimation(nil); if historyBatch != nil { self.scp = nil }; self.onStateChanged?(); self.historyView.updateActions()
                 switch result {
                 case .success(let value): self.status.stringValue = "完成"; completion(value)
                 case .failure(let error): self.reportError(error)
@@ -226,11 +258,14 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         }
         refreshRateControl()
     }
-    private func progressCallback(_ name: String, token: UUID) -> (UInt64, UInt64) -> Void {
+    private func progressCallback(_ name: String, token: UUID, recordID: UUID? = nil) -> (UInt64, UInt64) -> Void {
         var last = DispatchTime.now().uptimeNanoseconds, previousBytes: UInt64 = 0
+        let history = transferHistory
         return { [weak self] bytes, total in
             let now = DispatchTime.now().uptimeNanoseconds
-            guard now - last > 100_000_000 || bytes == total else { return }
+            let refresh = now - last > 100_000_000 || bytes == total || bytes == 0
+            if let recordID { history.progress(recordID, bytes: bytes, total: total, notify: refresh) }
+            guard refresh else { return }
             let delta = bytes >= previousBytes ? bytes-previousBytes : bytes
             let speed = Double(delta) / max(0.001,Double(now-last)/1_000_000_000)
             last = now; previousBytes = bytes
@@ -301,16 +336,28 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         let input = NSTextField(string: destination); input.frame = NSRect(x: 0, y: 0, width: 500, height: 26); alert.accessoryView = input; alert.addButton(withTitle: "上传"); alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let target = input.stringValue, useSCP = sshProfile != nil && transferMode.indexOfSelectedItem == 1
-        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup, rateLimit: transferRateLimit) } } catch { Dialogs.message(error.localizedDescription); return }
-        let scp = self.scp, token = UUID()
-        perform("正在上传…", id: token) { [weak self] backend in
+        let token = UUID(), history = transferHistory
+        let records = urls.map { history.enqueue(batch: token, upload: true, transport: historyTransport, local: $0.path, remote: RemotePath.join(target, $0.lastPathComponent)) }
+        showHistory(true)
+        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup, rateLimit: transferRateLimit) } } catch { history.finishBatch(token, error: error); Dialogs.message(error.localizedDescription); return }
+        let scp = self.scp
+        perform("正在上传…", id: token, historyBatch: token) { [weak self] backend in
             var names = Set(try backend.list(target).map(\.name))
-            for url in urls {
+            for (index, url) in urls.enumerated() {
+                let record = records[index]
+                let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                guard history.start(record, directory: isDirectory) else { throw ModelError.invalid("传输已取消。") }
                 guard RemotePath.safeName(url.lastPathComponent) else { throw ModelError.invalid("文件名包含不支持的字符。") }
                 let name = Self.uniqueName(url.lastPathComponent, existing: names); names.insert(name)
                 let remote = RemotePath.join(target, name)
+                history.remoteDestination(record, remote: remote)
                 if useSCP { guard let scp else { throw ModelError.invalid("SCP 连接不可用。"); }; try scp.run(local: url, remote: remote, upload: true) }
-                else { try backend.upload(url, to: remote, progress: self?.progressCallback(name, token: token) ?? { _, _ in }) }
+                else if let resumable = backend as? ResumableFileBackend, !isDirectory {
+                    let job = ResumableFileTransfer(local: url, remote: remote, upload: true)
+                    self?.registerResume(job, record: record)
+                    try resumable.transfer(job, progress: self?.progressCallback(name, token: token, recordID: record) ?? { _,_ in })
+                } else { try backend.upload(url, to: remote, progress: self?.progressCallback(name, token: token, recordID: record) ?? { _, _ in }) }
+                history.succeed(record)
             }
             return (target, try backend.list(target))
         } completion: { [weak self] in self?.scp = nil; self?.display($0) }
@@ -319,14 +366,24 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         guard connected, !busy, !selected.isEmpty else { return }; let files = selected, parent = directory
         let panel = NSOpenPanel(); panel.title = "从 \(profile?.name ?? "") 下载保存到…"; panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
         guard panel.runPopupModal() == .OK, let destination = panel.url else { return }
+        download(files, from: parent, to: destination)
+    }
+    func download(_ files: [RemoteFileEntry], from parent: String, to destination: URL) {
+        guard connected, !busy, !files.isEmpty else { return }
         let useSCP = sshProfile != nil && transferMode.indexOfSelectedItem == 1
-        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup, rateLimit: transferRateLimit) } } catch { Dialogs.message(error.localizedDescription); return }
-        let scp = self.scp, token = UUID()
-        perform("正在下载…", id: token) { [weak self] backend in
+        let token = UUID(), history = transferHistory
+        let records = files.map { history.enqueue(batch: token, upload: false, transport: historyTransport, local: destination.appendingPathComponent($0.name).path, remote: RemotePath.join(parent, $0.name), directory: $0.directory) }
+        showHistory(true)
+        do { if useSCP, let profile = sshProfile, let workspace { scp = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup, rateLimit: transferRateLimit) } } catch { history.finishBatch(token, error: error); Dialogs.message(error.localizedDescription); return }
+        let scp = self.scp
+        perform("正在下载…", id: token, historyBatch: token) { [weak self] backend in
             var names = Set(try FileManager.default.contentsOfDirectory(atPath: destination.path))
-            for entry in files {
+            for (index, entry) in files.enumerated() {
+                let record = records[index]
+                guard history.start(record) else { throw ModelError.invalid("传输已取消。") }
                 guard RemotePath.safeName(entry.name) else { throw ModelError.invalid("远程文件名无效。") }
                 let name = Self.uniqueName(entry.name, existing: names); names.insert(name); let local = destination.appendingPathComponent(name), remote = RemotePath.join(parent, entry.name)
+                history.destination(record, local: local.path)
                 if useSCP {
                     // Stage SCP in a fresh directory so it cannot overwrite an
                     // existing destination even if another process creates it.
@@ -335,7 +392,12 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
                     defer { try? FileManager.default.removeItem(at: stage) }
                     guard let scp else { throw ModelError.invalid("SCP 连接不可用。"); }; try scp.run(local: stage, remote: remote, upload: false)
                     try FileManager.default.moveItem(at: stage.appendingPathComponent(entry.name), to: local)
-                } else { try backend.download(remote, to: local, progress: self?.progressCallback(name, token: token) ?? { _, _ in }) }
+                } else if let resumable = backend as? ResumableFileBackend, !entry.directory && !entry.symbolicLink && !entry.unknownType {
+                    let job = ResumableFileTransfer(local: local, remote: remote, upload: false)
+                    self?.registerResume(job, record: record)
+                    try resumable.transfer(job, progress: self?.progressCallback(name, token: token, recordID: record) ?? { _,_ in })
+                } else { try backend.download(remote, to: local, progress: self?.progressCallback(name, token: token, recordID: record) ?? { _, _ in }) }
+                history.succeed(record)
             }
             return files.count
         } completion: { [weak self] count in self?.scp = nil; self?.status.stringValue = "已下载 \(count) 个项目到 \(destination.path)" }
@@ -358,12 +420,55 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         guard Dialogs.confirm("删除 \(entries.count) 个远程项目？", text: entries.map(\.name).joined(separator: "\n") + "\n永久删除，不进入废纸篓；目录必须为空。", action: "删除") else { return }
         perform("正在删除…") { backend in for entry in entries { try backend.remove(RemotePath.join(parent, entry.name), directory: entry.directory) }; return (parent, try backend.list(parent)) } completion: { [weak self] in self?.display($0) }
     }
+    private func registerResume(_ job: ResumableFileTransfer, record: UUID) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.closed, self.transferHistory.snapshot.contains(where: { $0.id == record }) else { return }
+            self.resumeJobs[record] = job; self.transferHistory.partialDestination(record, path: job.partialDescription); self.historyView.selectRecord(record)
+        }
+    }
+    private var pausableRecord: UUID? {
+        guard busy, !closed else { return nil }
+        return transferHistory.snapshot.first { $0.batch == operationID && $0.state == .running && $0.total > 0 && $0.bytes < $0.total && resumeJobs[$0.id] != nil }?.id
+    }
+    func canResumeTransfer(_ id: UUID) -> Bool {
+        !busy && !closed && resumeJobs[id] != nil && transferHistory.snapshot.contains { $0.id == id && [.paused,.failed,.cancelled].contains($0.state) }
+    }
+    func pauseTransfer() {
+        guard pausableRecord != nil else { return }
+        transferHistory.pause(operationID)
+        operationID = UUID(); pendingResume = nil; backend?.cancel(); backend = nil; scp?.cancel(); scp = nil
+        busy = false; connected = false; pendingUploads = []; cancelButton.isEnabled = false; progress.stopAnimation(nil)
+        status.stringValue = "已暂停并保留临时文件；选中记录后点击继续。后续未开始项目请重新传输。"
+        historyView.reload(); onStateChanged?()
+    }
+    func resumeTransfer(_ id: UUID) {
+        guard canResumeTransfer(id), let profile else { return }
+        pendingResume = id
+        connect(profile, directory: directory, password: launchPassword, connectionGroup: connectionGroup)
+        historyView.updateActions()
+    }
+    private func runResume(_ id: UUID) {
+        guard let job = resumeJobs[id], let backend = backend as? ResumableFileBackend, !busy, !closed else { return }
+        let token = UUID(), history = transferHistory
+        guard history.requeue(id, batch: token) else { return }
+        showHistory(true); historyView.selectRecord(id)
+        perform("正在校验已传内容并续传…", id: token, historyBatch: token) { [weak self] _ in
+            guard history.start(id) else { throw ModelError.invalid("续传已取消。") }
+            try backend.transfer(job, progress: self?.progressCallback(job.local.lastPathComponent, token: token, recordID: id) ?? { _,_ in })
+            history.succeed(id)
+        } completion: { [weak self] in
+            self?.status.stringValue = "续传完成"; if job.upload { self?.refresh() }
+        }
+    }
     @objc func cancelFileOperation() {
+        let resumable = transferHistory.snapshot.contains { $0.batch == operationID && resumeJobs[$0.id] != nil }
+        pendingResume = nil
+        transferHistory.cancel(operationID)
         operationID = UUID(); backend?.cancel(); backend = nil; scp?.cancel(); scp = nil; busy = false; connected = false; pendingUploads = []
-        cancelButton.isEnabled = false; progress.stopAnimation(nil); status.stringValue = "已取消并断开文件连接，部分文件可能保留；可点击“重连”恢复。"; onStateChanged?()
+        cancelButton.isEnabled = false; progress.stopAnimation(nil); status.stringValue = resumable ? "已取消并保留临时片段；选中记录后可重试续传。" : "已取消并断开文件连接，部分文件可能保留；可点击重连恢复。"; onStateChanged?(); historyView.updateActions()
     }
     func shutdown() {
-        guard !closed else { return }; closed = true; launchPassword = nil; identityID = UUID(); cancelFileOperation(); sharedLease = nil; onStateChanged = nil; onChooseConnection = nil
+        guard !closed else { return }; closed = true; launchPassword = nil; identityID = UUID(); cancelFileOperation(); sharedLease = nil; onStateChanged = nil; onChooseConnection = nil; transferHistory.observe(nil); transferHistory.reset(); resumeJobs.removeAll(); historyView.dispose()
     }
     @objc private func chooseConnection() { onChooseConnection?() }
     @objc private func standaloneSCP() {
@@ -375,12 +480,16 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
         let uploading = response == .alertFirstButtonReturn
         let panel = NSOpenPanel(); panel.canChooseFiles = uploading; panel.canChooseDirectories = true; panel.canCreateDirectories = !uploading
         guard panel.runPopupModal() == .OK, let url = panel.url else { return }
+        let token = UUID(), history = transferHistory
+        let record = history.enqueue(batch: token, upload: uploading, transport: "SCP", local: url.path, remote: remote.stringValue)
+        showHistory(true)
         do {
             try RemotePath.validate(remote.stringValue)
             let task = try SCPTransfer(profile: profile, knownHosts: workspace.knownHostsURL, oneTimePassword: launchPassword, connectionGroup: connectionGroup, rateLimit: transferRateLimit); scp = task
-            let remotePath = remote.stringValue, token = UUID(); operationID = token; busy = true; cancelButton.isEnabled = true; progress.isIndeterminate = true; progress.startAnimation(nil); status.stringValue = "SCP 传输中…"; onStateChanged?()
+            let remotePath = remote.stringValue; operationID = token; busy = true; cancelButton.isEnabled = true; progress.isIndeterminate = true; progress.startAnimation(nil); status.stringValue = "SCP 传输中…"; onStateChanged?()
             worker.async { [weak self] in
                 let result = Result {
+                    guard history.start(record, directory: uploading && ((try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false)) else { throw ModelError.invalid("传输已取消。") }
                     if uploading { try task.run(local: url, remote: remotePath, upload: true) }
                     else {
                         let name = (remotePath as NSString).lastPathComponent
@@ -390,14 +499,17 @@ final class RemoteFileSession: NSViewController, NSTableViewDataSource, NSTableV
                         defer { try? FileManager.default.removeItem(at: stage) }
                         try task.run(local: stage, remote: remotePath, upload: false)
                         let existing = Set(try FileManager.default.contentsOfDirectory(atPath: url.path))
-                        try FileManager.default.moveItem(at: stage.appendingPathComponent(name), to: url.appendingPathComponent(Self.uniqueName(name, existing: existing)))
+                        let local = url.appendingPathComponent(Self.uniqueName(name, existing: existing))
+                        history.destination(record, local: local.path)
+                        try FileManager.default.moveItem(at: stage.appendingPathComponent(name), to: local)
                     }
                 }
+                switch result { case .success: history.succeed(record); case .failure(let error): history.finishBatch(token, error: error) }
                 DispatchQueue.main.async {
                     guard let self, !self.closed, self.operationID == token else { return }; self.busy = false; self.cancelButton.isEnabled = false; self.progress.stopAnimation(nil); self.scp = nil; self.onStateChanged?()
                     switch result { case .success: self.status.stringValue = "SCP 传输完成"; if self.connected { self.refresh() }; case .failure(let error): self.reportError(error) }
                 }
             }
-        } catch { Dialogs.message(error.localizedDescription) }
+        } catch { history.finishBatch(token, error: error); Dialogs.message(error.localizedDescription) }
     }
 }

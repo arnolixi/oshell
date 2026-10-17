@@ -106,6 +106,7 @@ enum FileFeatureTest {
                     let scpOutput = local.appendingPathComponent("scp-download.bin")
                     try scp.run(local: scpOutput, remote: "/scp 'quote' file.bin", upload: false)
                     checks["scpRoundTripAndRepeatedAuthentication"] = try Data(contentsOf: scpOutput) == payload
+                    try ResumableTransferChecks.run(profile: profile, known: known, root: root, checks: &checks)
                     let sftpPartial = local.appendingPathComponent("cancel-sftp.bin")
                     sftp.setTransferRateLimit(1024); let sftpCancelStart = ProcessInfo.processInfo.systemUptime
                     DispatchQueue.global().asyncAfter(deadline:.now()+0.2) { sftp.cancel() }

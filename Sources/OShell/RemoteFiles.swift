@@ -188,7 +188,7 @@ struct SFTPPacket {
             owner: matchingListing?.owner ?? uid.map { String($0) }, group: matchingListing?.group ?? gid.map { String($0) })
     }
 }
-final class SFTPBackend: RemoteFileBackend {
+final class SFTPBackend: ResumableFileBackend {
     private let rateLimiter = FileTransferRateLimiter()
     func setTransferRateLimit(_ bytesPerSecond: Int) { rateLimiter.setLimit(bytesPerSecond) }
     let description: String
@@ -274,6 +274,114 @@ final class SFTPBackend: RemoteFileBackend {
     func mkdir(_ path: String) throws { try RemotePath.validate(path); try status(14) { $0.string(path); $0.u32(0) } }
     func rename(_ source: String, to destination: String) throws { try RemotePath.validate(source); try RemotePath.validate(destination); try status(18) { $0.string(source); $0.string(destination) } }
     func remove(_ path: String, directory: Bool) throws { try RemotePath.validate(path); try status(directory ? 15 : 13) { $0.string(path) } }
+    private func resumeAttributes(_ path: String) throws -> RemoteFileEntry {
+        try RemotePath.validate(path); var response = try request(7) { $0.string(path) } // LSTAT, reject links.
+        guard response.0 == 105 else { throw ModelError.invalid("无法读取续传文件属性。") }
+        return try response.1.attributes(name: (path as NSString).lastPathComponent)
+    }
+    private func resumeAttributes(handle: Data) throws -> RemoteFileEntry {
+        var response = try request(8) { $0.bytes(handle) }
+        guard response.0 == 105 else { throw ModelError.invalid("服务器不支持校验打开的文件句柄，无法安全续传。") }
+        return try response.1.attributes(name: "")
+    }
+    private func resumeRead(_ handle: Data, offset: UInt64, count: Int) throws -> Data {
+        var response = try request(5) { $0.bytes(handle); $0.u64(offset); $0.u32(UInt32(count)) }
+        guard response.0 == 103 else { throw ModelError.invalid("续传校验响应无效。") }
+        let bytes = try response.1.readBytes()
+        guard !bytes.isEmpty, bytes.count <= count else { throw ModelError.invalid("续传文件长度发生变化。") }
+        return bytes
+    }
+    private func requireNewDestination(_ path: String) throws {
+        do { _ = try resumeAttributes(path) }
+        catch let error as SFTPStatus where error.code == 2 { return }
+        throw ModelError.invalid("目标文件已存在，续传不会覆盖它；请重新选择目标或发起新传输。")
+    }
+    func transfer(_ job: ResumableFileTransfer, progress: @escaping (UInt64, UInt64) -> Void) throws {
+        try RemotePath.validate(job.remote)
+        if job.upload { try resumeUpload(job, progress: progress) }
+        else { try resumeDownload(job, progress: progress) }
+    }
+    private func resumeUpload(_ job: ResumableFileTransfer, progress: @escaping (UInt64, UInt64) -> Void) throws {
+        let local = try ResumableFileTransfer.openLocal(job.local, flags: O_RDONLY); defer { try? local.oshellClose() }
+        let stamp = ResumableFileTransfer.LocalStamp(try ResumableFileTransfer.info(local.fileDescriptor))
+        if job.localSource == nil { job.localSource = stamp }
+        try job.checkLocalSource(local)
+        try requireNewDestination(job.remote)
+        let size = UInt64(stamp.size), remote: Data
+        var offset: UInt64 = 0
+        if job.ownsPartial {
+            let before = try ResumableFileTransfer.RemoteStamp(resumeAttributes(job.remotePartial))
+            guard before.size <= size else { throw ModelError.invalid("远程片段大于源文件，已停止续传。") }
+            remote = try handle(3, path: job.remotePartial, flags: 3) // Existing file, never truncate/create.
+            do {
+                let opened = try ResumableFileTransfer.RemoteStamp(resumeAttributes(handle: remote))
+                guard opened == before else { throw ModelError.invalid("远程片段在校验前发生变化。") }
+                while offset < before.size {
+                    let count = try rateLimiter.grant(upTo: Int(min(32768, before.size-offset)))
+                    let bytes = try resumeRead(remote, offset: offset, count: count)
+                    guard try local.oshellRead(upToCount: bytes.count) == bytes else { throw ModelError.invalid("已上传片段与源文件不一致，请重新发起上传；不会修改该片段。") }
+                    offset += UInt64(bytes.count)
+                }
+                guard try ResumableFileTransfer.RemoteStamp(resumeAttributes(handle: remote)) == before else { throw ModelError.invalid("远程片段在校验期间发生变化。") }
+            } catch { try? close(remote); throw error }
+        } else {
+            remote = try handle(3, path: job.remotePartial, flags: 2 | 8 | 32)
+            job.ownsPartial = true
+        }
+        var closed = false; defer { if !closed { try? close(remote) } }
+        progress(offset, size)
+        while offset < size {
+            guard let bytes = try local.oshellRead(upToCount: Int(min(32768,size-offset))), !bytes.isEmpty else { throw ModelError.invalid("本地源文件在传输时缩短。") }
+            try rateLimiter.paced(bytes) { chunk in
+                try status(6) { $0.bytes(remote); $0.u64(offset); $0.bytes(chunk) }
+                offset += UInt64(chunk.count); progress(offset,size)
+            }
+        }
+        try job.checkLocalSource(local)
+        try close(remote); closed = true
+        guard try ResumableFileTransfer.RemoteStamp(resumeAttributes(job.remotePartial)).size == size else { throw ModelError.invalid("远程片段大小变化，未完成最终保存。") }
+        try requireNewDestination(job.remote)
+        // Standard SFTP RENAME refuses an existing destination; do not use the
+        // POSIX-rename extension, which would replace another file.
+        try rename(job.remotePartial, to: job.remote)
+    }
+    private func resumeDownload(_ job: ResumableFileTransfer, progress: @escaping (UInt64, UInt64) -> Void) throws {
+        let source = try ResumableFileTransfer.RemoteStamp(resumeAttributes(job.remote))
+        if job.remoteSource == nil { job.remoteSource = source }
+        guard source == job.remoteSource else { throw ModelError.invalid("远程源文件已变化，请重新发起下载；已有片段保留。") }
+        guard !FileManager.default.fileExists(atPath: job.local.path) else { throw ModelError.invalid("本地目标已存在，续传不会覆盖它。") }
+        let remote = try handle(3,path:job.remote,flags:1); var closed = false; defer { if !closed { try? close(remote) } }
+        guard try ResumableFileTransfer.RemoteStamp(resumeAttributes(handle:remote)) == source else { throw ModelError.invalid("远程源文件在打开时发生变化。") }
+        let local = try ResumableFileTransfer.openLocal(job.localPartial, flags: job.ownsPartial ? O_RDWR : O_RDWR | O_CREAT | O_EXCL)
+        defer { try? local.oshellClose() }
+        let partialInfo = try ResumableFileTransfer.info(local.fileDescriptor)
+        guard partialInfo.st_nlink == 1 else { throw ModelError.invalid("本地临时片段存在其他硬链接，无法安全续传。") }
+        let stamp = ResumableFileTransfer.LocalStamp(partialInfo)
+        if !job.ownsPartial { job.localPartialIdentity = stamp; job.ownsPartial = true }
+        guard stamp.device == job.localPartialIdentity?.device, stamp.inode == job.localPartialIdentity?.inode, UInt64(stamp.size) <= source.size else { throw ModelError.invalid("本地片段被替换或大小异常，已停止续传。") }
+        var offset: UInt64 = 0
+        while offset < UInt64(stamp.size) {
+            let count = try rateLimiter.grant(upTo: Int(min(32768,UInt64(stamp.size)-offset)))
+            let bytes = try resumeRead(remote,offset:offset,count:count)
+            guard try local.oshellRead(upToCount:bytes.count) == bytes else { throw ModelError.invalid("本地片段与远程源文件不一致，请重新发起下载。") }
+            offset += UInt64(bytes.count)
+        }
+        progress(offset,source.size)
+        while offset < source.size {
+            let bytes = try resumeRead(remote,offset:offset,count:min(rateLimiter.readChunkSize,Int(min(UInt64(Int.max),source.size-offset))))
+            try rateLimiter.paced(bytes) { chunk in try local.oshellWrite(contentsOf:chunk); offset += UInt64(chunk.count); progress(offset,source.size) }
+        }
+        guard try ResumableFileTransfer.RemoteStamp(resumeAttributes(handle:remote)) == source,
+              try ResumableFileTransfer.RemoteStamp(resumeAttributes(job.remote)) == source else { throw ModelError.invalid("远程源文件在下载期间发生变化，未完成最终保存。") }
+        try close(remote); closed = true
+        guard fsync(local.fileDescriptor) == 0 else { throw ModelError.invalid("无法写入本地下载文件。") }
+        let check = try ResumableFileTransfer.openLocal(job.localPartial, flags: O_RDONLY); defer { try? check.oshellClose() }
+        let final = ResumableFileTransfer.LocalStamp(try ResumableFileTransfer.info(check.fileDescriptor))
+        guard final.device == stamp.device, final.inode == stamp.inode, UInt64(final.size) == source.size else { throw ModelError.invalid("本地片段在下载期间被替换。") }
+        guard renamex_np(job.localPartial.path, job.local.path, UInt32(RENAME_EXCL)) == 0 else {
+            throw ModelError.invalid("无法安全保存下载目标：目标可能已存在，或磁盘不支持排他重命名。临时片段已保留。")
+        }
+    }
     func upload(_ local: URL, to remote: String, progress: @escaping (UInt64, UInt64) -> Void) throws {
         try upload(local, to: remote, depth: 0, progress: progress)
     }

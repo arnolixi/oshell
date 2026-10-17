@@ -19,11 +19,22 @@ private struct BiometricFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// File-based Keychain holds only an encrypted envelope, never an unprotected
-/// master. The Secure Enclave enforces biometryCurrentSet during key agreement.
-/// Official builds keep a pinned certificate identity across upgrades, without
-/// requiring DP-keychain entitlements. Ad-hoc development builds have separate identities.
+/// Legacy file-keychain reader, retained only for silent migration/cleanup.
+/// A fixed signing requirement does not bypass cdhash partition restrictions.
 final class BiometricKeychainStore: BiometricRecordStore {
+    private static let interactionLock = NSLock()
+    /// kSecUseAuthenticationUIFail alone does not suppress all legacy ACL UI.
+    /// Restore the process setting before any Secure Enclave authentication.
+    private func withoutInteraction<T>(_ body: () throws -> T) throws -> T {
+        Self.interactionLock.lock(); defer { Self.interactionLock.unlock() }
+        var previous = DarwinBoolean(false)
+        guard SecKeychainGetUserInteractionAllowed(&previous) == errSecSuccess,
+              SecKeychainSetUserInteractionAllowed(false) == errSecSuccess else {
+            throw BiometricFailure(message: "无法无提示访问旧指纹记录，请手动解锁后重新启用 Touch ID。")
+        }
+        defer { SecKeychainSetUserInteractionAllowed(previous.boolValue) }
+        return try body()
+    }
     let service: String
     init(service: String = (Bundle.main.bundleIdentifier ?? "app.oshell") + ".touch-id") { self.service = service }
     private func query(_ account: String) -> [String: Any] {
@@ -38,7 +49,7 @@ final class BiometricKeychainStore: BiometricRecordStore {
         // An app update that loses Keychain authorization can be re-enrolled.
         query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = try withoutInteraction { SecItemCopyMatching(query as CFDictionary, &result) }
         guard status == errSecSuccess, let data = result as? Data else {
             throw BiometricFailure(message: "无法读取本机指纹解锁记录（\(status)）。请手动输入主密码，并在设置中重新启用 Touch ID。")
         }
@@ -46,16 +57,16 @@ final class BiometricKeychainStore: BiometricRecordStore {
     }
     func write(_ data: Data, account: String) throws {
         let query = query(account)
-        var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        var status = try withoutInteraction { SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary) }
         if status == errSecItemNotFound {
             var item = query; item[kSecValueData as String] = data
             item[kSecAttrLabel as String] = "OShell Touch ID 主密码（仅本机）"
-            status = SecItemAdd(item as CFDictionary, nil)
+            status = try withoutInteraction { SecItemAdd(item as CFDictionary, nil) }
         }
         guard status == errSecSuccess else { throw BiometricFailure(message: "无法保存本机钥匙串记录（\(status)）；Touch ID 未启用。") }
     }
     func remove(account: String) throws {
-        let status = SecItemDelete(query(account) as CFDictionary)
+        let status = try withoutInteraction { SecItemDelete(query(account) as CFDictionary) }
         guard status == errSecSuccess || status == errSecItemNotFound else { throw BiometricFailure(message: "Touch ID 已停用，但钥匙串记录未能删除（\(status)）。") }
     }
 }
@@ -148,7 +159,7 @@ final class BiometricUnlock: BiometricAuthenticating {
     private let defaults: UserDefaults
     private(set) var scope: String?
     private let preference = "OShell.touchID.bindings.v1"
-    init(store: BiometricRecordStore = BiometricKeychainStore(), defaults: UserDefaults = .standard) { self.store = store; self.defaults = defaults }
+    init(store: BiometricRecordStore = BiometricLocalStore(), defaults: UserDefaults = .standard) { self.store = store; self.defaults = defaults }
     func configure(directory: URL) {
         scope = PlatformDigest.sha256(Data(directory.standardizedFileURL.resolvingSymlinksInPath().path.utf8)).map { String(format: "%02x", $0) }.joined()
     }

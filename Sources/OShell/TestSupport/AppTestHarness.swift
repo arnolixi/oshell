@@ -14,6 +14,12 @@ enum AppTestHarness {
         if CommandLine.arguments.contains("--encrypted-startup-test") { EncryptedStartupTest.install() }
     }
     static func run(_ controller: WorkspaceController) {
+        if CommandLine.arguments.contains("--file-resume-test") { FileResumeUITest.run(controller) }
+        if CommandLine.arguments.contains("--file-transfer-history-test") { FileTransferHistoryTest.run(controller) }
+        if CommandLine.arguments.contains("--session-sidebar-test") { SessionSidebarTest.run(controller) }
+        if CommandLine.arguments.contains("--terminal-selection-test") { TerminalSelectionTest.run(controller) }
+        if CommandLine.arguments.contains("--local-prompt-editing-test") { LocalPromptEditingTest.run(controller) }
+        if CommandLine.arguments.contains("--biometric-local-store-test") { BiometricLocalStoreTest.run(controller) }
         if CommandLine.arguments.contains("--session-clipboard-test") { SessionClipboardTest.run(controller) }
         if CommandLine.arguments.contains("--file-window-keyboard-test") { FileWindowKeyboardTest.run(controller) }
         if CommandLine.arguments.contains("--readme-settings-test") { ReadmeScreenshots.runSettings(controller) }

@@ -35,6 +35,7 @@ extension WorkspaceController {
                 buttons: types.map { ($0, window.standardWindowButton($0)?.isHidden ?? false) })
         }
         isFocusFullscreen = enabled
+        refreshSessionSidebar()
         normalWorkspaceTop?.isActive = !enabled; focusWorkspaceTop?.isActive = enabled
         topToolbar?.isHidden = enabled; topDivider?.isHidden = enabled
         sessionLinkBar.isHidden = enabled || !configuration.sessionLinks.visible

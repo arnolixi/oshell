@@ -41,6 +41,10 @@ final class OShellTerminal: LocalProcessTerminalView {
     override func mouseDown(with event: NSEvent) {
         guard owner?.isShutdown == false, let window else { return }
         if window.firstResponder !== self { _ = window.makeFirstResponder(self) }
+        if event.clickCount == 2 {
+            let settings = TerminalSelectionSettings.load()
+            selection.wordDelimiters = Set(event.modifierFlags.contains(.shift) && !settings.shiftUsesDelimiters ? "" : settings.delimiters)
+        }
         // Keep SwiftTerm's selection, links and remote mouse reporting intact.
         super.mouseDown(with: event)
     }
@@ -522,7 +526,7 @@ final class TerminalPane: NSObject, LocalProcessTerminalViewDelegate {
         }
         beginEndedInput()
         guard var input = endedInput else { return }
-        let result = input.consume(bytes)
+        let result = input.consume(bytes, columns: terminal.getTerminal().cols)
         endedInput = input
         terminal.feed(byteArray: result.echo[...])
         if result.close { pendingLocalInput = []; onCloseRequested?(self) }

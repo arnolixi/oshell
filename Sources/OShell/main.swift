@@ -200,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(view, "刷新标题识别", #selector(WorkspaceController.refreshCurrentHostIdentity))
         view.items.last?.toolTip = "在目标主机的 shell 命令提示符下使用，只读获取当前主机名和 IP。"
         let tools = menu("工具")
+        add(view, "会话列表", #selector(WorkspaceController.toggleSessionSidebar), "b", [.command, .shift])
         add(tools, "链接栏", #selector(WorkspaceController.toggleSessionLinkBar))
         add(tools, "快速命令管理器…", #selector(WorkspaceController.showQuickCommands))
         add(tools, "快速发送栏", #selector(WorkspaceController.toggleQuickSendBar))

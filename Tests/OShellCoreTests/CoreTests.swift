@@ -396,7 +396,7 @@ final class CoreTests {
         XCTAssertTrue(KeyboardShortcut(122, 0).isValid)
         XCTAssertEqual(KeyboardShortcut(3, 13).display, "⌃⇧⌘F")
         XCTAssertEqual(Set(ShortcutKey.all.map(\.code)).count, ShortcutKey.all.count)
-        for action in [ShortcutAction.zoomPane, .nextPane, .previousPane, .quickSwitch, .focusFullscreen] {
+        for action in [ShortcutAction.zoomPane, .nextPane, .previousPane, .quickSwitch, .focusFullscreen, .sessionSidebar] {
             var upgraded = KeyboardShortcuts()
             let binding = action.defaults[0]
             upgraded.overrides[ShortcutAction.newBlank.rawValue] = .init(binding)
@@ -1851,7 +1851,102 @@ extension CoreTests {
         try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "/usr/bin/curl")
         XCTAssertEqual(try LocalToolCommand.parse(link.path + " --version").executable(), link.path)
     }
+    func testLocalPromptReadlineOperations() throws {
+        func seeded() -> EndedSessionInput {
+            var parser = EndedSessionInput(allowsLocalTools: true)
+            for command in ["ssh first.test", "ping second.test", "ssh third.test", "ping 中文👩🏽"] {
+                _ = parser.consume(Array((command + "\r").utf8)[...])
+            }
+            return parser
+        }
+        func result(_ text: String) -> EndedSessionInput.Result {
+            var parser = seeded()
+            return parser.consume(Array(text.utf8)[...])
+        }
+        XCTAssertEqual(result("\u{12}ssh\r").command?.arguments, ["third.test"])
+        XCTAssertEqual(result("\u{12}ssh\u{12}\r").command?.arguments, ["first.test"])
+        XCTAssertEqual(result("\u{12}ssh\u{12}\u{13}\r").command?.arguments, ["third.test"])
+        XCTAssertEqual(result("\u{12}second\u{1b}X\r").command?.arguments, ["second.testX"])
+        XCTAssertEqual(result("\u{12}second\u{1b}[D\u{4}X\r").command?.arguments, ["second.tesX"])
+        XCTAssertEqual(result("\u{12}中文\r").command?.arguments, ["中文👩🏽"])
+        XCTAssertEqual(result("\u{12}sshz\u{7f}\r").command?.arguments, ["third.test"])
+        XCTAssertEqual(result("\u{12}ssh👩🏽‍💻\u{7f}\r").command?.arguments, ["third.test"])
+        XCTAssertEqual(result("ping draft\u{2}\u{12}ssh\u{7}X\r").command?.arguments, ["drafXt"])
+        XCTAssertEqual(result("ping draft\u{12}missing\u{7}\r").command?.arguments, ["draft"])
+        XCTAssertEqual(result("ping draft\u{12}ssh\u{3}ping fresh\r").command?.arguments, ["fresh"])
+        XCTAssertEqual(result("\u{12}ssh\u{1b}\u{e}\u{e}\r").command, nil)
+        let failed = result("\u{12}missing\r")
+        XCTAssertNil(failed.command); XCTAssertTrue(!failed.close)
+        XCTAssertTrue(String(decoding: failed.echo, as: UTF8.self).contains("failed reverse-i-search"))
+        XCTAssertTrue(!result("\u{12}exit\r").close)
+        XCTAssertNil(result("\u{12}ssh\u{12}\u{12}\r").command)
+        var empty = EndedSessionInput(allowsLocalTools: true)
+        XCTAssertNil(empty.consume(Array("\u{12}ssh\r".utf8)[...]).command)
+        XCTAssertEqual(result("ping hello world\u{17}\u{19}\r").command?.arguments, ["hello", "world"])
+        XCTAssertEqual(result("ping hello world\u{17}new\r").command?.arguments, ["hello", "new"])
+        XCTAssertEqual(result("ping hello world\u{1b}b\u{b}\u{19}\r").command?.arguments, ["hello", "world"])
+        XCTAssertEqual(result("ping host\u{15}\u{19}\r").command?.arguments, ["host"])
+        XCTAssertEqual(result("ping 中文👩🏽\u{17}\u{19}\r").command?.arguments, ["中文👩🏽"])
+        XCTAssertEqual(result("ping one two\u{1b}b\u{1b}\u{7f}\r").command?.arguments, ["two"])
+        XCTAssertEqual(result("ping one two\u{1b}[1;5D\u{1b}d\r").command?.arguments, ["one"])
+        XCTAssertEqual(result("host\u{1}ping \u{1b}f.test\r").command?.arguments, ["host.test"])
+        XCTAssertEqual(result("ping acb\u{14}\r").command?.arguments, ["abc"])
+        XCTAssertEqual(result("ping e\u{301}中\u{14}\r").command?.arguments, ["中e\u{301}"])
+        XCTAssertEqual(result("ping host\u{c}\r").command?.arguments, ["host"])
+        XCTAssertTrue(result("\u{4}").close)
+        XCTAssertEqual(result("ping abc\u{1b}[D\u{4}\r").command?.arguments, ["ab"])
+        XCTAssertEqual(result("ss\tserver.test\r").command?.arguments, ["server.test"])
+        XCTAssertEqual(result("pi\t\r").command?.name, "ping")
+        XCTAssertEqual(result("ssh host\t\r").command?.arguments, ["host"])
+        XCTAssertEqual(result("\u{12}ssh\u{c}\r").command?.arguments, ["third.test"])
+        // Chunk boundaries must not change search/Meta/UTF-8 behavior.
+        for text in ["\u{12}ssh\u{12}\r", "\u{12}中文\r", "\u{12}ssh👩🏽‍💻\u{7f}\r", "\u{12}ssh\u{1b}X\r", "ping one two\u{1b}bX\r"] {
+            let expected = result(text).command, bytes = Array(text.utf8)
+            for split in 0...bytes.count {
+                var parser = seeded()
+                let first = parser.consume(bytes.prefix(split))
+                XCTAssertEqual(first.command ?? parser.consume(bytes.dropFirst(split)).command, expected)
+            }
+        }
+        // Cancelling a search must not bypass an oversized-input refusal.
+        XCTAssertNil(result("ping " + String(repeating: "x", count: 8300) + "\u{12}ssh\u{7}\r").command)
+        XCTAssertNil(result("\u{12}" + String(repeating: "x", count: 8300) + "\u{12}\r").command)
+        var clean = seeded()
+        _ = clean.consume(Array("\u{12}missing\u{7}".utf8)[...])
+        XCTAssertEqual(clean.consume(Array("\u{10}\r".utf8)[...]).command?.arguments, ["中文👩🏽"])
+    }
     func testLocalToolInputRequestsAndRemainder() throws {
+        func edited(_ text:String) -> LocalToolCommand? {
+            var parser = EndedSessionInput(allowsLocalTools:true)
+            return parser.consume(Array(text.utf8)[...]).command
+        }
+        XCTAssertEqual(edited("example.test\u{1}ping \r")?.arguments, ["example.test"])
+        XCTAssertEqual(edited("ping \u{1}\u{5}example.test\r")?.name, "ping")
+        XCTAssertEqual(edited("ping ac\u{1b}[Db\r")?.arguments, ["abc"])
+        XCTAssertEqual(edited("ping abc\u{1b}[D\u{1b}[3~d\r")?.arguments, ["abd"])
+        XCTAssertEqual(edited("ping 中文\u{1b}[D\u{7f}国\r")?.arguments, ["国文"])
+        XCTAssertEqual(edited("ping 👩🏽‍💻\u{7f}host\r")?.arguments, ["host"])
+        XCTAssertEqual(edited("ping e\u{301}\u{7f}host\r")?.arguments, ["host"])
+        XCTAssertEqual(edited("abc\u{1b}[Hping \u{1b}[F.test\r")?.arguments, ["abc.test"])
+        var recalled = EndedSessionInput(allowsLocalTools:true)
+        _ = recalled.consume(Array("ping first\r".utf8)[...])
+        _ = recalled.consume(Array("ping second\r".utf8)[...])
+        XCTAssertEqual(recalled.consume(Array("\u{1b}[A\u{1b}[A\r".utf8)[...]).command?.arguments, ["first"])
+        _ = recalled.consume(Array("ping draft\u{10}".utf8)[...])
+        XCTAssertEqual(recalled.consume(Array("\u{e}\r".utf8)[...]).command?.arguments, ["draft"])
+        var historyLimit = EndedSessionInput(allowsLocalTools:true)
+        for i in 0..<105 { _ = historyLimit.consume(Array("ping h\(i)\r".utf8)[...]) }
+        XCTAssertEqual(historyLimit.consume(Array((String(repeating:"\u{1b}[A",count:110)+"\r").utf8)[...]).command?.arguments, ["h5"])
+        var privateHistory = EndedSessionInput(allowsLocalTools:true)
+        XCTAssertNil(privateHistory.consume(Array("\u{1b}[A\r".utf8)[...]).command)
+        for sequence in ["ping ac\u{1b}[Db\r", "ping 中文\u{1}\u{5}\r", "ping family👩🏽‍💻\u{7f}\r"] {
+            let bytes = Array(sequence.utf8), expected = edited(sequence)
+            for split in 0...bytes.count {
+                var parser = EndedSessionInput(allowsLocalTools:true)
+                let first = parser.consume(bytes.prefix(split))
+                XCTAssertEqual(first.command ?? parser.consume(bytes.dropFirst(split)).command, expected)
+            }
+        }
         let command = "curl -H 'X-Test: 中文' http://127.0.0.1/\r\nquit\r"
         let bytes = Array(command.utf8)
         for split in 0...bytes.count {
@@ -1964,6 +2059,7 @@ extension CoreTests {
         try tests.testLaunchEndpointPermissions()
         try tests.testLocalToolParsingAndResolution()
         try tests.testLocalToolInputRequestsAndRemainder()
+        try tests.testLocalPromptReadlineOperations()
         tests.testOutputActivityAcrossChunks()
         try tests.testUnifiedFileSessionMigrationAndArchive()
         try tests.testFileSessionModelValidationAndStorage()
@@ -2003,7 +2099,7 @@ extension CoreTests {
         tests.testInvalidZmodemHeadersRemainOrdinaryOutput()
         try tests.testLoggerFlushesEveryAcceptedChunk()
         tests.testCancellationDropsInFlightBytesAcrossEveryBoundary()
-        if failures.isEmpty { print("PASS: 68 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
+        if failures.isEmpty { print("PASS: 69 core groups, including FileZilla launch/XML/IPC, remote host/IP probing, echo framing, dynamic hostname parsing, SSH locale isolation, master rotation, archive import/export, private atomic persistence, connection options, proxy credential isolation, directory migration, keepalive, encrypted credentials and ZFIN/OO regression") }
         else { failures.forEach { print("FAIL: \($0)") }; exit(1) }
     }
 }
