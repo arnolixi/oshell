@@ -20,7 +20,8 @@ final class RemoteFileWindow: NSWindowController, NSWindowDelegate {
     var hasActiveOperation: Bool { sessions.contains(where: \.hasActiveOperation) }
     init(workspace: WorkspaceController, backendFactory: ((SessionProfile) throws -> RemoteFileBackend)? = nil) {
         self.workspace = workspace; self.backendFactory = backendFactory
-        let window = PopupWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 650), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        let window = PopupWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 650), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.attachesToOwner = false
         window.title = "文件管理 · SFTP / FTP"; window.minSize = NSSize(width: 800, height: 490); window.isReleasedWhenClosed = false
         super.init(window: window); window.delegate = self; window.center()
         let root = window.contentView!
@@ -95,6 +96,9 @@ final class RemoteFileWindow: NSWindowController, NSWindowDelegate {
             guard let self, !self.closed else { return }
             self.showWindow(nil); self.window?.makeKeyAndOrderFront(nil); self.open(profile)
         }
+    }
+    func windowDidBecomeKey(_ notification: Notification) {
+        if let workspace { workspace.windowCoordinator?.activate(workspace) }
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         !hasActiveOperation || Dialogs.confirm("关闭文件管理？", text: "将取消所有文件标签中的连接和传输。", action: "关闭")

@@ -102,7 +102,19 @@ final class SessionFullscreenTest {
         let files = RemoteFileWindow(workspace: workspace)
         for (label, controller) in [("commands", commands as NSWindowController), ("highlights", highlights), ("files", files)] {
             controller.showWindow(nil)
-            verifyAuxiliary(controller.window!, label, parent: owner)
+            if label == "files", let fileWindow = controller.window {
+                checks["filesIndependentInFullscreen"] = fileWindow.parent == nil && fileWindow.level == .normal
+                checks["filesSameFullscreenSpace"] = fileWindow.isVisible && fileWindow.isOnActiveSpace && owner.isOnActiveSpace
+                checks["filesAuxiliaryBehavior"] = fileWindow.collectionBehavior.contains(.fullScreenAuxiliary) && !fileWindow.collectionBehavior.contains(.canJoinAllSpaces)
+                owner.makeKeyAndOrderFront(nil)
+                let ordered = NSApp.orderedWindows
+                if let mainIndex = ordered.firstIndex(of:owner), let fileIndex = ordered.firstIndex(of:fileWindow) {
+                    checks["fullscreenTerminalCanCoverFiles"] = mainIndex < fileIndex
+                } else { checks["fullscreenTerminalCanCoverFiles"] = false }
+                checks["filesRemainInFullscreenSpace"] = fileWindow.isOnActiveSpace && owner.isOnActiveSpace
+                controller.showWindow(nil)
+                checks["filesReopenStillIndependent"] = fileWindow.parent == nil && fileWindow.isOnActiveSpace
+            } else { verifyAuxiliary(controller.window!, label, parent: owner) }
             let alert = PopupAlert(); alert.messageText = "嵌套窗口测试"; alert.addButton(withTitle: "取消")
             let timer = modalTimer { [self] in
                 verifyAuxiliary(alert.window, label + "Alert", parent: controller.window!)
@@ -110,7 +122,14 @@ final class SessionFullscreenTest {
             }
             _ = alert.runModal(); timer.invalidate()
             checks[label + "AlertDetached"] = alert.window.parent == nil
-            _ = PopupKeyboard.dismiss(window: controller.window!)
+            if label == "files", let fileWindow = controller.window {
+                checks["filesEscapeHandled"] = PopupKeyboard.dismiss(window:fileWindow)
+                checks["filesEscapeMinimizes"] = fileWindow.isMiniaturized && (controller as? RemoteFileWindow)?.sessions.count == 1
+                controller.showWindow(nil)
+                checks["filesRestoredAfterEscape"] = !fileWindow.isMiniaturized && fileWindow.isOnActiveSpace
+                let close = NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:.command,timestamp:0,windowNumber:fileWindow.windowNumber,context:nil,characters:"w",charactersIgnoringModifiers:"w",isARepeat:false,keyCode:13)!
+                checks["filesCommandWHandled"] = fileWindow.performKeyEquivalent(with:close)
+            } else { _ = PopupKeyboard.dismiss(window: controller.window!) }
             checks[label + "Closed"] = !controller.window!.isVisible && controller.window!.parent == nil
         }
         owner.makeKeyAndOrderFront(nil)

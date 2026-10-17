@@ -65,6 +65,27 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         var navigateParent: ((Int) -> Bool)?
         var activateSelection: (() -> Void)?
         var renameSelection: (() -> Void)?
+        var copyConfigurations: (() -> Void)?
+        var pasteConfigurations: (() -> Void)?
+        var canCopyConfigurations: (() -> Bool)?
+        var canPasteConfigurations: (() -> Bool)?
+        @objc func copy(_ sender: Any?) { copyConfigurations?() }
+        @objc func paste(_ sender: Any?) { pasteConfigurations?() }
+        override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+            if item.action == #selector(copy(_:)) { return canCopyConfigurations?() == true }
+            if item.action == #selector(paste(_:)) { return canPasteConfigurations?() == true }
+            return super.validateUserInterfaceItem(item)
+        }
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            if window?.firstResponder === self, event.modifierFlags.intersection([.command,.control,.option,.shift]) == .command {
+                switch event.charactersIgnoringModifiers?.lowercased() {
+                case "c": copy(nil); return true
+                case "v": paste(nil); return true
+                default: break
+                }
+            }
+            return super.performKeyEquivalent(with:event)
+        }
         override func keyDown(with event: NSEvent) {
             if event.keyCode == 120, event.modifierFlags.intersection([.command,.option,.control,.shift]).isEmpty { renameSelection?(); return }
             if [36, 76].contains(event.keyCode), event.modifierFlags.intersection([.command, .option, .control]).isEmpty { activateSelection?(); return }
@@ -198,6 +219,10 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
         table.target = self; table.doubleAction = #selector(openSelection)
         table.activateSelection = { [weak self] in self?.activateSelection() }
         table.renameSelection = { [weak self] in self?.beginInlineRename() }
+        table.copyConfigurations = { [weak self] in self?.copySessionConfigurations() }
+        table.pasteConfigurations = { [weak self] in self?.pasteSessionConfigurations() }
+        table.canCopyConfigurations = { [weak self] in self?.canCopySessionConfigurations == true }
+        table.canPasteConfigurations = { [weak self] in self?.canPasteSessionConfigurations == true }
         table.makeContextMenu = { [weak self] row in self?.contextMenu(for: row) }
         table.navigateParent = { [weak self] row in
             guard let self, self.rows.indices.contains(row), case .parent = self.rows[row] else { return false }
@@ -232,6 +257,9 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
             let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
             item.target = self; item.isEnabled = enabled
         }
+        add("复制会话配置", #selector(copySessionConfigurations), enabled: canCopySessionConfigurations)
+        add("粘贴会话配置", #selector(pasteSessionConfigurations), enabled: canPasteSessionConfigurations)
+        menu.addItem(.separator())
         if table.selectedRowIndexes.count > 1 {
             add("连接（\(selectedProfiles.count)）", #selector(connect), enabled: !selectedProfiles.isEmpty)
             add("移动到…", #selector(move), enabled: selectedMoveRows.count == table.selectedRowIndexes.count)
@@ -568,6 +596,35 @@ final class SessionManager: NSWindowController, NSTableViewDataSource, NSTableVi
     @objc private func duplicateSession() {
         guard let profile = selectedProfile, let copy = workspace?.duplicateSavedSession(profile.id) else { return }
         reveal(copy)
+    }
+    private var canCopySessionConfigurations: Bool {
+        workspace?.isSecurityUnlocked == true && !selectedProfiles.isEmpty && selectedProfiles.count == table.selectedRowIndexes.count
+    }
+    private var canPasteSessionConfigurations: Bool {
+        guard let workspace, workspace.isSecurityUnlocked else { return false }
+        return SessionConfigurationClipboard.profiles(scope:workspace.store.url) != nil
+    }
+    @objc func copySessionConfigurations() {
+        guard let workspace, canCopySessionConfigurations else { return }
+        let config = PasswordVault.shared.currentCredentials(in:workspace.configuration)
+        let ids = selectedProfiles.map(\.id)
+        let profiles = ids.compactMap { id in config.profiles.first { $0.id == id } }
+        guard profiles.count == ids.count, SessionConfigurationClipboard.copy(profiles,scope:workspace.store.url) else { return }
+        resultStatus.stringValue = "已复制 \(profiles.count) 个会话配置；进入目标目录后按 ⌘V 粘贴。"
+    }
+    @objc func pasteSessionConfigurations() {
+        guard let workspace, workspace.isSecurityUnlocked,
+              let sources = SessionConfigurationClipboard.profiles(scope:workspace.store.url),
+              let copies = workspace.pasteSessionConfigurations(sources,into:currentDirectory) else { return }
+        search.stringValue = ""; kindFilter.selectItem(at:0); reload()
+        let ids = Set(copies.map(\.id))
+        let selected = IndexSet(rows.indices.filter { index in
+            if case .session(let profile) = rows[index] { return ids.contains(profile.id) }; return false
+        })
+        table.selectRowIndexes(selected,byExtendingSelection:false)
+        if let first = selected.first { table.scrollRowToVisible(first) }
+        window?.makeFirstResponder(table)
+        resultStatus.stringValue = "已粘贴 \(copies.count) 个会话配置到 \(SessionDirectory.display(currentDirectory))。"
     }
     private func askChildName(_ title: String, name: String, parent: String) -> String? {
         let alert = PopupAlert(); alert.messageText = title

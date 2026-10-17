@@ -35,8 +35,10 @@ enum PopupPresentation {
         applyAppearance(owner?.appearance ?? ApplicationAppearance.appearance, to: window)
         window.collectionBehavior.subtract([.fullScreenPrimary, .fullScreenNone, .canJoinAllSpaces])
         window.collectionBehavior.formUnion([.fullScreenAuxiliary, .moveToActiveSpace])
+        let attachesToOwner = (window as? PopupWindow)?.attachesToOwner ?? true
+        if !attachesToOwner { window.parent?.removeChildWindow(window) }
         guard let owner, owner !== window, !isDescendant(owner, of: window) else { return }
-        let reposition = !window.isVisible || window.parent !== owner
+        let reposition = (!window.isVisible && !window.isMiniaturized) || (attachesToOwner && window.parent !== owner)
         if window.parent !== owner { window.parent?.removeChildWindow(window) }
         if reposition {
             // Fixed-size settings/alerts can be larger than the invoking window.
@@ -50,7 +52,7 @@ enum PopupPresentation {
             let y = max(area.minY, min(owner.frame.midY - size.height / 2, area.maxY - size.height))
             window.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size).integral, display: false)
         }
-        if window.parent !== owner { owner.addChildWindow(window, ordered: .above) }
+        if attachesToOwner && window.parent !== owner { owner.addChildWindow(window, ordered: .above) }
     }
     static func detach(_ window: NSWindow) {
         for child in window.childWindows ?? [] where child is NSColorPanel {
@@ -78,8 +80,12 @@ final class PopupColorWell: NSColorWell {
 
 /// Marks an auxiliary window. Esc never closes the main terminal window.
 final class PopupWindow: NSWindow {
+    // Modeless file browsers share the current Space but must not remain above
+    // their workspace. Dialogs retain the default child-window behavior.
+    var attachesToOwner = true
     func present(over owner: NSWindow) {
         PopupPresentation.prepare(self, over: owner)
+        if isMiniaturized { deminiaturize(nil) }
         makeKeyAndOrderFront(nil)
     }
     override func orderOut(_ sender: Any?) {
@@ -96,6 +102,7 @@ final class PopupWindow: NSWindow {
     }
     var onFind: (() -> Void)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if PopupKeyboard.closeFileWindow(with: event, in: self) { return true }
         if attachedSheet == nil, NSApp.modalWindow == nil,
            ShortcutRuntime.matches(.find, event: event), let onFind { onFind(); return true }
         return super.performKeyEquivalent(with: event)
@@ -149,10 +156,21 @@ enum PopupKeyboard {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             guard let window = event.window ?? NSApp.keyWindow, window === NSApp.keyWindow else { return event }
             if let recorder = ShortcutRecorder.active, recorder.window === window, recorder.isRecording { return event }
+            if closeFileWindow(with: event, in: window) { return nil }
             if selectAllPassword(with: event, in: window) { return nil }
             guard isEscape(keyCode: event.keyCode, modifiers: event.modifierFlags) else { return event }
             return dismiss(window: window) ? nil : event
         }
+    }
+    /// Intercept before the workspace's Cmd+W menu action can close an SSH pane.
+    @discardableResult static func closeFileWindow(with event: NSEvent, in window: NSWindow) -> Bool {
+        guard event.type == .keyDown, window.isKeyWindow,
+              window.windowController is RemoteFileWindow,
+              event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command,
+              event.charactersIgnoringModifiers?.lowercased() == "w",
+              trackingMenus.isEmpty, window.attachedSheet == nil, NSApp.modalWindow == nil else { return false }
+        window.performClose(nil)
+        return true // Also consume the shortcut when a transfer-close prompt is cancelled.
     }
     /// Ctrl+A is a convenience alias only for active password editors. Keep
     /// Emacs/readline Ctrl+A behavior in terminals and other text inputs.
@@ -181,6 +199,11 @@ enum PopupKeyboard {
         if let handled = (window.windowController as? SessionManager)?.inlineRenameEscape() { return handled }
         if let cancellation = alerts[ObjectIdentifier(window)]?.1 { cancellation(); return true }
         if let panel = window as? NSSavePanel { panel.cancel(nil); return true }
+        if window.windowController is RemoteFileWindow {
+            if let editor = window.firstResponder as? NSTextView, editor.hasMarkedText() { return false }
+            window.performMiniaturize(nil)
+            return true
+        }
         if window is PopupWindow { window.performClose(nil); return true }
         return false
     }

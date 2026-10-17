@@ -5,7 +5,9 @@
 import argparse, json, os, plistlib, signal, subprocess, tempfile, uuid
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
-CASES = {'readme-settings': 'OSHELL_README_SETTINGS_OUTPUT',
+CASES = {'session-clipboard':'OSHELL_SESSION_CLIPBOARD_OUTPUT',
+ 'file-window-keyboard':'OSHELL_FILE_WINDOW_KEYS_OUTPUT',
+ 'readme-settings': 'OSHELL_README_SETTINGS_OUTPUT',
  'readme-screenshots': 'OSHELL_README_OUTPUT',
  'appearance': 'OSHELL_APPEARANCE_OUTPUT',
  'arrangement-scroll': 'OSHELL_ARRANGEMENT_SCROLL_OUTPUT',

@@ -4,8 +4,9 @@
 import AppKit
 import OShellCore
 
-private final class TabTestBackend: RemoteFileBackend {
+final class TabTestBackend: RemoteFileBackend {
     let description: String
+    private let timeout: TimeInterval
     private let lock = NSLock(), gate = DispatchSemaphore(value: 0)
     private var cancelled = false, uploading = false
     private var rate = 0
@@ -13,7 +14,7 @@ private final class TabTestBackend: RemoteFileBackend {
     func setTransferRateLimit(_ bytesPerSecond: Int) { lock.lock(); rate = bytesPerSecond; lock.unlock() }
     var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
     var uploadStarted: Bool { lock.lock(); defer { lock.unlock() }; return uploading }
-    init(_ name: String) { description = name }
+    init(_ name: String, timeout: TimeInterval = 8) { description = name; self.timeout = timeout }
     func connect() throws {}
     func canonicalPath(_ path: String) throws -> String { path }
     func list(_ path: String) throws -> [RemoteFileEntry] {
@@ -22,7 +23,7 @@ private final class TabTestBackend: RemoteFileBackend {
     }
     func upload(_ local: URL, to remote: String, progress: @escaping (UInt64, UInt64) -> Void) throws {
         lock.lock(); uploading = true; lock.unlock(); progress(1, 10)
-        _ = gate.wait(timeout: .now() + 8)
+        _ = gate.wait(timeout: .now() + timeout)
         if isCancelled { throw ModelError.invalid("已取消传输") }
         progress(10, 10)
     }
@@ -113,6 +114,21 @@ enum FileTabsTest {
         manager.showWindow(nil); manager.open(sftp, directory: "/one"); let first = manager.selectedSession!
         manager.open(ftp, directory: "/two"); let second = manager.selectedSession!
         wait("bothConnected", { first.connected && second.connected }) {
+            if let fileWindow = manager.window, let terminalWindow = controller.window {
+                func above(_ a:NSWindow,_ b:NSWindow)->Bool {
+                    let ordered = NSApp.orderedWindows
+                    guard let left = ordered.firstIndex(of:a), let right = ordered.firstIndex(of:b) else { return false }
+                    return left < right
+                }
+                checks["fileWindowIsIndependent"] = fileWindow.parent == nil && fileWindow.level == .normal
+                let position = fileWindow.frame
+                terminalWindow.makeKeyAndOrderFront(nil)
+                checks["terminalCanCoverFileWindow"] = above(terminalWindow,fileWindow) && fileWindow.isVisible
+                fileWindow.makeKeyAndOrderFront(nil)
+                checks["fileWindowCanReturnToFront"] = above(fileWindow,terminalWindow) && fileWindow.parent == nil
+                checks["fileWindowReactivationKeepsPosition"] = fileWindow.frame == position
+                checks["windowSwitchPreservesConnections"] = first.connected && second.connected && !backends[0].isCancelled && !backends[1].isCancelled
+            }
             manager.window?.contentView?.layoutSubtreeIfNeeded(); manager.select(first); first.view.layoutSubtreeIfNeeded()
             let table = descendants(first.view).compactMap { $0 as? NSTableView }.first!
             for (id, value) in [("permissions", "-rw-r----- (0640)"), ("owner", "deploy"), ("group", "operators")] {

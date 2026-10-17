@@ -12,3 +12,10 @@ python3 scripts/test-sync-interop.py --native-source /path/to/OShell
 ```
 
 发布时记录两个项目的提交号、规范修订号及字段合同 SHA-256。共享配置读 v1/v2、写 v2；未知字段拒绝应用和回写。字段合同源为 oshell-desktop 的 `internal/core/shared_configuration_schema.json`，Swift 文件通过 `scripts/sync-configuration-contract.py` 生成；禁止手工维护两套定义。所有参与同一同步目标的节点都要升级后再启用新版同步。已有未提交的其他功能修改不属于协议文档变更。
+
+## 0.2.75 发布验证基线
+
+- OShell：`v0.2.75`，协议实现提交 `0aa1a047fc4aa251f36290cb306d86d05de2ddd5`。
+- OShell Desktop：`89aa37cd88a0362b05b2329e28c72543984c1c3d`。
+- 规范修订：2.0（2026-10-17）。
+- 字段合同 SHA-256：`9a82a335e40d315f9a54455c874f87bcaea0fe3551a69770d67955f439261657`。

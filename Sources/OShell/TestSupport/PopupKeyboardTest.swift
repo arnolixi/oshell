@@ -34,10 +34,7 @@ enum PopupKeyboardTest {
         if let window = controller.commandManager?.window { checks["quickCommandManagerCloses"] = PopupKeyboard.dismiss(window: window) && !window.isVisible }
         controller.showHighlights()
         if let window = controller.highlightManager?.window { checks["highlightManagerCloses"] = PopupKeyboard.dismiss(window: window) && !window.isVisible }
-        let files = RemoteFileWindow(workspace: controller); var cleanup = false
-        files.onClosed = { cleanup = true }; files.showWindow(nil)
-        checks["fileManagerCloses"] = PopupKeyboard.dismiss(window: files.window!) && !files.window!.isVisible
-        checks["fileManagerRunsCloseCleanup"] = cleanup
+        // File-window minimize/close and transfer lifetime are covered by FileWindowKeyboardTest.
 
         func cancel(_ alert: PopupAlert, beforeDismiss: (() -> Void)? = nil) -> NSApplication.ModalResponse {
             var routed = false
